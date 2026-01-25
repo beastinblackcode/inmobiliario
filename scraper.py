@@ -416,6 +416,7 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
             elif 'exterior' in text.lower():
                 orientation = 'Exterior'
         
+        
         # Determine seller type
         seller_type = 'Particular'
         if article.find('span', class_='logo-branding') or article.find('picture', class_='logo-branding'):
@@ -423,6 +424,27 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
         
         # Check if new development
         is_new_development = bool(article.find('span', class_='item-new-construction'))
+        
+        # Extract partial description (truncated text from listing card)
+        description = None
+        description_selectors = [
+            ('div', {'class': 'item-description'}),
+            ('p', {'class': 'item-description'}),
+            ('div', {'class': 'description'}),
+            ('span', {'class': 'item-description'}),
+            ('div', {'class': 'item-detail-char'}),
+        ]
+        
+        for tag, attrs in description_selectors:
+            desc_elem = article.find(tag, attrs)
+            if desc_elem:
+                description = desc_elem.get_text(strip=True)
+                if description and len(description) > 10:
+                    # Clean up and limit length
+                    description = description.strip()
+                    if len(description) > 500:
+                        description = description[:500] + '...'
+                    break
         
         return {
             'listing_id': listing_id,
@@ -436,7 +458,8 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
             'floor': floor,
             'orientation': orientation,
             'seller_type': seller_type,
-            'is_new_development': is_new_development
+            'is_new_development': is_new_development,
+            'description': description
         }
         
     except Exception as e:

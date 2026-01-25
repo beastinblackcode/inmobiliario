@@ -265,7 +265,8 @@ def update_listing(listing_id: str, data: Dict) -> bool:
                     size_sqm = ?,
                     floor = ?,
                     orientation = ?,
-                    seller_type = ?
+                    seller_type = ?,
+                    description = ?
                 WHERE listing_id = ?
             """, (
                 today,
@@ -276,6 +277,7 @@ def update_listing(listing_id: str, data: Dict) -> bool:
                 data.get('floor'),
                 data.get('orientation'),
                 data.get('seller_type'),
+                data.get('description'),
                 listing_id
             ))
             return True
