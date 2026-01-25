@@ -16,8 +16,12 @@ DATABASE_PATH = "real_estate.db"
 
 def is_streamlit_cloud():
     """Detect if running on Streamlit Cloud."""
-    return os.getenv("STREAMLIT_SHARING_MODE") is not None or \
-           os.getenv("STREAMLIT_RUNTIME_ENV") == "cloud"
+    try:
+        import streamlit as st
+        # If secrets exist and contain database config, we're on cloud
+        return "database" in st.secrets
+    except:
+        return False
 
 
 def download_database_from_cloud():
