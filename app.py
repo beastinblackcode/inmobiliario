@@ -71,15 +71,32 @@ def check_password():
         password = st.session_state.get("password", "")
         
         # Check credentials from secrets
-        if ("auth" in st.secrets and
-            username == st.secrets["auth"]["username"] and 
-            password == st.secrets["auth"]["password"]):
-            st.session_state["password_correct"] = True
-            # Clear credentials from session state
-            if "username" in st.session_state:
-                del st.session_state["username"]
-            if "password" in st.session_state:
-                del st.session_state["password"]
+        if "auth" in st.secrets and "users" in st.secrets["auth"]:
+            # Multi-user mode: check if username exists and password matches
+            users = st.secrets["auth"]["users"]
+            if username in users and users[username] == password:
+                st.session_state["password_correct"] = True
+                st.session_state["current_user"] = username
+                # Clear credentials from session state
+                if "username" in st.session_state:
+                    del st.session_state["username"]
+                if "password" in st.session_state:
+                    del st.session_state["password"]
+            else:
+                st.session_state["password_correct"] = False
+        elif "auth" in st.secrets:
+            # Legacy single-user mode (backward compatibility)
+            if (username == st.secrets["auth"].get("username", "") and 
+                password == st.secrets["auth"].get("password", "")):
+                st.session_state["password_correct"] = True
+                st.session_state["current_user"] = username
+                # Clear credentials from session state
+                if "username" in st.session_state:
+                    del st.session_state["username"]
+                if "password" in st.session_state:
+                    del st.session_state["password"]
+            else:
+                st.session_state["password_correct"] = False
         else:
             st.session_state["password_correct"] = False
 
@@ -182,6 +199,10 @@ def main():
         st.sidebar.caption("☁️ Deployed on Streamlit Cloud")
     else:
         st.sidebar.caption("💻 Running locally")
+    
+    # Show logged-in user
+    if "current_user" in st.session_state:
+        st.sidebar.caption(f"👤 Usuario: {st.session_state['current_user']}")
 
     
     # Load data
