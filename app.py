@@ -64,7 +64,49 @@ def load_data(status, distritos, min_price, max_price, seller_type):
     return pd.DataFrame(listings)
 
 
+def check_password():
+    """Returns True if user entered correct password."""
+    def password_entered():
+        username = st.session_state.get("username", "")
+        password = st.session_state.get("password", "")
+        
+        # Check credentials from secrets
+        if ("auth" in st.secrets and
+            username == st.secrets["auth"]["username"] and 
+            password == st.secrets["auth"]["password"]):
+            st.session_state["password_correct"] = True
+            # Clear credentials from session state
+            if "username" in st.session_state:
+                del st.session_state["username"]
+            if "password" in st.session_state:
+                del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    # Check if password is already validated
+    if "password_correct" not in st.session_state:
+        # First run, show login form
+        st.markdown("## 🔐 Acceso al Dashboard")
+        st.markdown("Por favor, introduce tus credenciales para acceder.")
+        st.text_input("Usuario", key="username", autocomplete="username")
+        st.text_input("Contraseña", type="password", key="password", autocomplete="current-password")
+        st.button("Iniciar Sesión", on_click=password_entered, type="primary")
+        return False
+    elif not st.session_state["password_correct"]:
+        # Password incorrect, show error
+        st.markdown("## 🔐 Acceso al Dashboard")
+        st.text_input("Usuario", key="username", autocomplete="username")
+        st.text_input("Contraseña", type="password", key="password", autocomplete="current-password")
+        st.button("Iniciar Sesión", on_click=password_entered, type="primary")
+        st.error("😕 Usuario o contraseña incorrectos")
+        return False
+    else:
+        # Password correct
+        return True
+
+
 def calculate_days_on_market(row):
+
     """Calculate days between first and last seen dates."""
     try:
         first = datetime.fromisoformat(row['first_seen_date'])
@@ -75,6 +117,10 @@ def calculate_days_on_market(row):
 
 
 def main():
+    # Authentication check
+    if not check_password():
+        st.stop()
+    
     # Initialize database (download from cloud if needed)
     if not download_database_from_cloud():
         st.error("❌ No se pudo cargar la base de datos. Por favor, contacta al administrador.")
