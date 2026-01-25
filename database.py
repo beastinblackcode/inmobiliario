@@ -27,9 +27,18 @@ def download_database_from_cloud():
     """
     # Only download if on Streamlit Cloud and DB doesn't exist
     if not is_streamlit_cloud():
+        # Running locally - check if DB exists
+        if not Path(DATABASE_PATH).exists():
+            import streamlit as st
+            st.error(f"❌ Database file not found: {DATABASE_PATH}")
+            st.info("💡 Run the scraper first: `python scraper.py`")
+            return False
         return True
     
+    # On Streamlit Cloud
     if Path(DATABASE_PATH).exists():
+        import streamlit as st
+        st.info("✅ Database already exists, using cached version")
         return True
     
     try:
@@ -39,30 +48,48 @@ def download_database_from_cloud():
         # Get Google Drive file ID from secrets
         if "database" not in st.secrets:
             st.error("❌ Database configuration missing in secrets")
+            st.info("💡 Add Google Drive file ID in Streamlit Cloud Settings → Secrets")
+            st.code("""[database]
+google_drive_file_id = "YOUR_FILE_ID_HERE" """, language="toml")
             return False
         
         file_id = st.secrets["database"]["google_drive_file_id"]
         
         if not file_id or file_id == "YOUR_GOOGLE_DRIVE_FILE_ID_HERE":
             st.error("❌ Please configure Google Drive file ID in Streamlit secrets")
+            st.info("💡 Get file ID from Google Drive share link")
             return False
         
         # Download from Google Drive
-        st.info("📥 Downloading database from Google Drive...")
+        st.info(f"📥 Downloading database from Google Drive...")
+        st.caption(f"File ID: {file_id[:10]}...")
         url = f"https://drive.google.com/uc?id={file_id}"
         
-        output = gdown.download(url, DATABASE_PATH, quiet=False)
-        
-        if output:
-            st.success("✅ Database downloaded successfully")
-            return True
-        else:
-            st.error("❌ Failed to download database")
+        try:
+            output = gdown.download(url, DATABASE_PATH, quiet=False)
+            
+            if output and Path(DATABASE_PATH).exists():
+                file_size = Path(DATABASE_PATH).stat().st_size / (1024 * 1024)  # MB
+                st.success(f"✅ Database downloaded successfully ({file_size:.1f} MB)")
+                return True
+            else:
+                st.error("❌ Failed to download database")
+                st.info("💡 Check that the Google Drive file is shared publicly")
+                st.info(f"💡 Try this URL in your browser: {url}")
+                return False
+        except Exception as download_error:
+            st.error(f"❌ Download error: {str(download_error)}")
+            st.info("💡 Possible issues:")
+            st.info("  - File ID is incorrect")
+            st.info("  - File is not shared publicly")
+            st.info("  - File is too large")
             return False
             
     except Exception as e:
         import streamlit as st
         st.error(f"❌ Error downloading database: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return False
 
 
