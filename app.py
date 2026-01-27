@@ -704,6 +704,10 @@ def main():
     st.markdown("#### ⏱️ Tiempo Medio de Venta por Distrito")
     sold_df = df[(df['status'] == 'sold_removed') & (df['distrito'].notna())].copy()
     
+    # Filter out initial historical data (properties that were already gone on first scrape)
+    # Only include properties first seen AFTER 2026-01-14 (real sales during tracking period)
+    sold_df = sold_df[sold_df['first_seen_date'] > '2026-01-14'].copy()
+    
     if not sold_df.empty and len(sold_df) > 10:
         # Calculate days on market for sold properties
         sold_df['days_on_market_calc'] = sold_df.apply(
