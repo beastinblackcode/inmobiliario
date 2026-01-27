@@ -510,6 +510,9 @@ def main():
             ["Todos"] + sorted(df[df['distrito'].notna()]['distrito'].unique().tolist())
         )
     
+    # Import analytics function at the beginning
+    from analytics import get_price_per_sqm_evolution
+    
     # Filter data based on selection
     evolution_df = df[df['status'] == 'active'].copy()
     
@@ -524,9 +527,6 @@ def main():
         period_code = 'D'  # Daily
     else:
         period_code = 'D'  # Daily for all data
-    
-    # Import analytics function
-    from analytics import get_price_per_sqm_evolution
     
     # Get evolution data
     evolution_data = get_price_per_sqm_evolution(
