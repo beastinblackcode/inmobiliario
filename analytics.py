@@ -54,6 +54,58 @@ def get_price_trends(df: pd.DataFrame, period: str = 'W') -> pd.DataFrame:
     return trends
 
 
+def get_price_per_sqm_evolution(df: pd.DataFrame, period: str = 'D', distrito: Optional[str] = None) -> pd.DataFrame:
+    """
+    Calculate price per m² evolution over time.
+    
+    Args:
+        df: DataFrame with listings
+        period: Pandas period ('D'=daily, 'W'=weekly, 'M'=monthly)
+        distrito: Optional filter for specific distrito
+        
+    Returns:
+        DataFrame with date, avg_price_sqm, median_price_sqm, count
+    """
+    if df.empty or 'first_seen_date' not in df.columns:
+        return pd.DataFrame()
+    
+    # Filter by distrito if specified
+    df_copy = df.copy()
+    if distrito and distrito != 'Todos':
+        df_copy = df_copy[df_copy['distrito'] == distrito]
+    
+    # Convert to datetime
+    df_copy['date'] = pd.to_datetime(df_copy['first_seen_date'])
+    
+    # Calculate price_per_sqm if not present
+    if 'price_per_sqm' not in df_copy.columns:
+        df_copy['price_per_sqm'] = df_copy.apply(
+            lambda row: row['price'] / row['size_sqm'] 
+            if pd.notna(row.get('size_sqm')) and row.get('size_sqm') > 0 
+            else None,
+            axis=1
+        )
+    
+    # Filter valid data
+    df_copy = df_copy[df_copy['price_per_sqm'].notna() & (df_copy['price_per_sqm'] > 0)]
+    
+    if df_copy.empty:
+        return pd.DataFrame()
+    
+    # Group by period
+    evolution = df_copy.groupby(pd.Grouper(key='date', freq=period)).agg({
+        'price_per_sqm': ['mean', 'median', 'count']
+    }).reset_index()
+    
+    evolution.columns = ['date', 'avg_price_sqm', 'median_price_sqm', 'count']
+    
+    # Remove rows with no data
+    evolution = evolution[evolution['count'] > 0]
+    
+    return evolution
+
+
+
 def get_velocity_metrics(df: pd.DataFrame) -> Dict:
     """
     Calculate market velocity metrics.

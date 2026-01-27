@@ -490,6 +490,182 @@ def main():
         )
         st.plotly_chart(fig_bar, use_container_width=True)
     
+    # Price per m² Evolution
+    st.markdown("---")
+    st.markdown("#### 📈 Evolución del Precio por m²")
+    
+    # Filters for evolution chart
+    col_period, col_distrito = st.columns([1, 2])
+    
+    with col_period:
+        time_period = st.radio(
+            "Período",
+            ["Últimos 7 días", "Últimos 30 días", "Todo el período"],
+            horizontal=True
+        )
+    
+    with col_distrito:
+        distrito_filter = st.selectbox(
+            "Distrito",
+            ["Todos"] + sorted(df[df['distrito'].notna()]['distrito'].unique().tolist())
+        )
+    
+    # Filter data based on selection
+    evolution_df = df[df['status'] == 'active'].copy()
+    
+    # Apply time filter
+    if time_period == "Últimos 7 días":
+        cutoff_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        evolution_df = evolution_df[evolution_df['first_seen_date'] >= cutoff_date]
+        period_code = 'D'  # Daily
+    elif time_period == "Últimos 30 días":
+        cutoff_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        evolution_df = evolution_df[evolution_df['first_seen_date'] >= cutoff_date]
+        period_code = 'D'  # Daily
+    else:
+        period_code = 'D'  # Daily for all data
+    
+    # Import analytics function
+    from analytics import get_price_per_sqm_evolution
+    
+    # Get evolution data
+    evolution_data = get_price_per_sqm_evolution(
+        evolution_df, 
+        period=period_code,
+        distrito=distrito_filter if distrito_filter != "Todos" else None
+    )
+    
+    if not evolution_data.empty and len(evolution_data) > 1:
+        # Calculate trend metrics
+        current_avg = evolution_data['avg_price_sqm'].iloc[-1]
+        
+        # 7-day change
+        if len(evolution_data) >= 7:
+            week_ago_avg = evolution_data['avg_price_sqm'].iloc[-7]
+            change_7d_pct = ((current_avg - week_ago_avg) / week_ago_avg) * 100
+            change_7d_eur = current_avg - week_ago_avg
+        else:
+            change_7d_pct = 0
+            change_7d_eur = 0
+        
+        # 30-day change (if available)
+        if len(evolution_data) >= 30:
+            month_ago_avg = evolution_data['avg_price_sqm'].iloc[-30]
+            change_30d_pct = ((current_avg - month_ago_avg) / month_ago_avg) * 100
+            change_30d_eur = current_avg - month_ago_avg
+        else:
+            change_30d_pct = 0
+            change_30d_eur = 0
+        
+        # Determine trend
+        if change_7d_pct > 2:
+            trend_icon = "↗️"
+            trend_text = "Subiendo"
+            trend_color = "#e74c3c"
+        elif change_7d_pct < -2:
+            trend_icon = "↘️"
+            trend_text = "Bajando"
+            trend_color = "#27ae60"
+        else:
+            trend_icon = "→"
+            trend_text = "Estable"
+            trend_color = "#95a5a6"
+        
+        # Display metrics
+        metric_cols = st.columns(4)
+        
+        with metric_cols[0]:
+            st.metric(
+                "Precio Actual (€/m²)",
+                f"{current_avg:,.0f} €",
+                help="Precio promedio por m² actual"
+            )
+        
+        with metric_cols[1]:
+            st.metric(
+                "Cambio 7 días",
+                f"{change_7d_eur:+,.0f} €",
+                f"{change_7d_pct:+.1f}%"
+            )
+        
+        with metric_cols[2]:
+            if change_30d_pct != 0:
+                st.metric(
+                    "Cambio 30 días",
+                    f"{change_30d_eur:+,.0f} €",
+                    f"{change_30d_pct:+.1f}%"
+                )
+            else:
+                st.metric(
+                    "Cambio 30 días",
+                    "N/A",
+                    help="No hay suficientes datos"
+                )
+        
+        with metric_cols[3]:
+            st.metric(
+                "Tendencia",
+                f"{trend_icon} {trend_text}",
+                help="Basado en cambio de 7 días"
+            )
+        
+        # Create line chart
+        fig_evolution = go.Figure()
+        
+        fig_evolution.add_trace(go.Scatter(
+            x=evolution_data['date'],
+            y=evolution_data['avg_price_sqm'],
+            mode='lines+markers',
+            name='Precio Medio/m²',
+            line=dict(color='#3498db', width=3),
+            marker=dict(size=6),
+            hovertemplate='<b>%{x|%d/%m/%Y}</b><br>Precio: %{y:,.0f} €/m²<extra></extra>'
+        ))
+        
+        fig_evolution.add_trace(go.Scatter(
+            x=evolution_data['date'],
+            y=evolution_data['median_price_sqm'],
+            mode='lines+markers',
+            name='Precio Mediano/m²',
+            line=dict(color='#e67e22', width=2, dash='dash'),
+            marker=dict(size=4),
+            hovertemplate='<b>%{x|%d/%m/%Y}</b><br>Precio: %{y:,.0f} €/m²<extra></extra>'
+        ))
+        
+        # Update layout
+        distrito_title = f" - {distrito_filter}" if distrito_filter != "Todos" else ""
+        fig_evolution.update_layout(
+            title=f'Evolución del Precio por m²{distrito_title}',
+            xaxis_title='Fecha',
+            yaxis_title='Precio (€/m²)',
+            hovermode='x unified',
+            height=450,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)'
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)',
+                tickformat=',.0f'
+            )
+        )
+        
+        st.plotly_chart(fig_evolution, use_container_width=True)
+        
+        # Additional info
+        st.info(f"📊 Mostrando datos de {len(evolution_data)} días con un total de {evolution_data['count'].sum():,.0f} propiedades analizadas")
+    else:
+        st.warning("No hay suficientes datos para mostrar la evolución temporal. Se necesitan al menos 2 días de datos.")
+    
     # Advanced Analytics Section
     st.markdown("---")
     st.subheader("📊 Análisis Avanzado")
