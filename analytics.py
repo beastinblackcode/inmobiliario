@@ -77,6 +77,10 @@ def get_price_per_sqm_evolution(df: pd.DataFrame, period: str = 'D', distrito: O
     # Convert to datetime
     df_copy['date'] = pd.to_datetime(df_copy['first_seen_date'])
     
+    # Filter out unrealistic property sizes (likely data errors)
+    # Properties smaller than 10 m² are likely errors
+    df_copy = df_copy[df_copy['size_sqm'] >= 10]
+    
     # Calculate price_per_sqm if not present
     if 'price_per_sqm' not in df_copy.columns:
         df_copy['price_per_sqm'] = df_copy.apply(
@@ -86,8 +90,14 @@ def get_price_per_sqm_evolution(df: pd.DataFrame, period: str = 'D', distrito: O
             axis=1
         )
     
-    # Filter valid data
-    df_copy = df_copy[df_copy['price_per_sqm'].notna() & (df_copy['price_per_sqm'] > 0)]
+    # Filter valid data and remove extreme outliers
+    # Realistic Madrid prices: 2,000 - 50,000 €/m²
+    df_copy = df_copy[
+        df_copy['price_per_sqm'].notna() & 
+        (df_copy['price_per_sqm'] > 0) &
+        (df_copy['price_per_sqm'] >= 2000) &  # Minimum realistic price
+        (df_copy['price_per_sqm'] <= 50000)   # Maximum realistic price (even luxury)
+    ]
     
     if df_copy.empty:
         return pd.DataFrame()
