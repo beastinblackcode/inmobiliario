@@ -678,7 +678,6 @@ def main():
         identify_bargains,
         get_new_vs_sold_trends
     )
-    from datetime import datetime
     
     # Create tabs for different analytics
     analytics_tab1, analytics_tab2, analytics_tab3 = st.tabs([
