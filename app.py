@@ -702,7 +702,7 @@ def main():
     
     # Time to Sale Analysis (Metric 1)
     st.markdown("#### ⏱️ Tiempo Medio de Venta por Distrito")
-    sold_df = df[(df['status'] == 'sold') & (df['distrito'].notna())].copy()
+    sold_df = df[(df['status'] == 'sold_removed') & (df['distrito'].notna())].copy()
     
     if not sold_df.empty and len(sold_df) > 10:
         # Calculate days on market for sold properties

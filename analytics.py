@@ -85,7 +85,7 @@ def get_velocity_metrics(df: pd.DataFrame) -> Dict:
     
     # Calculate metrics
     active = df_copy[df_copy['status'] == 'active']
-    sold = df_copy[df_copy['status'] == 'sold']
+    sold = df_copy[df_copy['status'] == 'sold_removed']
     
     new_last_week = len(df_copy[df_copy['first_seen_dt'] >= week_ago])
     sold_last_week = len(sold[sold['last_seen_dt'] >= week_ago])
@@ -297,7 +297,7 @@ def get_new_vs_sold_trends(df: pd.DataFrame, days: int = 30) -> Dict:
     for date in date_range:
         new_count = len(df_copy[df_copy['first_seen_dt'].dt.date == date.date()])
         sold_count = len(df_copy[
-            (df_copy['status'] == 'sold') & 
+            (df_copy['status'] == 'sold_removed') & 
             (df_copy['last_seen_dt'].dt.date == date.date())
         ])
         
