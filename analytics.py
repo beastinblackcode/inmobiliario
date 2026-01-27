@@ -285,6 +285,9 @@ def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
     
     df_copy = df.copy()
     
+    # Filter out unrealistic property sizes (likely data errors)
+    df_copy = df_copy[df_copy['size_sqm'] >= 10]
+    
     # Calculate derived metrics
     df_copy['days_on_market'] = df_copy.apply(calculate_days_on_market, axis=1)
     
@@ -293,6 +296,17 @@ def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
             lambda row: row['price'] / row['size_sqm'] if pd.notna(row.get('size_sqm')) and row.get('size_sqm') > 0 else None,
             axis=1
         )
+    
+    # Filter out extreme price outliers (2,000 - 50,000 €/m²)
+    df_copy = df_copy[
+        df_copy['price_per_sqm'].notna() &
+        (df_copy['price_per_sqm'] >= 2000) &
+        (df_copy['price_per_sqm'] <= 50000)
+    ]
+    
+    if df_copy.empty:
+        return df_copy
+    
     
     # Calculate distrito stats
     distrito_stats = calculate_distrito_stats(df_copy)
