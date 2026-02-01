@@ -195,6 +195,7 @@ def get_active_listing_ids() -> Set[str]:
 def insert_listing(data: Dict) -> bool:
     """
     Insert a new listing into the database.
+    Also creates initial price history record.
     
     Args:
         data: Dictionary with listing fields
@@ -231,6 +232,15 @@ def insert_listing(data: Dict) -> bool:
                 today,
                 'active'
             ))
+            
+            # Create initial price history record
+            if data.get('price'):
+                insert_price_change(
+                    listing_id=data.get('listing_id'),
+                    new_price=data.get('price'),
+                    date=today
+                )
+            
             return True
     except sqlite3.IntegrityError:
         # Listing already exists
@@ -243,6 +253,7 @@ def insert_listing(data: Dict) -> bool:
 def update_listing(listing_id: str, data: Dict) -> bool:
     """
     Update an existing listing's last_seen_date and price.
+    Detects price changes and records them in price_history.
     
     Args:
         listing_id: Unique listing identifier
@@ -256,6 +267,11 @@ def update_listing(listing_id: str, data: Dict) -> bool:
             cursor = conn.cursor()
             today = datetime.now().strftime("%Y-%m-%d")
             
+            # Get current price before updating
+            current_price = get_current_price(listing_id)
+            new_price = data.get('price')
+            
+            # Update listing
             cursor.execute("""
                 UPDATE listings 
                 SET last_seen_date = ?,
@@ -270,7 +286,7 @@ def update_listing(listing_id: str, data: Dict) -> bool:
                 WHERE listing_id = ?
             """, (
                 today,
-                data.get('price'),
+                new_price,
                 data.get('title'),
                 data.get('rooms'),
                 data.get('size_sqm'),
@@ -280,6 +296,21 @@ def update_listing(listing_id: str, data: Dict) -> bool:
                 data.get('description'),
                 listing_id
             ))
+            
+            # Check if price changed
+            if current_price and new_price and current_price != new_price:
+                # Record price change
+                insert_price_change(
+                    listing_id=listing_id,
+                    new_price=new_price,
+                    date=today
+                )
+                
+                # Log the price change
+                change_pct = ((new_price - current_price) / current_price) * 100
+                change_symbol = "📉" if new_price < current_price else "📈"
+                print(f"  {change_symbol} Price change: {current_price:,}€ → {new_price:,}€ ({change_pct:+.1f}%)")
+            
             return True
     except Exception as e:
         print(f"Error updating listing {listing_id}: {e}")
