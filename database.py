@@ -558,7 +558,7 @@ def get_current_price(listing_id: str) -> Optional[int]:
     Returns:
         Current price in euros, or None if not found
     """
-    with get_db() as conn:
+    with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT price FROM listings WHERE listing_id = ?",
@@ -581,7 +581,7 @@ def insert_price_change(listing_id: str, new_price: int, date: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    with get_db() as conn:
+    with get_connection() as conn:
         cursor = conn.cursor()
         
         # Get the most recent price from history
@@ -625,7 +625,7 @@ def get_price_history(listing_id: str) -> List[Dict]:
     Returns:
         List of price records ordered by date (oldest first)
     """
-    with get_db() as conn:
+    with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT 
@@ -655,7 +655,7 @@ def get_recent_price_drops(days: int = 7, min_drop_percent: float = 5.0) -> List
     Returns:
         List of properties with recent price drops
     """
-    with get_db() as conn:
+    with get_connection() as conn:
         cursor = conn.cursor()
         
         # Calculate cutoff date
@@ -767,7 +767,7 @@ def get_properties_with_multiple_drops(min_drops: int = 2, min_total_drop_pct: f
     Returns:
         List of properties with multiple drops
     """
-    with get_db() as conn:
+    with get_connection() as conn:
         cursor = conn.cursor()
         
         # Get all active listings
