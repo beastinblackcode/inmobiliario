@@ -513,6 +513,268 @@ def get_price_trends_by_zone(zone_type: str = 'distrito', min_properties: int = 
         return results
 
 
+# ============================================================================
+# PRICE HISTORY FUNCTIONS
+# ============================================================================
+
+def get_current_price(listing_id: str) -> Optional[int]:
+    """
+    Get the current price of a listing from the listings table.
+    
+    Args:
+        listing_id: The listing ID
+        
+    Returns:
+        Current price in euros, or None if not found
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT price FROM listings WHERE listing_id = ?",
+            (listing_id,)
+        )
+        result = cursor.fetchone()
+        return result[0] if result else None
+
+
+def insert_price_change(listing_id: str, new_price: int, date: str) -> bool:
+    """
+    Insert a new price record into price_history.
+    Automatically calculates change_amount and change_percent from previous price.
+    
+    Args:
+        listing_id: The listing ID
+        new_price: The new price in euros
+        date: Date of the price change (YYYY-MM-DD format)
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get the most recent price from history
+        cursor.execute("""
+            SELECT price 
+            FROM price_history 
+            WHERE listing_id = ?
+            ORDER BY date_recorded DESC
+            LIMIT 1
+        """, (listing_id,))
+        
+        result = cursor.fetchone()
+        
+        if result:
+            # Calculate change from previous price
+            old_price = result[0]
+            change_amount = new_price - old_price
+            change_percent = ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0
+        else:
+            # First price record for this listing
+            change_amount = None
+            change_percent = None
+        
+        # Insert new price record
+        cursor.execute("""
+            INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent)
+            VALUES (?, ?, ?, ?, ?)
+        """, (listing_id, new_price, date, change_amount, change_percent))
+        
+        conn.commit()
+        return True
+
+
+def get_price_history(listing_id: str) -> List[Dict]:
+    """
+    Get complete price history for a listing.
+    
+    Args:
+        listing_id: The listing ID
+        
+    Returns:
+        List of price records ordered by date (oldest first)
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                id,
+                listing_id,
+                price,
+                date_recorded,
+                change_amount,
+                change_percent
+            FROM price_history
+            WHERE listing_id = ?
+            ORDER BY date_recorded ASC
+        """, (listing_id,))
+        
+        columns = ['id', 'listing_id', 'price', 'date_recorded', 'change_amount', 'change_percent']
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def get_recent_price_drops(days: int = 7, min_drop_percent: float = 5.0) -> List[Dict]:
+    """
+    Find properties with price drops in the last N days.
+    
+    Args:
+        days: Number of days to look back
+        min_drop_percent: Minimum drop percentage to include (positive number)
+        
+    Returns:
+        List of properties with recent price drops
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Calculate cutoff date
+        from datetime import datetime, timedelta
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        
+        cursor.execute("""
+            SELECT 
+                ph.listing_id,
+                l.title,
+                l.distrito,
+                l.barrio,
+                l.url,
+                ph.price as new_price,
+                ph.change_amount,
+                ph.change_percent,
+                ph.date_recorded,
+                l.size_sqm,
+                l.rooms
+            FROM price_history ph
+            JOIN listings l ON ph.listing_id = l.listing_id
+            WHERE ph.date_recorded >= ?
+            AND ph.change_amount IS NOT NULL
+            AND ph.change_percent <= ?
+            AND l.status = 'active'
+            ORDER BY ph.change_percent ASC
+        """, (cutoff_date, -min_drop_percent))
+        
+        columns = [
+            'listing_id', 'title', 'distrito', 'barrio', 'url',
+            'new_price', 'change_amount', 'change_percent', 'date_recorded',
+            'size_sqm', 'rooms'
+        ]
+        
+        results = []
+        for row in cursor.fetchall():
+            record = dict(zip(columns, row))
+            # Calculate old price
+            record['old_price'] = record['new_price'] - record['change_amount']
+            # Calculate days since change
+            change_date = datetime.strptime(record['date_recorded'], '%Y-%m-%d')
+            record['days_since_change'] = (datetime.now() - change_date).days
+            results.append(record)
+        
+        return results
+
+
+def get_property_price_stats(listing_id: str) -> Optional[Dict]:
+    """
+    Get comprehensive price statistics for a property.
+    
+    Args:
+        listing_id: The listing ID
+        
+    Returns:
+        Dictionary with price statistics, or None if not found
+    """
+    history = get_price_history(listing_id)
+    
+    if not history:
+        return None
+    
+    # Calculate statistics
+    initial_price = history[0]['price']
+    current_price = history[-1]['price']
+    total_change = current_price - initial_price
+    total_change_pct = ((current_price - initial_price) / initial_price) * 100 if initial_price > 0 else 0
+    
+    # Count price changes (excluding initial record)
+    price_changes = [h for h in history if h['change_amount'] is not None]
+    num_changes = len(price_changes)
+    
+    # Calculate average days between changes
+    if num_changes > 0:
+        first_date = datetime.strptime(history[0]['date_recorded'], '%Y-%m-%d')
+        last_date = datetime.strptime(history[-1]['date_recorded'], '%Y-%m-%d')
+        total_days = (last_date - first_date).days
+        avg_days_between = total_days / num_changes if num_changes > 0 else 0
+    else:
+        avg_days_between = 0
+    
+    # Count drops vs increases
+    drops = sum(1 for h in price_changes if h['change_amount'] < 0)
+    increases = sum(1 for h in price_changes if h['change_amount'] > 0)
+    
+    return {
+        'listing_id': listing_id,
+        'initial_price': initial_price,
+        'current_price': current_price,
+        'total_change': total_change,
+        'total_change_pct': total_change_pct,
+        'num_changes': num_changes,
+        'num_drops': drops,
+        'num_increases': increases,
+        'avg_days_between_changes': round(avg_days_between, 1),
+        'first_seen': history[0]['date_recorded'],
+        'last_updated': history[-1]['date_recorded']
+    }
+
+
+def get_properties_with_multiple_drops(min_drops: int = 2, min_total_drop_pct: float = 10.0) -> List[Dict]:
+    """
+    Find properties with multiple price drops (desperate sellers).
+    
+    Args:
+        min_drops: Minimum number of price drops
+        min_total_drop_pct: Minimum total drop percentage
+        
+    Returns:
+        List of properties with multiple drops
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Get all active listings
+        cursor.execute("""
+            SELECT listing_id, title, distrito, barrio, price, url, size_sqm, rooms
+            FROM listings
+            WHERE status = 'active'
+        """)
+        
+        results = []
+        for row in cursor.fetchall():
+            listing_id = row[0]
+            stats = get_property_price_stats(listing_id)
+            
+            if stats and stats['num_drops'] >= min_drops and stats['total_change_pct'] <= -min_total_drop_pct:
+                results.append({
+                    'listing_id': listing_id,
+                    'title': row[1],
+                    'distrito': row[2],
+                    'barrio': row[3],
+                    'current_price': row[4],
+                    'url': row[5],
+                    'size_sqm': row[6],
+                    'rooms': row[7],
+                    'initial_price': stats['initial_price'],
+                    'total_drop': stats['total_change'],
+                    'total_drop_pct': stats['total_change_pct'],
+                    'num_drops': stats['num_drops'],
+                    'num_changes': stats['num_changes'],
+                    'urgency_score': min(100, int(abs(stats['total_change_pct']) * stats['num_drops']))
+                })
+        
+        # Sort by urgency score (highest first)
+        results.sort(key=lambda x: x['urgency_score'], reverse=True)
+        
+        return results
+
+
 
 if __name__ == "__main__":
     # Initialize database when run directly
