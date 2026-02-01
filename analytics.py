@@ -388,3 +388,172 @@ def get_new_vs_sold_trends(df: pd.DataFrame, days: int = 30) -> Dict:
         'new': new_counts,
         'sold': sold_counts
     }
+
+
+# ============================================================================
+# PRICE HISTORY ANALYTICS
+# ============================================================================
+
+def get_price_drops_dataframe(days: int = 7, min_drop_percent: float = 5.0) -> pd.DataFrame:
+    """
+    Get recent price drops as a DataFrame for dashboard display.
+    
+    Args:
+        days: Number of days to look back
+        min_drop_percent: Minimum drop percentage to include
+        
+    Returns:
+        DataFrame with price drop information
+    """
+    from database import get_recent_price_drops
+    
+    drops = get_recent_price_drops(days=days, min_drop_percent=min_drop_percent)
+    
+    if not drops:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(drops)
+    
+    # Calculate price per sqm for old and new prices
+    df['old_price_sqm'] = df.apply(
+        lambda row: row['old_price'] / row['size_sqm'] if row['size_sqm'] and row['size_sqm'] > 0 else None,
+        axis=1
+    )
+    df['new_price_sqm'] = df.apply(
+        lambda row: row['new_price'] / row['size_sqm'] if row['size_sqm'] and row['size_sqm'] > 0 else None,
+        axis=1
+    )
+    
+    # Sort by drop percentage (biggest drops first)
+    df = df.sort_values('change_percent', ascending=True)
+    
+    return df
+
+
+def get_property_evolution_dataframe(listing_id: str) -> pd.DataFrame:
+    """
+    Get complete price evolution for a property as DataFrame.
+    
+    Args:
+        listing_id: The listing ID
+        
+    Returns:
+        DataFrame with price history
+    """
+    from database import get_price_history
+    
+    history = get_price_history(listing_id)
+    
+    if not history:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(history)
+    df['date_recorded'] = pd.to_datetime(df['date_recorded'])
+    
+    return df
+
+
+def get_desperate_sellers_dataframe(min_drops: int = 2, min_total_drop_pct: float = 10.0) -> pd.DataFrame:
+    """
+    Get properties with multiple price drops as DataFrame.
+    
+    Args:
+        min_drops: Minimum number of price drops
+        min_total_drop_pct: Minimum total drop percentage
+        
+    Returns:
+        DataFrame with desperate sellers
+    """
+    from database import get_properties_with_multiple_drops
+    
+    sellers = get_properties_with_multiple_drops(
+        min_drops=min_drops,
+        min_total_drop_pct=min_total_drop_pct
+    )
+    
+    if not sellers:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(sellers)
+    
+    # Calculate price per sqm
+    df['current_price_sqm'] = df.apply(
+        lambda row: row['current_price'] / row['size_sqm'] if row['size_sqm'] and row['size_sqm'] > 0 else None,
+        axis=1
+    )
+    df['initial_price_sqm'] = df.apply(
+        lambda row: row['initial_price'] / row['size_sqm'] if row['size_sqm'] and row['size_sqm'] > 0 else None,
+        axis=1
+    )
+    
+    # Sort by urgency score
+    df = df.sort_values('urgency_score', ascending=False)
+    
+    return df
+
+
+def get_price_history_summary() -> Dict:
+    """
+    Get summary statistics about price history.
+    
+    Returns:
+        Dictionary with summary stats
+    """
+    from database import get_connection
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Total records
+        cursor.execute("SELECT COUNT(*) FROM price_history")
+        total_records = cursor.fetchone()[0]
+        
+        # Properties with price changes
+        cursor.execute("""
+            SELECT COUNT(DISTINCT listing_id) 
+            FROM price_history 
+            WHERE change_amount IS NOT NULL
+        """)
+        properties_with_changes = cursor.fetchone()[0]
+        
+        # Total price changes
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM price_history 
+            WHERE change_amount IS NOT NULL
+        """)
+        total_changes = cursor.fetchone()[0]
+        
+        # Price drops vs increases
+        cursor.execute("""
+            SELECT 
+                SUM(CASE WHEN change_amount < 0 THEN 1 ELSE 0 END) as drops,
+                SUM(CASE WHEN change_amount > 0 THEN 1 ELSE 0 END) as increases
+            FROM price_history 
+            WHERE change_amount IS NOT NULL
+        """)
+        result = cursor.fetchone()
+        drops = result[0] or 0
+        increases = result[1] or 0
+        
+        # Average drop/increase
+        cursor.execute("""
+            SELECT 
+                AVG(CASE WHEN change_amount < 0 THEN change_percent ELSE NULL END) as avg_drop,
+                AVG(CASE WHEN change_amount > 0 THEN change_percent ELSE NULL END) as avg_increase
+            FROM price_history 
+            WHERE change_amount IS NOT NULL
+        """)
+        result = cursor.fetchone()
+        avg_drop = result[0] or 0
+        avg_increase = result[1] or 0
+        
+        return {
+            'total_records': total_records,
+            'properties_with_changes': properties_with_changes,
+            'total_changes': total_changes,
+            'price_drops': drops,
+            'price_increases': increases,
+            'avg_drop_percent': round(avg_drop, 2),
+            'avg_increase_percent': round(avg_increase, 2)
+        }

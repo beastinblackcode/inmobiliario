@@ -1058,6 +1058,364 @@ def main():
     
     # Price Evolution by District
     st.markdown("---")
+    
+    # ============================================================================
+    # PRICE HISTORY SECTIONS
+    # ============================================================================
+    
+    st.markdown("---")
+    st.subheader("💰 Histórico de Precios")
+    
+    # Import price history analytics
+    from analytics import (
+        get_price_drops_dataframe,
+        get_property_evolution_dataframe,
+        get_desperate_sellers_dataframe,
+        get_price_history_summary
+    )
+    
+    # Get summary stats
+    try:
+        history_summary = get_price_history_summary()
+        
+        # Display summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Propiedades Rastreadas",
+                f"{history_summary['total_records']:,}",
+                help="Total de registros en histórico de precios"
+            )
+        
+        with col2:
+            st.metric(
+                "Con Cambios de Precio",
+                f"{history_summary['properties_with_changes']:,}",
+                help="Propiedades que han cambiado de precio"
+            )
+        
+        with col3:
+            st.metric(
+                "Bajadas de Precio",
+                f"{history_summary['price_drops']:,}",
+                f"{history_summary['avg_drop_percent']:.1f}% promedio",
+                delta_color="inverse",
+                help="Total de bajadas de precio detectadas"
+            )
+        
+        with col4:
+            st.metric(
+                "Subidas de Precio",
+                f"{history_summary['price_increases']:,}",
+                f"+{history_summary['avg_increase_percent']:.1f}% promedio",
+                help="Total de subidas de precio detectadas"
+            )
+    except Exception as e:
+        st.info("📊 El histórico de precios se irá poblando conforme el scraper detecte cambios.")
+    
+    st.markdown("---")
+    
+    # Create tabs for price history sections
+    price_tab1, price_tab2, price_tab3 = st.tabs([
+        "📉 Bajadas Recientes",
+        "📊 Evolución por Propiedad",
+        "🎯 Vendedores Desesperados"
+    ])
+    
+    # TAB 1: Recent Price Drops
+    with price_tab1:
+        st.markdown("### Bajadas de Precio Recientes")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            days_filter = st.selectbox(
+                "Período",
+                options=[7, 14, 30],
+                format_func=lambda x: f"Últimos {x} días",
+                key="price_drops_days"
+            )
+        
+        with col2:
+            min_drop = st.slider(
+                "Bajada Mínima (%)",
+                min_value=1.0,
+                max_value=30.0,
+                value=5.0,
+                step=1.0,
+                key="price_drops_min"
+            )
+        
+        # Get price drops
+        drops_df = get_price_drops_dataframe(days=days_filter, min_drop_percent=min_drop)
+        
+        if not drops_df.empty:
+            st.success(f"✅ Encontradas {len(drops_df)} propiedades con bajadas de precio")
+            
+            # Summary metrics
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                avg_drop = abs(drops_df['change_percent'].mean())
+                st.metric("Bajada Promedio", f"{avg_drop:.1f}%")
+            
+            with col2:
+                max_drop = abs(drops_df['change_percent'].min())
+                st.metric("Mayor Bajada", f"{max_drop:.1f}%")
+            
+            with col3:
+                total_savings = abs(drops_df['change_amount'].sum())
+                st.metric("Ahorro Total", f"€{total_savings:,.0f}")
+            
+            st.markdown("---")
+            
+            # Display table
+            display_df = drops_df[[
+                'title', 'distrito', 'barrio', 'old_price', 'new_price', 
+                'change_amount', 'change_percent', 'date_recorded', 'rooms', 'size_sqm'
+            ]].copy()
+            
+            display_df.columns = [
+                'Título', 'Distrito', 'Barrio', 'Precio Anterior', 'Precio Actual',
+                'Bajada (€)', 'Bajada (%)', 'Fecha', 'Hab.', 'm²'
+            ]
+            
+            # Format columns
+            display_df['Precio Anterior'] = display_df['Precio Anterior'].apply(lambda x: f"€{x:,.0f}")
+            display_df['Precio Actual'] = display_df['Precio Actual'].apply(lambda x: f"€{x:,.0f}")
+            display_df['Bajada (€)'] = display_df['Bajada (€)'].apply(lambda x: f"€{abs(x):,.0f}")
+            display_df['Bajada (%)'] = display_df['Bajada (%)'].apply(lambda x: f"{abs(x):.1f}%")
+            display_df['m²'] = display_df['m²'].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
+            
+            st.dataframe(
+                display_df,
+                hide_index=True,
+                use_container_width=True,
+                height=400
+            )
+            
+            # Download button
+            csv = drops_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Descargar Bajadas (CSV)",
+                data=csv,
+                file_name=f"bajadas_precio_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info(f"No se encontraron bajadas de precio ≥{min_drop}% en los últimos {days_filter} días.")
+            st.caption("💡 Tip: Reduce el porcentaje mínimo o aumenta el período de tiempo.")
+    
+    # TAB 2: Property Evolution
+    with price_tab2:
+        st.markdown("### Evolución de Precio por Propiedad")
+        
+        # Get list of properties with price changes
+        from database import get_connection
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT l.listing_id, l.title, l.distrito, l.price
+                FROM listings l
+                JOIN price_history ph ON l.listing_id = ph.listing_id
+                WHERE l.status = 'active'
+                AND ph.change_amount IS NOT NULL
+                ORDER BY l.title
+                LIMIT 100
+            """)
+            properties_with_changes = cursor.fetchall()
+        
+        if properties_with_changes:
+            # Create property selector
+            property_options = {
+                f"{title[:50]}... ({distrito}) - €{price:,.0f}": listing_id
+                for listing_id, title, distrito, price in properties_with_changes
+            }
+            
+            selected_property_label = st.selectbox(
+                "Selecciona una propiedad",
+                options=list(property_options.keys()),
+                key="property_evolution_selector"
+            )
+            
+            selected_listing_id = property_options[selected_property_label]
+            
+            # Get evolution data
+            evolution_df = get_property_evolution_dataframe(selected_listing_id)
+            
+            if not evolution_df.empty:
+                # Get property stats
+                from database import get_property_price_stats
+                stats = get_property_price_stats(selected_listing_id)
+                
+                # Display stats
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Precio Inicial", f"€{stats['initial_price']:,.0f}")
+                
+                with col2:
+                    st.metric("Precio Actual", f"€{stats['current_price']:,.0f}")
+                
+                with col3:
+                    change_color = "inverse" if stats['total_change'] < 0 else "normal"
+                    st.metric(
+                        "Cambio Total",
+                        f"€{abs(stats['total_change']):,.0f}",
+                        f"{stats['total_change_pct']:+.1f}%",
+                        delta_color=change_color
+                    )
+                
+                with col4:
+                    st.metric("Cambios de Precio", f"{stats['num_changes']}")
+                
+                st.markdown("---")
+                
+                # Create evolution chart
+                fig_evolution = go.Figure()
+                
+                fig_evolution.add_trace(go.Scatter(
+                    x=evolution_df['date_recorded'],
+                    y=evolution_df['price'],
+                    mode='lines+markers',
+                    name='Precio',
+                    line=dict(color='#3498db', width=3),
+                    marker=dict(size=10),
+                    text=[f"€{p:,.0f}" for p in evolution_df['price']],
+                    hovertemplate='<b>%{x}</b><br>Precio: %{text}<extra></extra>'
+                ))
+                
+                # Add annotations for price changes
+                for idx, row in evolution_df.iterrows():
+                    if pd.notna(row['change_amount']) and row['change_amount'] != 0:
+                        color = '#e74c3c' if row['change_amount'] < 0 else '#2ecc71'
+                        symbol = '▼' if row['change_amount'] < 0 else '▲'
+                        
+                        fig_evolution.add_annotation(
+                            x=row['date_recorded'],
+                            y=row['price'],
+                            text=f"{symbol} {abs(row['change_percent']):.1f}%",
+                            showarrow=True,
+                            arrowhead=2,
+                            arrowcolor=color,
+                            font=dict(color=color, size=10),
+                            bgcolor='white',
+                            bordercolor=color,
+                            borderwidth=1
+                        )
+                
+                fig_evolution.update_layout(
+                    title="Evolución del Precio",
+                    xaxis_title="Fecha",
+                    yaxis_title="Precio (€)",
+                    hovermode='x unified',
+                    height=500
+                )
+                
+                st.plotly_chart(fig_evolution, use_container_width=True)
+                
+                # Show detailed history table
+                st.markdown("#### Historial Detallado")
+                
+                history_display = evolution_df[['date_recorded', 'price', 'change_amount', 'change_percent']].copy()
+                history_display.columns = ['Fecha', 'Precio', 'Cambio (€)', 'Cambio (%)']
+                history_display['Precio'] = history_display['Precio'].apply(lambda x: f"€{x:,.0f}")
+                history_display['Cambio (€)'] = history_display['Cambio (€)'].apply(
+                    lambda x: f"{x:+,.0f}€" if pd.notna(x) else "Inicial"
+                )
+                history_display['Cambio (%)'] = history_display['Cambio (%)'].apply(
+                    lambda x: f"{x:+.1f}%" if pd.notna(x) else "-"
+                )
+                
+                st.dataframe(
+                    history_display,
+                    hide_index=True,
+                    use_container_width=True
+                )
+        else:
+            st.info("📊 Aún no hay propiedades con cambios de precio registrados.")
+            st.caption("El histórico se irá poblando conforme el scraper detecte cambios.")
+    
+    # TAB 3: Desperate Sellers
+    with price_tab3:
+        st.markdown("### Vendedores Desesperados (Múltiples Bajadas)")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            min_drops_filter = st.slider(
+                "Mínimo de Bajadas",
+                min_value=2,
+                max_value=5,
+                value=2,
+                step=1,
+                key="desperate_min_drops"
+            )
+        
+        with col2:
+            min_total_drop_filter = st.slider(
+                "Bajada Total Mínima (%)",
+                min_value=5.0,
+                max_value=30.0,
+                value=10.0,
+                step=5.0,
+                key="desperate_min_total"
+            )
+        
+        # Get desperate sellers
+        desperate_df = get_desperate_sellers_dataframe(
+            min_drops=min_drops_filter,
+            min_total_drop_pct=min_total_drop_filter
+        )
+        
+        if not desperate_df.empty:
+            st.success(f"✅ Encontradas {len(desperate_df)} propiedades con múltiples bajadas")
+            
+            st.markdown("#### Top Oportunidades (por Score de Urgencia)")
+            
+            # Display table
+            display_df = desperate_df[[
+                'title', 'distrito', 'barrio', 'initial_price', 'current_price',
+                'total_drop', 'total_drop_pct', 'num_drops', 'urgency_score',
+                'rooms', 'size_sqm'
+            ]].head(20).copy()
+            
+            display_df.columns = [
+                'Título', 'Distrito', 'Barrio', 'Precio Inicial', 'Precio Actual',
+                'Bajada Total (€)', 'Bajada Total (%)', 'Nº Bajadas', 'Score Urgencia',
+                'Hab.', 'm²'
+            ]
+            
+            # Format columns
+            display_df['Precio Inicial'] = display_df['Precio Inicial'].apply(lambda x: f"€{x:,.0f}")
+            display_df['Precio Actual'] = display_df['Precio Actual'].apply(lambda x: f"€{x:,.0f}")
+            display_df['Bajada Total (€)'] = display_df['Bajada Total (€)'].apply(lambda x: f"€{abs(x):,.0f}")
+            display_df['Bajada Total (%)'] = display_df['Bajada Total (%)'].apply(lambda x: f"{abs(x):.1f}%")
+            display_df['m²'] = display_df['m²'].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
+            
+            st.dataframe(
+                display_df,
+                hide_index=True,
+                use_container_width=True,
+                height=500
+            )
+            
+            st.caption("💡 **Score de Urgencia** = Bajada Total (%) × Número de Bajadas")
+            st.caption("Un score alto indica un vendedor muy motivado para cerrar la venta.")
+            
+            # Download button
+            csv = desperate_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Descargar Vendedores Desesperados (CSV)",
+                data=csv,
+                file_name=f"vendedores_desesperados_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+        else:
+            st.info(f"No se encontraron propiedades con ≥{min_drops_filter} bajadas y ≥{min_total_drop_filter}% de bajada total.")
+            st.caption("💡 Tip: Reduce los filtros para ver más resultados.")
     st.markdown("#### 📈 Evolución de Precios por Distrito")
     
     if 'first_seen_date' in df.columns:
