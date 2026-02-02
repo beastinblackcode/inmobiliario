@@ -247,7 +247,8 @@ def insert_listing(data: Dict) -> bool:
             
             # Create initial price history record
             if data.get('price'):
-                insert_price_change(
+                _insert_price_change_internal(
+                    cursor,
                     listing_id=data.get('listing_id'),
                     new_price=data.get('price'),
                     date=today
@@ -312,7 +313,8 @@ def update_listing(listing_id: str, data: Dict) -> bool:
             # Check if price changed
             if current_price and new_price and current_price != new_price:
                 # Record price change
-                insert_price_change(
+                _insert_price_change_internal(
+                    cursor,
                     listing_id=listing_id,
                     new_price=new_price,
                     date=today
@@ -580,6 +582,45 @@ def get_current_price(listing_id: str) -> Optional[int]:
         return result[0] if result else None
 
 
+def _insert_price_change_internal(cursor, listing_id: str, new_price: int, date: str) -> None:
+    """
+    Internal function to insert price change using existing cursor.
+    Used by insert_listing and update_listing to avoid nested transactions.
+    
+    Args:
+        cursor: Database cursor from existing connection
+        listing_id: The listing ID
+        new_price: The new price in euros
+        date: Date of the price change (YYYY-MM-DD format)
+    """
+    # Get the most recent price from history
+    cursor.execute("""
+        SELECT price 
+        FROM price_history 
+        WHERE listing_id = ?
+        ORDER BY date_recorded DESC
+        LIMIT 1
+    """, (listing_id,))
+    
+    result = cursor.fetchone()
+    
+    if result:
+        # Calculate change from previous price
+        old_price = result[0]
+        change_amount = new_price - old_price
+        change_percent = ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0
+    else:
+        # First price record for this listing
+        change_amount = None
+        change_percent = None
+    
+    # Insert new price record
+    cursor.execute("""
+        INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent)
+        VALUES (?, ?, ?, ?, ?)
+    """, (listing_id, new_price, date, change_amount, change_percent))
+
+
 def insert_price_change(listing_id: str, new_price: int, date: str) -> bool:
     """
     Insert a new price record into price_history.
@@ -595,35 +636,7 @@ def insert_price_change(listing_id: str, new_price: int, date: str) -> bool:
     """
     with get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Get the most recent price from history
-        cursor.execute("""
-            SELECT price 
-            FROM price_history 
-            WHERE listing_id = ?
-            ORDER BY date_recorded DESC
-            LIMIT 1
-        """, (listing_id,))
-        
-        result = cursor.fetchone()
-        
-        if result:
-            # Calculate change from previous price
-            old_price = result[0]
-            change_amount = new_price - old_price
-            change_percent = ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0
-        else:
-            # First price record for this listing
-            change_amount = None
-            change_percent = None
-        
-        # Insert new price record
-        cursor.execute("""
-            INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent)
-            VALUES (?, ?, ?, ?, ?)
-        """, (listing_id, new_price, date, change_amount, change_percent))
-        
-        conn.commit()
+        _insert_price_change_internal(cursor, listing_id, new_price, date)
         return True
 
 
