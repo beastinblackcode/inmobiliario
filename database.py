@@ -99,9 +99,21 @@ google_drive_file_id = "YOUR_FILE_ID_HERE" """, language="toml")
 
 @contextmanager
 def get_connection():
-    """Context manager for database connections."""
-    conn = sqlite3.connect(DATABASE_PATH)
+    """
+    Context manager for database connections.
+    Enables WAL mode for better concurrent access.
+    """
+    conn = sqlite3.connect(
+        DATABASE_PATH,
+        timeout=30.0,  # Increased timeout to 30 seconds
+        check_same_thread=False
+    )
     conn.row_factory = sqlite3.Row  # Enable column access by name
+    
+    # Enable WAL mode for better concurrent access
+    # This allows multiple readers and one writer simultaneously
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")  # 30 seconds in milliseconds
     try:
         yield conn
         conn.commit()
