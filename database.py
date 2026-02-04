@@ -582,6 +582,71 @@ def get_current_price(listing_id: str) -> Optional[int]:
         return result[0] if result else None
 
 
+def get_listing_by_url(url_or_id: str) -> Optional[Dict]:
+    """
+    Find a listing by its Idealista URL or listing ID.
+    
+    Args:
+        url_or_id: Either a full Idealista URL or just the listing ID
+                   Examples:
+                   - "https://www.idealista.com/inmueble/110506346/"
+                   - "110506346"
+    
+    Returns:
+        Dictionary with listing data or None if not found
+    """
+    import re
+    
+    # Extract listing ID from URL if it's a URL
+    if 'idealista.com' in url_or_id or '/inmueble/' in url_or_id:
+        # Pattern: /inmueble/XXXXXXXX/
+        pattern = r'/inmueble/(\d+)'
+        match = re.search(pattern, url_or_id)
+        if match:
+            listing_id = match.group(1)
+        else:
+            return None
+    else:
+        # Assume it's already a listing ID
+        listing_id = url_or_id.strip()
+    
+    # Query database
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                listing_id, title, url, price, distrito, barrio,
+                rooms, size_sqm, floor, orientation, seller_type,
+                is_new_development, description, 
+                first_seen_date, last_seen_date, status
+            FROM listings
+            WHERE listing_id = ?
+        """, (listing_id,))
+        
+        result = cursor.fetchone()
+        
+        if result:
+            return {
+                'listing_id': result[0],
+                'title': result[1],
+                'url': result[2],
+                'price': result[3],
+                'distrito': result[4],
+                'barrio': result[5],
+                'rooms': result[6],
+                'size_sqm': result[7],
+                'floor': result[8],
+                'orientation': result[9],
+                'seller_type': result[10],
+                'is_new_development': result[11],
+                'description': result[12],
+                'first_seen_date': result[13],
+                'last_seen_date': result[14],
+                'status': result[15]
+            }
+        return None
+
+
 def _insert_price_change_internal(cursor, listing_id: str, new_price: int, date: str) -> None:
     """
     Internal function to insert price change using existing cursor.

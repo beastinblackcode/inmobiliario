@@ -1063,6 +1063,244 @@ def main():
     # PRICE HISTORY SECTIONS
     # ============================================================================
     
+    
+    # ============================================================================
+    # PROPERTY LOOKUP SECTION
+    # ============================================================================
+    
+    st.markdown("---")
+    st.subheader("🔍 Buscar Propiedad")
+    
+    st.markdown("""
+    Introduce la URL de Idealista o el ID del piso para ver su histórico de precios completo.
+    """)
+    
+    # Import database function
+    from database import get_listing_by_url, get_property_price_stats
+    from analytics import get_property_evolution_dataframe
+    
+    # Search input
+    col1, col2 = st.columns([4, 1])
+    
+    with col1:
+        search_input = st.text_input(
+            "URL o ID",
+            placeholder="https://www.idealista.com/inmueble/110506346/ o 110506346",
+            label_visibility="collapsed",
+            key="property_search_input"
+        )
+    
+    with col2:
+        search_button = st.button("🔍 Buscar", use_container_width=True, type="primary")
+    
+    # Process search
+    if search_button and search_input:
+        with st.spinner("Buscando propiedad..."):
+            listing = get_listing_by_url(search_input)
+            
+            if listing:
+                st.success(f"✅ Propiedad encontrada: {listing['listing_id']}")
+                
+                # Property Card
+                st.markdown("### 📍 Detalles de la Propiedad")
+                
+                # Status badge
+                status_emoji = "✅" if listing['status'] == 'active' else "❌"
+                status_text = "Activo" if listing['status'] == 'active' else "Vendido/Retirado"
+                status_color = "green" if listing['status'] == 'active' else "red"
+                
+                st.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                    <h4 style="margin-top: 0;">{listing['title']}</h4>
+                    <p style="color: #666; margin: 5px 0;">
+                        📍 {listing['distrito']} - {listing['barrio']}
+                    </p>
+                    <p style="font-size: 24px; color: #1f77b4; margin: 10px 0;">
+                        💶 {listing['price']:,}€
+                    </p>
+                    <p style="margin: 5px 0;">
+                        📐 {listing['size_sqm']:.0f if listing['size_sqm'] else 'N/A'} m² • 
+                        🛏️ {listing['rooms'] if listing['rooms'] else 'N/A'} hab • 
+                        🏢 Piso {listing['floor'] if listing['floor'] else 'N/A'}
+                    </p>
+                    <p style="margin: 10px 0;">
+                        <span style="background-color: {status_color}; color: white; padding: 5px 10px; border-radius: 5px;">
+                            {status_emoji} {status_text}
+                        </span>
+                    </p>
+                    <p style="margin: 10px 0;">
+                        <a href="{listing['url']}" target="_blank" style="color: #1f77b4; text-decoration: none;">
+                            🔗 Ver en Idealista →
+                        </a>
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Get price history
+                evolution_df = get_property_evolution_dataframe(listing['listing_id'])
+                
+                if not evolution_df.empty:
+                    # Get statistics
+                    stats = get_property_price_stats(listing['listing_id'])
+                    
+                    # Statistics Panel
+                    st.markdown("### 📊 Estadísticas de Precio")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "Precio Inicial",
+                            f"€{stats['initial_price']:,}",
+                            help="Primer precio registrado"
+                        )
+                    
+                    with col2:
+                        st.metric(
+                            "Precio Actual",
+                            f"€{stats['current_price']:,}",
+                            help="Último precio registrado"
+                        )
+                    
+                    with col3:
+                        change_color = "inverse" if stats['total_change'] < 0 else "normal"
+                        st.metric(
+                            "Cambio Total",
+                            f"€{abs(stats['total_change']):,}",
+                            f"{stats['total_change_pct']:+.1f}%",
+                            delta_color=change_color,
+                            help="Diferencia entre precio inicial y actual"
+                        )
+                    
+                    with col4:
+                        st.metric(
+                            "Cambios de Precio",
+                            f"{stats['num_changes']}",
+                            help="Número de veces que cambió el precio"
+                        )
+                    
+                    # Additional stats
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric(
+                            "Primera Vista",
+                            listing['first_seen_date'],
+                            help="Primera vez que se detectó esta propiedad"
+                        )
+                    
+                    with col2:
+                        st.metric(
+                            "Última Vista",
+                            listing['last_seen_date'],
+                            help="Última vez que se vio activa"
+                        )
+                    
+                    with col3:
+                        if stats['avg_days_between_changes']:
+                            st.metric(
+                                "Días entre Cambios",
+                                f"{stats['avg_days_between_changes']:.0f}",
+                                help="Promedio de días entre cambios de precio"
+                            )
+                    
+                    st.markdown("---")
+                    
+                    # Price Evolution Chart
+                    st.markdown("### 📈 Evolución del Precio")
+                    
+                    fig_evolution = go.Figure()
+                    
+                    fig_evolution.add_trace(go.Scatter(
+                        x=evolution_df['date_recorded'],
+                        y=evolution_df['price'],
+                        mode='lines+markers',
+                        name='Precio',
+                        line=dict(color='#3498db', width=3),
+                        marker=dict(size=12),
+                        text=[f"€{p:,}" for p in evolution_df['price']],
+                        hovertemplate='<b>%{x}</b><br>Precio: %{text}<extra></extra>'
+                    ))
+                    
+                    # Add annotations for price changes
+                    for idx, row in evolution_df.iterrows():
+                        if pd.notna(row['change_amount']) and row['change_amount'] != 0:
+                            color = '#e74c3c' if row['change_amount'] < 0 else '#2ecc71'
+                            symbol = '▼' if row['change_amount'] < 0 else '▲'
+                            
+                            fig_evolution.add_annotation(
+                                x=row['date_recorded'],
+                                y=row['price'],
+                                text=f"{symbol} {abs(row['change_percent']):.1f}%",
+                                showarrow=True,
+                                arrowhead=2,
+                                arrowcolor=color,
+                                font=dict(color=color, size=12, family="Arial Black"),
+                                bgcolor='white',
+                                bordercolor=color,
+                                borderwidth=2,
+                                borderpad=4
+                            )
+                    
+                    fig_evolution.update_layout(
+                        title=f"Histórico de Precios - {listing['title'][:50]}...",
+                        xaxis_title="Fecha",
+                        yaxis_title="Precio (€)",
+                        hovermode='x unified',
+                        height=500,
+                        showlegend=False
+                    )
+                    
+                    st.plotly_chart(fig_evolution, use_container_width=True)
+                    
+                    # Detailed History Table
+                    st.markdown("### 📋 Historial Detallado")
+                    
+                    history_display = evolution_df[['date_recorded', 'price', 'change_amount', 'change_percent']].copy()
+                    history_display.columns = ['Fecha', 'Precio', 'Cambio (€)', 'Cambio (%)']
+                    history_display['Precio'] = history_display['Precio'].apply(lambda x: f"€{x:,}")
+                    history_display['Cambio (€)'] = history_display['Cambio (€)'].apply(
+                        lambda x: f"{x:+,.0f}€" if pd.notna(x) else "Inicial"
+                    )
+                    history_display['Cambio (%)'] = history_display['Cambio (%)'].apply(
+                        lambda x: f"{x:+.1f}%" if pd.notna(x) else "-"
+                    )
+                    
+                    st.dataframe(
+                        history_display,
+                        hide_index=True,
+                        use_container_width=True,
+                        height=300
+                    )
+                    
+                    # Download button
+                    csv = evolution_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Descargar Histórico (CSV)",
+                        data=csv,
+                        file_name=f"historico_{listing['listing_id']}_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                    
+                else:
+                    st.info("📊 Esta propiedad aún no tiene cambios de precio registrados.")
+                    st.caption("El histórico se irá poblando conforme el scraper detecte cambios.")
+                
+            else:
+                st.error("❌ Propiedad no encontrada")
+                st.info("""
+                **Posibles razones:**
+                - El ID o URL no es válido
+                - La propiedad no ha sido scrapeada aún
+                - El formato de la URL es incorrecto
+                
+                **Formatos válidos:**
+                - URL completa: `https://www.idealista.com/inmueble/110506346/`
+                - Solo ID: `110506346`
+                """)
+    
+    elif search_button and not search_input:
+        st.warning("⚠️ Por favor, introduce una URL o ID para buscar.")
     st.markdown("---")
     st.subheader("💰 Histórico de Precios")
     
