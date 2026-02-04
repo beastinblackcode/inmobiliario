@@ -1109,6 +1109,11 @@ def main():
                 status_text = "Activo" if listing['status'] == 'active' else "Vendido/Retirado"
                 status_color = "green" if listing['status'] == 'active' else "red"
                 
+                # Format property details safely
+                size_text = f"{listing['size_sqm']:.0f} m²" if listing['size_sqm'] else "N/A m²"
+                rooms_text = f"{listing['rooms']} hab" if listing['rooms'] else "N/A hab"
+                floor_text = f"Piso {listing['floor']}" if listing['floor'] else "Piso N/A"
+                
                 st.markdown(f"""
                 <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
                     <h4 style="margin-top: 0;">{listing['title']}</h4>
@@ -1119,9 +1124,9 @@ def main():
                         💶 {listing['price']:,}€
                     </p>
                     <p style="margin: 5px 0;">
-                        📐 {listing['size_sqm']:.0f if listing['size_sqm'] else 'N/A'} m² • 
-                        🛏️ {listing['rooms'] if listing['rooms'] else 'N/A'} hab • 
-                        🏢 Piso {listing['floor'] if listing['floor'] else 'N/A'}
+                        📐 {size_text} • 
+                        🛏️ {rooms_text} • 
+                        🏢 {floor_text}
                     </p>
                     <p style="margin: 10px 0;">
                         <span style="background-color: {status_color}; color: white; padding: 5px 10px; border-radius: 5px;">
