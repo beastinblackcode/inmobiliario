@@ -218,6 +218,59 @@ BARRIO_URLS = [
     ("Villaverde", "Los Rosales", "/venta-viviendas/madrid/villaverde/los-rosales/"),
     ("Villaverde", "San Cristóbal", "/venta-viviendas/madrid/villaverde/san-cristobal/"),
     ("Villaverde", "Villaverde Alto", "/venta-viviendas/madrid/villaverde/villaverde-alto/"),
+    
+    # ============================================================================
+    # ADDITIONAL BARRIOS - Added to increase coverage
+    # ============================================================================
+    
+    # Additional Arganzuela barrios
+    ("Arganzuela", "Atocha", "/venta-viviendas/madrid/arganzuela/atocha/"),
+    
+    # Additional Fuencarral-El Pardo barrios
+    ("Fuencarral-El Pardo", "Barrio del Pilar", "/venta-viviendas/madrid/fuencarral/barrio-del-pilar/"),
+    ("Fuencarral-El Pardo", "El Goloso", "/venta-viviendas/madrid/fuencarral/el-goloso/"),
+    ("Fuencarral-El Pardo", "Valverde", "/venta-viviendas/madrid/fuencarral/valverde/"),
+    
+    # Additional Latina barrios
+    ("Latina", "Batán", "/venta-viviendas/madrid/latina/batan/"),
+    
+    # Additional Moncloa-Aravaca barrios
+    ("Moncloa-Aravaca", "Dehesa de la Villa", "/venta-viviendas/madrid/moncloa/dehesa-de-la-villa/"),
+    
+    # Additional Moratalaz barrios
+    ("Moratalaz", "Arroyo del Olivar", "/venta-viviendas/madrid/moratalaz/arroyo-del-olivar/"),
+    
+    # Additional Puente de Vallecas barrios
+    ("Puente de Vallecas", "Doña Carlota", "/venta-viviendas/madrid/puente-de-vallecas/dona-carlota/"),
+    ("Puente de Vallecas", "Pozo del Tío Raimundo", "/venta-viviendas/madrid/puente-de-vallecas/pozo-del-tio-raimundo/"),
+    
+    # Additional San Blas-Canillejas barrios
+    ("San Blas-Canillejas", "Barrio del Aeropuerto", "/venta-viviendas/madrid/san-blas/barrio-del-aeropuerto/"),
+    ("San Blas-Canillejas", "Casco Histórico de Canillejas", "/venta-viviendas/madrid/san-blas/casco-historico-de-canillejas/"),
+    ("San Blas-Canillejas", "Colonia Jardín", "/venta-viviendas/madrid/san-blas/colonia-jardin/"),
+    
+    # Additional Hortaleza barrios
+    ("Hortaleza", "Pinar de Chamartín", "/venta-viviendas/madrid/hortaleza/pinar-de-chamartin/"),
+    
+    # Additional Chamartín barrios
+    ("Chamartín", "Pinar de Chamartín", "/venta-viviendas/madrid/chamartin/pinar-de-chamartin/"),
+    ("Chamartín", "Costillares", "/venta-viviendas/madrid/chamartin/costillares/"),
+    
+    # Additional Retiro barrios
+    ("Retiro", "Atocha", "/venta-viviendas/madrid/retiro/atocha/"),
+    
+    # Additional Salamanca barrios
+    ("Salamanca", "Concepción", "/venta-viviendas/madrid/barrio-de-salamanca/concepcion/"),
+    
+    # Additional Tetuán barrios
+    ("Tetuán", "Almenara", "/venta-viviendas/madrid/tetuan/almenara/"),
+    
+    # Additional Usera barrios
+    ("Usera", "Poblado Dirigido de Orcasitas", "/venta-viviendas/madrid/usera/poblado-dirigido-de-orcasitas/"),
+    
+    # Additional Villaverde barrios
+    ("Villaverde", "Marconi", "/venta-viviendas/madrid/villaverde/marconi/"),
+    ("Villaverde", "San Andrés", "/venta-viviendas/madrid/villaverde/san-andres/"),
 ]
 
 
