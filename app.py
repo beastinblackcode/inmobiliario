@@ -884,7 +884,11 @@ def main():
     
     # Time to Sale Analysis (Metric 1)
     st.markdown("#### ⏱️ Tiempo Medio de Venta por Distrito")
-    sold_df = df[(df['status'] == 'sold_removed') & (df['distrito'].notna())].copy()
+    
+    # Load ALL properties (including sold) for this analysis, bypassing sidebar filters
+    # This is necessary because the main df is filtered by status (usually "active")
+    df_all = load_data(status="all", distritos=None, min_price=None, max_price=None, seller_type="All")
+    sold_df = df_all[(df_all['status'] == 'sold_removed') & (df_all['distrito'].notna())].copy()
     
     # Filter out initial historical data (properties that were already gone on first scrape)
     # Only include properties first seen AFTER 2026-01-14 (real sales during tracking period)
