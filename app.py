@@ -842,12 +842,12 @@ def main():
             # Display table
             bargains_display = bargains[[
                 'title', 'price', 'price_per_sqm', 'vs_distrito_avg', 
-                'distrito', 'barrio', 'rooms', 'size_sqm', 'quality_score'
+                'distrito', 'barrio', 'rooms', 'size_sqm', 'quality_score', 'url'
             ]].copy()
             
             bargains_display.columns = [
                 'Título', 'Precio', '€/m²', '% vs Distrito', 
-                'Distrito', 'Barrio', 'Hab.', 'm²', 'Score'
+                'Distrito', 'Barrio', 'Hab.', 'm²', 'Score', 'Link'
             ]
             
             # Format columns
@@ -856,12 +856,19 @@ def main():
             bargains_display['% vs Distrito'] = bargains_display['% vs Distrito'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
             bargains_display['Score'] = bargains_display['Score'].apply(lambda x: f"{x:.0f}")
             bargains_display['m²'] = bargains_display['m²'].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
+            bargains_display['Link'] = bargains_display['Link'].apply(lambda x: f"[🔗 Ver]({x})")
             
             st.dataframe(
                 bargains_display,
                 hide_index=True,
                 use_container_width=True,
-                height=400
+                height=400,
+                column_config={
+                    "Link": st.column_config.LinkColumn(
+                        "Idealista",
+                        display_text="🔗 Ver"
+                    )
+                }
             )
             
             # Download button
