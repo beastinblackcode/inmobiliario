@@ -1,0 +1,135 @@
+Arganzuela|Acacias|50|2026-02-11
+Arganzuela|Chopera|26|2026-02-11
+Arganzuela|Delicias|41|2026-02-11
+Arganzuela|Imperial|19|2026-02-11
+Arganzuela|Legazpi|59|2026-02-11
+Arganzuela|Palos de la Frontera|65|2026-02-11
+Barajas|Aeropuerto|4|2026-02-11
+Barajas|Alameda de Osuna|35|2026-02-11
+Barajas|Campo de las Naciones-Corralejos|18|2026-02-11
+Barajas|Casco Histórico de Barajas|16|2026-02-11
+Barajas|Timón|7|2026-02-11
+Carabanchel|Abrantes|24|2026-02-11
+Carabanchel|Buena Vista|24|2026-02-11
+Carabanchel|Comillas|9|2026-02-11
+Carabanchel|Opañel|15|2026-02-11
+Carabanchel|Puerta Bonita|11|2026-02-11
+Carabanchel|San Isidro|6|2026-02-11
+Carabanchel|Vista Alegre|19|2026-02-11
+Centro|Chueca-Justicia|11|2026-02-11
+Centro|Huertas-Cortes|32|2026-02-11
+Centro|Lavapiés-Embajadores|47|2026-02-11
+Centro|Malasaña-Universidad|60|2026-02-11
+Centro|Palacio|68|2026-02-11
+Centro|Sol|18|2026-02-11
+Chamartín|Bernabéu-Hispanoamérica|8|2026-02-11
+Chamartín|Castilla|11|2026-02-11
+Chamartín|Ciudad Jardín|9|2026-02-11
+Chamartín|El Viso|8|2026-02-11
+Chamartín|Nueva España|18|2026-02-11
+Chamartín|Prosperidad|14|2026-02-11
+Chamberí|Almagro|40|2026-02-11
+Chamberí|Arapiles|10|2026-02-11
+Chamberí|Gaztambide|14|2026-02-11
+Chamberí|Nuevos Ministerios-Ríos Rosas|27|2026-02-11
+Chamberí|Trafalgar|55|2026-02-11
+Chamberí|Vallehermoso|19|2026-02-11
+Ciudad Lineal|Colina|9|2026-02-11
+Ciudad Lineal|Concepción|17|2026-02-11
+Ciudad Lineal|Costillares|12|2026-02-11
+Ciudad Lineal|Pueblo Nuevo|28|2026-02-11
+Ciudad Lineal|Quintana|12|2026-02-11
+Ciudad Lineal|San Juan Bautista|8|2026-02-11
+Ciudad Lineal|San Pascual|12|2026-02-11
+Ciudad Lineal|Ventas|30|2026-02-11
+Fuencarral-El Pardo|Arroyo del Fresno|2|2026-02-11
+Fuencarral-El Pardo|El Pardo|2|2026-02-11
+Fuencarral-El Pardo|Fuentelarreina|4|2026-02-11
+Fuencarral-El Pardo|La Paz|13|2026-02-11
+Fuencarral-El Pardo|Las Tablas|10|2026-02-11
+Fuencarral-El Pardo|Mirasierra|5|2026-02-11
+Fuencarral-El Pardo|Montecarmelo|7|2026-02-11
+Fuencarral-El Pardo|Peñagrande|19|2026-02-11
+Fuencarral-El Pardo|Pilar|20|2026-02-11
+Fuencarral-El Pardo|Tres Olivos-Valverde|14|2026-02-11
+Hortaleza|Apóstol Santiago|5|2026-02-11
+Hortaleza|Canillas|16|2026-02-11
+Hortaleza|Conde Orgaz-Piovera|11|2026-02-11
+Hortaleza|Palomas|4|2026-02-11
+Hortaleza|Pinar del Rey|22|2026-02-11
+Hortaleza|Sanchinarro|7|2026-02-11
+Hortaleza|Valdebebas-Valdefuentes|6|2026-02-11
+Hortaleza|Virgen del Cortijo-Manoteras|7|2026-02-11
+Latina|Aluche|18|2026-02-11
+Latina|Campamento|6|2026-02-11
+Latina|Los Cármenes|10|2026-02-11
+Latina|Lucero|15|2026-02-11
+Latina|Puerta del Ángel|40|2026-02-11
+Latina|Águilas|18|2026-02-11
+Moncloa-Aravaca|Aravaca|15|2026-02-11
+Moncloa-Aravaca|Argüelles|22|2026-02-11
+Moncloa-Aravaca|Casa de Campo|7|2026-02-11
+Moncloa-Aravaca|Ciudad Universitaria|8|2026-02-11
+Moncloa-Aravaca|El Plantío|2|2026-02-11
+Moncloa-Aravaca|Valdemarín|3|2026-02-11
+Moncloa-Aravaca|Valdezarza|18|2026-02-11
+Moratalaz|Fontarrón|9|2026-02-11
+Moratalaz|Horcajo|2|2026-02-11
+Moratalaz|Marroquina|8|2026-02-11
+Moratalaz|Media Legua|7|2026-02-11
+Moratalaz|Pavones|5|2026-02-11
+Moratalaz|Vinateros|10|2026-02-11
+Puente de Vallecas|Entrevías|9|2026-02-11
+Puente de Vallecas|Numancia|30|2026-02-11
+Puente de Vallecas|Palomeras Bajas|14|2026-02-11
+Puente de Vallecas|Palomeras Sureste|14|2026-02-11
+Puente de Vallecas|Portazgo|10|2026-02-11
+Puente de Vallecas|San Diego|33|2026-02-11
+Retiro|Adelfas|4|2026-02-11
+Retiro|Estrella|12|2026-02-11
+Retiro|Ibiza|48|2026-02-11
+Retiro|Jerónimos|21|2026-02-11
+Retiro|Niño Jesús|10|2026-02-11
+Retiro|Pacífico|27|2026-02-11
+Salamanca|Castellana|21|2026-02-11
+Salamanca|Fuente del Berro|54|2026-02-11
+Salamanca|Goya|133|2026-02-11
+Salamanca|Guindalera|27|2026-02-11
+Salamanca|Lista|17|2026-02-11
+Salamanca|Recoletos|30|2026-02-11
+San Blas-Canillejas|Amposta|6|2026-02-11
+San Blas-Canillejas|Arcos|8|2026-02-11
+San Blas-Canillejas|Canillejas|10|2026-02-11
+San Blas-Canillejas|Hellín|3|2026-02-11
+San Blas-Canillejas|Rejas|19|2026-02-11
+San Blas-Canillejas|Rosas|7|2026-02-11
+San Blas-Canillejas|Salvador|8|2026-02-11
+San Blas-Canillejas|Simancas|21|2026-02-11
+Tetuán|Bellas Vistas|17|2026-02-11
+Tetuán|Berruguete|20|2026-02-11
+Tetuán|Cuatro Caminos|27|2026-02-11
+Tetuán|Cuzco-Castillejos|23|2026-02-11
+Tetuán|Valdeacederas|24|2026-02-11
+Tetuán|Ventilla-Almenara|17|2026-02-11
+Usera|12 de Octubre-Orcasur|1|2026-02-11
+Usera|Almendrales|13|2026-02-11
+Usera|Moscardó|15|2026-02-11
+Usera|Orcasitas|9|2026-02-11
+Usera|Pradolongo|14|2026-02-11
+Usera|San Fermín|11|2026-02-11
+Usera|Zofío|6|2026-02-11
+Vicálvaro|Ambroz|5|2026-02-11
+Vicálvaro|Casco Histórico de Vicálvaro|8|2026-02-11
+Vicálvaro|El Cañaveral|5|2026-02-11
+Vicálvaro|Los Ahijones|9|2026-02-11
+Vicálvaro|Los Berrocales|16|2026-02-11
+Vicálvaro|Los Cerros|13|2026-02-11
+Vicálvaro|Valdebernardo-Valderrivas|2|2026-02-11
+Villa de Vallecas|Casco Histórico de Vallecas|25|2026-02-11
+Villa de Vallecas|Ensanche de Vallecas-La Gavia|31|2026-02-11
+Villa de Vallecas|Santa Eugenia|13|2026-02-11
+Villaverde|Butarque|5|2026-02-11
+Villaverde|Los Rosales|10|2026-02-11
+Villaverde|Los Ángeles|17|2026-02-11
+Villaverde|San Cristóbal|11|2026-02-11
+Villaverde|Villaverde Alto|35|2026-02-11

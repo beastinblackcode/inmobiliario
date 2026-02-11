@@ -22,7 +22,8 @@ from database import (
     get_active_listing_ids,
     insert_listing,
     update_listing,
-    mark_as_sold
+    mark_as_sold,
+    mark_stale_as_sold
 )
 
 
@@ -35,67 +36,59 @@ BRIGHTDATA_HOST = os.getenv('BRIGHTDATA_HOST', 'brd.superproxy.io:33335')
 
 BASE_URL = "https://www.idealista.com"
 
-# Madrid's barrios organized by district (184 total)
+# Madrid's barrios organized by district (144 total - verified from Idealista)
 # Format: (Distrito, Barrio, URL_path)
 BARRIO_URLS = [
-    # Arganzuela
+    # Arganzuela (6 barrios)
     ("Arganzuela", "Acacias", "/venta-viviendas/madrid/arganzuela/acacias/"),
     ("Arganzuela", "Chopera", "/venta-viviendas/madrid/arganzuela/chopera/"),
     ("Arganzuela", "Delicias", "/venta-viviendas/madrid/arganzuela/delicias/"),
     ("Arganzuela", "Imperial", "/venta-viviendas/madrid/arganzuela/imperial/"),
     ("Arganzuela", "Legazpi", "/venta-viviendas/madrid/arganzuela/legazpi/"),
-    ("Arganzuela", "Palos de la Frontera", "/venta-viviendas/madrid/arganzuela/palos-de-la-frontera/"),
+    ("Arganzuela", "Palos de Moguer", "/venta-viviendas/madrid/arganzuela/palos-de-moguer/"),
     
-    # Barajas
+    # Barajas (5 barrios)
     ("Barajas", "Aeropuerto", "/venta-viviendas/madrid/barajas/aeropuerto/"),
     ("Barajas", "Alameda de Osuna", "/venta-viviendas/madrid/barajas/alameda-de-osuna/"),
-    ("Barajas", "Campo de las Naciones-Corralejos", "/venta-viviendas/madrid/barajas/campo-de-las-naciones-corralejos/"),
     ("Barajas", "Casco Histórico de Barajas", "/venta-viviendas/madrid/barajas/casco-historico-de-barajas/"),
+    ("Barajas", "Corralejos", "/venta-viviendas/madrid/barajas/corralejos/"),
     ("Barajas", "Timón", "/venta-viviendas/madrid/barajas/timon/"),
     
-    # Salamanca
-    ("Salamanca", "Castellana", "/venta-viviendas/madrid/barrio-de-salamanca/castellana/"),
-    ("Salamanca", "Fuente del Berro", "/venta-viviendas/madrid/barrio-de-salamanca/fuente-del-berro/"),
-    ("Salamanca", "Goya", "/venta-viviendas/madrid/barrio-de-salamanca/goya/"),
-    ("Salamanca", "Guindalera", "/venta-viviendas/madrid/barrio-de-salamanca/guindalera/"),
-    ("Salamanca", "Lista", "/venta-viviendas/madrid/barrio-de-salamanca/lista/"),
-    ("Salamanca", "Recoletos", "/venta-viviendas/madrid/barrio-de-salamanca/recoletos/"),
-    
-    # Carabanchel
+    # Carabanchel (8 barrios)
     ("Carabanchel", "Abrantes", "/venta-viviendas/madrid/carabanchel/abrantes/"),
-    ("Carabanchel", "Buena Vista", "/venta-viviendas/madrid/carabanchel/buena-vista/"),
+    ("Carabanchel", "Buenavista", "/venta-viviendas/madrid/carabanchel/buenavista/"),
     ("Carabanchel", "Comillas", "/venta-viviendas/madrid/carabanchel/comillas/"),
     ("Carabanchel", "Opañel", "/venta-viviendas/madrid/carabanchel/opanel/"),
-    ("Carabanchel", "PAU de Carabanchel", "/venta-viviendas/madrid/carabanchel/pau-de-carabanchel/"),
     ("Carabanchel", "Puerta Bonita", "/venta-viviendas/madrid/carabanchel/puerta-bonita/"),
     ("Carabanchel", "San Isidro", "/venta-viviendas/madrid/carabanchel/san-isidro/"),
     ("Carabanchel", "Vista Alegre", "/venta-viviendas/madrid/carabanchel/vista-alegre/"),
+    ("Carabanchel", "Vistalegre-La Chimenea", "/venta-viviendas/madrid/carabanchel/vistalegre-la-chimenea/"),
     
-    # Centro
-    ("Centro", "Chueca-Justicia", "/venta-viviendas/madrid/centro/chueca-justicia/"),
-    ("Centro", "Huertas-Cortes", "/venta-viviendas/madrid/centro/huertas-cortes/"),
-    ("Centro", "Lavapiés-Embajadores", "/venta-viviendas/madrid/centro/lavapies-embajadores/"),
-    ("Centro", "Malasaña-Universidad", "/venta-viviendas/madrid/centro/malasana-universidad/"),
+    # Centro (6 barrios)
+    ("Centro", "Cortes", "/venta-viviendas/madrid/centro/cortes/"),
+    ("Centro", "Embajadores", "/venta-viviendas/madrid/centro/embajadores/"),
+    ("Centro", "Justicia", "/venta-viviendas/madrid/centro/justicia/"),
     ("Centro", "Palacio", "/venta-viviendas/madrid/centro/palacio/"),
     ("Centro", "Sol", "/venta-viviendas/madrid/centro/sol/"),
+    ("Centro", "Universidad", "/venta-viviendas/madrid/centro/universidad/"),
     
-    # Chamartín
-    ("Chamartín", "Bernabéu-Hispanoamérica", "/venta-viviendas/madrid/chamartin/bernabeu-hispanoamerica/"),
+    # Chamartín (6 barrios)
     ("Chamartín", "Castilla", "/venta-viviendas/madrid/chamartin/castilla/"),
     ("Chamartín", "Ciudad Jardín", "/venta-viviendas/madrid/chamartin/ciudad-jardin/"),
     ("Chamartín", "El Viso", "/venta-viviendas/madrid/chamartin/el-viso/"),
+    ("Chamartín", "Hispanoamérica", "/venta-viviendas/madrid/chamartin/hispanoamerica/"),
     ("Chamartín", "Nueva España", "/venta-viviendas/madrid/chamartin/nueva-espana/"),
     ("Chamartín", "Prosperidad", "/venta-viviendas/madrid/chamartin/prosperidad/"),
     
-    # Chamberí
+    # Chamberí (6 barrios)
     ("Chamberí", "Almagro", "/venta-viviendas/madrid/chamberi/almagro/"),
     ("Chamberí", "Arapiles", "/venta-viviendas/madrid/chamberi/arapiles/"),
     ("Chamberí", "Gaztambide", "/venta-viviendas/madrid/chamberi/gaztambide/"),
-    ("Chamberí", "Nuevos Ministerios-Ríos Rosas", "/venta-viviendas/madrid/chamberi/nuevos-ministerios-rios-rosas/"),
+    ("Chamberí", "Ríos Rosas", "/venta-viviendas/madrid/chamberi/rios-rosas/"),
     ("Chamberí", "Trafalgar", "/venta-viviendas/madrid/chamberi/trafalgar/"),
     ("Chamberí", "Vallehermoso", "/venta-viviendas/madrid/chamberi/vallehermoso/"),
     
-    # Ciudad Lineal
+    # Ciudad Lineal (9 barrios)
     ("Ciudad Lineal", "Atalaya", "/venta-viviendas/madrid/ciudad-lineal/atalaya/"),
     ("Ciudad Lineal", "Colina", "/venta-viviendas/madrid/ciudad-lineal/colina/"),
     ("Ciudad Lineal", "Concepción", "/venta-viviendas/madrid/ciudad-lineal/concepcion/"),
@@ -106,47 +99,50 @@ BARRIO_URLS = [
     ("Ciudad Lineal", "San Pascual", "/venta-viviendas/madrid/ciudad-lineal/san-pascual/"),
     ("Ciudad Lineal", "Ventas", "/venta-viviendas/madrid/ciudad-lineal/ventas/"),
     
-    # Fuencarral-El Pardo
-    ("Fuencarral-El Pardo", "Arroyo del Fresno", "/venta-viviendas/madrid/fuencarral/arroyo-del-fresno/"),
+    # Fuencarral-El Pardo (9 barrios)
+    ("Fuencarral-El Pardo", "Barrio del Pilar", "/venta-viviendas/madrid/fuencarral/barrio-del-pilar/"),
+    ("Fuencarral-El Pardo", "El Goloso", "/venta-viviendas/madrid/fuencarral/el-goloso/"),
     ("Fuencarral-El Pardo", "El Pardo", "/venta-viviendas/madrid/fuencarral/el-pardo/"),
     ("Fuencarral-El Pardo", "Fuentelarreina", "/venta-viviendas/madrid/fuencarral/fuentelarreina/"),
     ("Fuencarral-El Pardo", "La Paz", "/venta-viviendas/madrid/fuencarral/la-paz/"),
-    ("Fuencarral-El Pardo", "Las Tablas", "/venta-viviendas/madrid/fuencarral/las-tablas/"),
     ("Fuencarral-El Pardo", "Mirasierra", "/venta-viviendas/madrid/fuencarral/mirasierra/"),
-    ("Fuencarral-El Pardo", "Montecarmelo", "/venta-viviendas/madrid/fuencarral/montecarmelo/"),
     ("Fuencarral-El Pardo", "Peñagrande", "/venta-viviendas/madrid/fuencarral/penagrande/"),
-    ("Fuencarral-El Pardo", "Pilar", "/venta-viviendas/madrid/fuencarral/pilar/"),
     ("Fuencarral-El Pardo", "Tres Olivos-Valverde", "/venta-viviendas/madrid/fuencarral/tres-olivos-valverde/"),
+    ("Fuencarral-El Pardo", "Valverde", "/venta-viviendas/madrid/fuencarral/valverde/"),
     
-    # Hortaleza
+    # Hortaleza (9 barrios)
     ("Hortaleza", "Apóstol Santiago", "/venta-viviendas/madrid/hortaleza/apostol-santiago/"),
     ("Hortaleza", "Canillas", "/venta-viviendas/madrid/hortaleza/canillas/"),
-    ("Hortaleza", "Conde Orgaz-Piovera", "/venta-viviendas/madrid/hortaleza/conde-orgaz-piovera/"),
     ("Hortaleza", "Palomas", "/venta-viviendas/madrid/hortaleza/palomas/"),
+    ("Hortaleza", "Pinar de Chamartín", "/venta-viviendas/madrid/hortaleza/pinar-de-chamartin/"),
     ("Hortaleza", "Pinar del Rey", "/venta-viviendas/madrid/hortaleza/pinar-del-rey/"),
+    ("Hortaleza", "Piovera", "/venta-viviendas/madrid/hortaleza/piovera/"),
     ("Hortaleza", "Sanchinarro", "/venta-viviendas/madrid/hortaleza/sanchinarro/"),
     ("Hortaleza", "Valdebebas-Valdefuentes", "/venta-viviendas/madrid/hortaleza/valdebebas-valdefuentes/"),
     ("Hortaleza", "Virgen del Cortijo-Manoteras", "/venta-viviendas/madrid/hortaleza/virgen-del-cortijo-manoteras/"),
     
-    # Latina
+    # Latina (8 barrios)
     ("Latina", "Águilas", "/venta-viviendas/madrid/latina/aguilas/"),
     ("Latina", "Aluche", "/venta-viviendas/madrid/latina/aluche/"),
+    ("Latina", "Batán", "/venta-viviendas/madrid/latina/batan/"),
     ("Latina", "Campamento", "/venta-viviendas/madrid/latina/campamento/"),
     ("Latina", "Cuatro Vientos", "/venta-viviendas/madrid/latina/cuatro-vientos/"),
     ("Latina", "Los Cármenes", "/venta-viviendas/madrid/latina/los-carmenes/"),
     ("Latina", "Lucero", "/venta-viviendas/madrid/latina/lucero/"),
     ("Latina", "Puerta del Ángel", "/venta-viviendas/madrid/latina/puerta-del-angel/"),
     
-    # Moncloa-Aravaca
+    # Moncloa-Aravaca (8 barrios)
     ("Moncloa-Aravaca", "Aravaca", "/venta-viviendas/madrid/moncloa/aravaca/"),
     ("Moncloa-Aravaca", "Argüelles", "/venta-viviendas/madrid/moncloa/arguelles/"),
     ("Moncloa-Aravaca", "Casa de Campo", "/venta-viviendas/madrid/moncloa/casa-de-campo/"),
     ("Moncloa-Aravaca", "Ciudad Universitaria", "/venta-viviendas/madrid/moncloa/ciudad-universitaria/"),
+    ("Moncloa-Aravaca", "Dehesa de la Villa", "/venta-viviendas/madrid/moncloa/dehesa-de-la-villa/"),
     ("Moncloa-Aravaca", "El Plantío", "/venta-viviendas/madrid/moncloa/el-plantio/"),
     ("Moncloa-Aravaca", "Valdemarín", "/venta-viviendas/madrid/moncloa/valdemarin/"),
     ("Moncloa-Aravaca", "Valdezarza", "/venta-viviendas/madrid/moncloa/valdezarza/"),
     
-    # Moratalaz
+    # Moratalaz (7 barrios)
+    ("Moratalaz", "Arroyo del Olivar", "/venta-viviendas/madrid/moratalaz/arroyo-del-olivar/"),
     ("Moratalaz", "Fontarrón", "/venta-viviendas/madrid/moratalaz/fontarron/"),
     ("Moratalaz", "Horcajo", "/venta-viviendas/madrid/moratalaz/horcajo/"),
     ("Moratalaz", "Marroquina", "/venta-viviendas/madrid/moratalaz/marroquina/"),
@@ -154,15 +150,17 @@ BARRIO_URLS = [
     ("Moratalaz", "Pavones", "/venta-viviendas/madrid/moratalaz/pavones/"),
     ("Moratalaz", "Vinateros", "/venta-viviendas/madrid/moratalaz/vinateros/"),
     
-    # Puente de Vallecas
+    # Puente de Vallecas (8 barrios)
+    ("Puente de Vallecas", "Doña Carlota", "/venta-viviendas/madrid/puente-de-vallecas/dona-carlota/"),
     ("Puente de Vallecas", "Entrevías", "/venta-viviendas/madrid/puente-de-vallecas/entrevias/"),
     ("Puente de Vallecas", "Numancia", "/venta-viviendas/madrid/puente-de-vallecas/numancia/"),
     ("Puente de Vallecas", "Palomeras Bajas", "/venta-viviendas/madrid/puente-de-vallecas/palomeras-bajas/"),
     ("Puente de Vallecas", "Palomeras Sureste", "/venta-viviendas/madrid/puente-de-vallecas/palomeras-sureste/"),
     ("Puente de Vallecas", "Portazgo", "/venta-viviendas/madrid/puente-de-vallecas/portazgo/"),
+    ("Puente de Vallecas", "Pozo del Tío Raimundo", "/venta-viviendas/madrid/puente-de-vallecas/pozo-del-tio-raimundo/"),
     ("Puente de Vallecas", "San Diego", "/venta-viviendas/madrid/puente-de-vallecas/san-diego/"),
     
-    # Retiro
+    # Retiro (6 barrios)
     ("Retiro", "Adelfas", "/venta-viviendas/madrid/retiro/adelfas/"),
     ("Retiro", "Estrella", "/venta-viviendas/madrid/retiro/estrella/"),
     ("Retiro", "Ibiza", "/venta-viviendas/madrid/retiro/ibiza/"),
@@ -170,7 +168,15 @@ BARRIO_URLS = [
     ("Retiro", "Niño Jesús", "/venta-viviendas/madrid/retiro/nino-jesus/"),
     ("Retiro", "Pacífico", "/venta-viviendas/madrid/retiro/pacifico/"),
     
-    # San Blas-Canillejas
+    # Salamanca (6 barrios)
+    ("Salamanca", "Castellana", "/venta-viviendas/madrid/barrio-de-salamanca/castellana/"),
+    ("Salamanca", "Fuente del Berro", "/venta-viviendas/madrid/barrio-de-salamanca/fuente-del-berro/"),
+    ("Salamanca", "Goya", "/venta-viviendas/madrid/barrio-de-salamanca/goya/"),
+    ("Salamanca", "Guindalera", "/venta-viviendas/madrid/barrio-de-salamanca/guindalera/"),
+    ("Salamanca", "Lista", "/venta-viviendas/madrid/barrio-de-salamanca/lista/"),
+    ("Salamanca", "Recoletos", "/venta-viviendas/madrid/barrio-de-salamanca/recoletos/"),
+    
+    # San Blas-Canillejas (8 barrios)
     ("San Blas-Canillejas", "Amposta", "/venta-viviendas/madrid/san-blas/amposta/"),
     ("San Blas-Canillejas", "Arcos", "/venta-viviendas/madrid/san-blas/arcos/"),
     ("San Blas-Canillejas", "Canillejas", "/venta-viviendas/madrid/san-blas/canillejas/"),
@@ -180,7 +186,7 @@ BARRIO_URLS = [
     ("San Blas-Canillejas", "Salvador", "/venta-viviendas/madrid/san-blas/salvador/"),
     ("San Blas-Canillejas", "Simancas", "/venta-viviendas/madrid/san-blas/simancas/"),
     
-    # Tetuán
+    # Tetuán (6 barrios)
     ("Tetuán", "Bellas Vistas", "/venta-viviendas/madrid/tetuan/bellas-vistas/"),
     ("Tetuán", "Berruguete", "/venta-viviendas/madrid/tetuan/berruguete/"),
     ("Tetuán", "Cuatro Caminos", "/venta-viviendas/madrid/tetuan/cuatro-caminos/"),
@@ -188,7 +194,7 @@ BARRIO_URLS = [
     ("Tetuán", "Valdeacederas", "/venta-viviendas/madrid/tetuan/valdeacederas/"),
     ("Tetuán", "Ventilla-Almenara", "/venta-viviendas/madrid/tetuan/ventilla-almenara/"),
     
-    # Usera
+    # Usera (7 barrios)
     ("Usera", "12 de Octubre-Orcasur", "/venta-viviendas/madrid/usera/12-de-octubre-orcasur/"),
     ("Usera", "Almendrales", "/venta-viviendas/madrid/usera/almendrales/"),
     ("Usera", "Moscardó", "/venta-viviendas/madrid/usera/moscardo/"),
@@ -197,7 +203,7 @@ BARRIO_URLS = [
     ("Usera", "San Fermín", "/venta-viviendas/madrid/usera/san-fermin/"),
     ("Usera", "Zofío", "/venta-viviendas/madrid/usera/zofio/"),
     
-    # Vicálvaro
+    # Vicálvaro (7 barrios)
     ("Vicálvaro", "Ambroz", "/venta-viviendas/madrid/vicalvaro/ambroz/"),
     ("Vicálvaro", "Casco Histórico de Vicálvaro", "/venta-viviendas/madrid/vicalvaro/casco-historico-de-vicalvaro/"),
     ("Vicálvaro", "El Cañaveral", "/venta-viviendas/madrid/vicalvaro/el-canaveral/"),
@@ -206,71 +212,18 @@ BARRIO_URLS = [
     ("Vicálvaro", "Los Cerros", "/venta-viviendas/madrid/vicalvaro/los-cerros/"),
     ("Vicálvaro", "Valdebernardo-Valderrivas", "/venta-viviendas/madrid/vicalvaro/valdebernardo-valderrivas/"),
     
-    # Villa de Vallecas
+    # Villa de Vallecas (4 barrios)
     ("Villa de Vallecas", "Casco Histórico de Vallecas", "/venta-viviendas/madrid/villa-de-vallecas/casco-historico-de-vallecas/"),
     ("Villa de Vallecas", "Ensanche de Vallecas-La Gavia", "/venta-viviendas/madrid/villa-de-vallecas/ensanche-de-vallecas-la-gavia/"),
     ("Villa de Vallecas", "Santa Eugenia", "/venta-viviendas/madrid/villa-de-vallecas/santa-eugenia/"),
     ("Villa de Vallecas", "Valdecarros", "/venta-viviendas/madrid/villa-de-vallecas/valdecarros/"),
     
-    # Villaverde
+    # Villaverde (5 barrios)
     ("Villaverde", "Butarque", "/venta-viviendas/madrid/villaverde/butarque/"),
     ("Villaverde", "Los Ángeles", "/venta-viviendas/madrid/villaverde/los-angeles/"),
     ("Villaverde", "Los Rosales", "/venta-viviendas/madrid/villaverde/los-rosales/"),
     ("Villaverde", "San Cristóbal", "/venta-viviendas/madrid/villaverde/san-cristobal/"),
     ("Villaverde", "Villaverde Alto", "/venta-viviendas/madrid/villaverde/villaverde-alto/"),
-    
-    # ============================================================================
-    # ADDITIONAL BARRIOS - Added to increase coverage
-    # ============================================================================
-    
-    # Additional Arganzuela barrios
-    ("Arganzuela", "Atocha", "/venta-viviendas/madrid/arganzuela/atocha/"),
-    
-    # Additional Fuencarral-El Pardo barrios
-    ("Fuencarral-El Pardo", "Barrio del Pilar", "/venta-viviendas/madrid/fuencarral/barrio-del-pilar/"),
-    ("Fuencarral-El Pardo", "El Goloso", "/venta-viviendas/madrid/fuencarral/el-goloso/"),
-    ("Fuencarral-El Pardo", "Valverde", "/venta-viviendas/madrid/fuencarral/valverde/"),
-    
-    # Additional Latina barrios
-    ("Latina", "Batán", "/venta-viviendas/madrid/latina/batan/"),
-    
-    # Additional Moncloa-Aravaca barrios
-    ("Moncloa-Aravaca", "Dehesa de la Villa", "/venta-viviendas/madrid/moncloa/dehesa-de-la-villa/"),
-    
-    # Additional Moratalaz barrios
-    ("Moratalaz", "Arroyo del Olivar", "/venta-viviendas/madrid/moratalaz/arroyo-del-olivar/"),
-    
-    # Additional Puente de Vallecas barrios
-    ("Puente de Vallecas", "Doña Carlota", "/venta-viviendas/madrid/puente-de-vallecas/dona-carlota/"),
-    ("Puente de Vallecas", "Pozo del Tío Raimundo", "/venta-viviendas/madrid/puente-de-vallecas/pozo-del-tio-raimundo/"),
-    
-    # Additional San Blas-Canillejas barrios
-    ("San Blas-Canillejas", "Barrio del Aeropuerto", "/venta-viviendas/madrid/san-blas/barrio-del-aeropuerto/"),
-    ("San Blas-Canillejas", "Casco Histórico de Canillejas", "/venta-viviendas/madrid/san-blas/casco-historico-de-canillejas/"),
-    ("San Blas-Canillejas", "Colonia Jardín", "/venta-viviendas/madrid/san-blas/colonia-jardin/"),
-    
-    # Additional Hortaleza barrios
-    ("Hortaleza", "Pinar de Chamartín", "/venta-viviendas/madrid/hortaleza/pinar-de-chamartin/"),
-    
-    # Additional Chamartín barrios
-    ("Chamartín", "Pinar de Chamartín", "/venta-viviendas/madrid/chamartin/pinar-de-chamartin/"),
-    ("Chamartín", "Costillares", "/venta-viviendas/madrid/chamartin/costillares/"),
-    
-    # Additional Retiro barrios
-    ("Retiro", "Atocha", "/venta-viviendas/madrid/retiro/atocha/"),
-    
-    # Additional Salamanca barrios
-    ("Salamanca", "Concepción", "/venta-viviendas/madrid/barrio-de-salamanca/concepcion/"),
-    
-    # Additional Tetuán barrios
-    ("Tetuán", "Almenara", "/venta-viviendas/madrid/tetuan/almenara/"),
-    
-    # Additional Usera barrios
-    ("Usera", "Poblado Dirigido de Orcasitas", "/venta-viviendas/madrid/usera/poblado-dirigido-de-orcasitas/"),
-    
-    # Additional Villaverde barrios
-    ("Villaverde", "Marconi", "/venta-viviendas/madrid/villaverde/marconi/"),
-    ("Villaverde", "San Andrés", "/venta-viviendas/madrid/villaverde/san-andres/"),
 ]
 
 
@@ -295,6 +248,9 @@ def get_proxy_config() -> Optional[Dict]:
 # Global request counter for Bright Data usage tracking
 request_counter = {'successful': 0, 'failed': 0, 'total': 0}
 
+# Global tracking for 502 errors
+errors_502 = []  # List of (distrito, barrio, url_path) tuples
+
 def get_brightdata_cost_estimate():
     """
     Calculate estimated Bright Data cost based on requests made.
@@ -313,7 +269,7 @@ def get_brightdata_cost_estimate():
     }
 
 
-def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> Optional[str]:
+def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> tuple:
     """
     Fetch HTML content from URL with retry logic.
     
@@ -323,7 +279,7 @@ def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> Op
         retries: Number of retry attempts
         
     Returns:
-        HTML content or None if failed
+        Tuple of (HTML content or None, status_code)
     """
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
@@ -346,10 +302,22 @@ def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> Op
             
             if response.status_code == 200:
                 request_counter['successful'] += 1
-                return response.text
+                return response.text, 200
+            elif response.status_code == 404:
+                request_counter['failed'] += 1
+                # Log 404 errors to file for later removal
+                with open('404_errors.log', 'a') as f:
+                    f.write(f"{url}\n")
+                print(f"  ⚠ HTTP 404 Not Found - logged to 404_errors.log")
+                return None, 404
+            elif response.status_code == 502:
+                request_counter['failed'] += 1
+                print(f"  ⚠ HTTP 502 Bad Gateway")
+                return None, 502
             else:
                 request_counter['failed'] += 1
                 print(f"  ⚠ HTTP {response.status_code} for {url}")
+                return None, response.status_code
                 
         except requests.exceptions.RequestException as e:
             request_counter['failed'] += 1
@@ -357,7 +325,7 @@ def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> Op
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)  # Exponential backoff
     
-    return None
+    return None, 0
 
 
 def extract_number(text: str) -> Optional[int]:
@@ -386,8 +354,8 @@ def fetch_property_description(url: str, proxies: Optional[Dict] = None) -> Opti
         Property description text or None if not found
     """
     try:
-        html = fetch_page(url, proxies, retries=2)
-        if not html:
+        html, status_code = fetch_page(url, proxies, retries=2)
+        if not html or status_code != 200:
             return None
         
         soup = BeautifulSoup(html, 'html.parser')
@@ -523,6 +491,7 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
 def scrape_barrio(distrito: str, barrio: str, url_path: str, proxies: Optional[Dict], seen_ids: set) -> int:
     """
     Scrape all pages for a single barrio.
+    Tracks 502 errors globally for later retry.
     
     Args:
         distrito: District name
@@ -547,7 +516,15 @@ def scrape_barrio(distrito: str, barrio: str, url_path: str, proxies: Optional[D
         
         print(f"  Page {page}...", end=' ')
         
-        html = fetch_page(url, proxies)
+        html, status_code = fetch_page(url, proxies)
+        
+        if status_code == 502:
+            print("❌ 502 Bad Gateway - will retry later")
+            # Add to global errors list (only once per barrio)
+            if (distrito, barrio, url_path) not in errors_502:
+                errors_502.append((distrito, barrio, url_path))
+            return listings_count  # Stop scraping this barrio
+        
         if not html:
             print("❌ Failed to fetch")
             break
@@ -593,6 +570,58 @@ def scrape_barrio(distrito: str, barrio: str, url_path: str, proxies: Optional[D
     return listings_count
 
 
+def retry_502_errors(proxies: Optional[Dict], active_ids: set) -> int:
+    """
+    Retry scraping barrios that had 502 errors.
+    Prompts user interactively and allows recursive retries.
+    
+    Args:
+        proxies: Proxy configuration
+        active_ids: Set of active listing IDs (modified in place)
+        
+    Returns:
+        Number of listings processed in retry attempts
+    """
+    if not errors_502:
+        return 0
+    
+    print("\n" + "=" * 60)
+    print("🔄 RETRY 502 ERRORS")
+    print("=" * 60)
+    print(f"\nFound {len(errors_502)} barrios with 502 errors:")
+    
+    for i, (distrito, barrio, url_path) in enumerate(errors_502, 1):
+        print(f"  {i}. {distrito} - {barrio}")
+    
+    response = input("\n¿Quieres reintentar estos barrios? (y/n): ")
+    
+    if response.lower() != 'y':
+        print("Skipping retries.")
+        return 0
+    
+    print("\n🔄 Retrying barrios with 502 errors...")
+    
+    total_listings = 0
+    # Create a copy of errors to retry
+    barrios_to_retry = errors_502.copy()
+    # Clear the global list
+    errors_502.clear()
+    
+    for distrito, barrio, url_path in barrios_to_retry:
+        count = scrape_barrio(distrito, barrio, url_path, proxies, active_ids)
+        total_listings += count
+        time.sleep(1)
+    
+    print(f"\n✓ Retry complete. Processed {total_listings} listings.")
+    
+    # Recursive retry if there are still errors
+    if errors_502:
+        print(f"\n⚠️  Still have {len(errors_502)} barrios with 502 errors.")
+        return total_listings + retry_502_errors(proxies, active_ids)
+    
+    return total_listings
+
+
 def run_scraper():
     """
     Main scraper orchestration function.
@@ -628,19 +657,31 @@ def run_scraper():
         total_listings += count
         time.sleep(1)  # Rate limiting between barrios
     
-    # Mark unseen listings as sold
-    print(f"\n🔍 Checking for sold/removed properties...")
-    print(f"  {len(active_ids)} listings not seen in this scrape")
+    # Retry 502 errors
+    retry_count = retry_502_errors(proxies, active_ids)
+    total_listings += retry_count
     
+    # Mark stale listings as sold (not seen in 7+ days)
+    print(f"\n🔍 Checking for sold/removed properties...")
+    print(f"  Marking properties not seen in 7+ days as sold...")
+    
+    sold_count = mark_stale_as_sold(days_threshold=7)
+    print(f"  ✓ Marked {sold_count} listings as sold/removed (not seen in 7+ days)")
+    
+    # Log properties not seen in this scrape (but not marking as sold yet)
     if active_ids:
-        sold_count = mark_as_sold(active_ids)
-        print(f"  ✓ Marked {sold_count} listings as sold/removed")
+        print(f"  ℹ️  {len(active_ids)} properties not seen in this scrape")
+        print(f"  ℹ️  These will be marked as sold if not seen again within 7 days")
+
     
     # Summary
     print("\n" + "=" * 60)
     print("✅ Scraping Complete")
     print("=" * 60)
     print(f"Total listings processed: {total_listings}")
+    if errors_502:
+        print(f"⚠️  {len(errors_502)} barrios still have 502 errors (not retried)")
+        print(f"   Run the scraper again to retry these barrios.")
     print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     

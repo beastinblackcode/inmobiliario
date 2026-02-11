@@ -360,6 +360,37 @@ def mark_as_sold(listing_ids: Set[str]) -> int:
         return 0
 
 
+def mark_stale_as_sold(days_threshold: int = 7) -> int:
+    """
+    Mark listings as sold if they haven't been seen in N days.
+    
+    This prevents false positives from incomplete scrapes by only marking
+    properties as sold after they've been consistently missing for multiple days.
+    
+    Args:
+        days_threshold: Number of days without updates before marking as sold (default: 7)
+        
+    Returns:
+        Number of listings marked as sold
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff_date = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d")
+            
+            cursor.execute("""
+                UPDATE listings 
+                SET status = 'sold_removed'
+                WHERE status = 'active'
+                AND last_seen_date < ?
+            """, (cutoff_date,))
+            
+            return cursor.rowcount
+    except Exception as e:
+        print(f"Error marking stale listings as sold: {e}")
+        return 0
+
+
 def get_listings(
     status: Optional[str] = None,
     distrito: Optional[List[str]] = None,
@@ -469,6 +500,40 @@ def get_database_stats() -> Dict:
             'avg_price': round(avg_price, 2),
             'avg_price_per_sqm': round(avg_price_per_sqm, 2)
         }
+
+
+def get_scraping_activity(days: int = 30) -> List[Dict]:
+    """
+    Get daily scraping activity statistics.
+    Shows how many new properties were discovered each day.
+    
+    Args:
+        days: Number of days to look back
+        
+    Returns:
+        List of dictionaries with date and count of new properties
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        cursor.execute("""
+            SELECT 
+                DATE(first_seen_date) as scrape_date,
+                COUNT(*) as new_properties
+            FROM listings
+            WHERE first_seen_date >= ?
+            GROUP BY DATE(first_seen_date)
+            ORDER BY scrape_date DESC
+        """, (cutoff_date,))
+        
+        return [
+            {
+                'date': row[0],
+                'count': row[1]
+            }
+            for row in cursor.fetchall()
+        ]
 
 
 def get_price_trends_by_zone(zone_type: str = 'distrito', min_properties: int = 10) -> List[Dict]:

@@ -14,6 +14,7 @@ from database import (
     get_database_stats,
     get_sold_last_n_days,
     get_price_trends_by_zone,
+    get_scraping_activity,
     download_database_from_cloud,
     is_streamlit_cloud
 )
@@ -54,8 +55,11 @@ st.markdown("""
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data(status, distritos, min_price, max_price, seller_type):
     """Load and cache listing data with filters."""
+    # Convert "all" to None for get_listings
+    status_filter = None if status == "all" else status
+    
     listings = get_listings(
-        status=status,
+        status=status_filter,
         distrito=distritos if distritos else None,
         min_price=min_price,
         max_price=max_price,
@@ -306,6 +310,126 @@ def main():
             value=f"{total_props:,}",
             delta=None
         )
+    
+    # Scraping Activity Section
+    st.markdown("---")
+    st.subheader("📅 Actividad de Scraping")
+    
+    # Get scraping activity data
+    scraping_data = get_scraping_activity(days=30)
+    
+    if scraping_data:
+        # Convert to DataFrame for easier manipulation
+        scraping_df = pd.DataFrame(scraping_data)
+        scraping_df['date'] = pd.to_datetime(scraping_df['date'])
+        scraping_df = scraping_df.sort_values('date')
+        
+        # Calculate statistics
+        avg_scraped = scraping_df['count'].mean()
+        max_scraped = scraping_df['count'].max()
+        min_scraped = scraping_df['count'].min()
+        total_scraped = scraping_df['count'].sum()
+        
+        # Display metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Promedio Diario",
+                f"{avg_scraped:,.0f}",
+                help="Promedio de propiedades nuevas por día"
+            )
+        
+        with col2:
+            st.metric(
+                "Máximo en un Día",
+                f"{max_scraped:,}",
+                help="Mayor cantidad de propiedades scrapeadas en un día"
+            )
+        
+        with col3:
+            st.metric(
+                "Mínimo en un Día",
+                f"{min_scraped:,}",
+                help="Menor cantidad de propiedades scrapeadas en un día"
+            )
+        
+        with col4:
+            st.metric(
+                "Total (30 días)",
+                f"{total_scraped:,}",
+                help="Total de propiedades nuevas en los últimos 30 días"
+            )
+        
+        # Create bar chart
+        fig_scraping = go.Figure()
+        
+        # Add bars with color based on count (red for low, green for high)
+        colors = ['#e74c3c' if count < avg_scraped * 0.5 else '#f39c12' if count < avg_scraped else '#27ae60' 
+                  for count in scraping_df['count']]
+        
+        fig_scraping.add_trace(go.Bar(
+            x=scraping_df['date'],
+            y=scraping_df['count'],
+            marker_color=colors,
+            hovertemplate='<b>%{x|%d/%m/%Y}</b><br>Propiedades: %{y:,}<extra></extra>',
+            name='Propiedades Scrapeadas'
+        ))
+        
+        # Add average line
+        fig_scraping.add_trace(go.Scatter(
+            x=scraping_df['date'],
+            y=[avg_scraped] * len(scraping_df),
+            mode='lines',
+            name='Promedio',
+            line=dict(color='#3498db', width=2, dash='dash'),
+            hovertemplate='<b>Promedio</b>: %{y:,.0f}<extra></extra>'
+        ))
+        
+        fig_scraping.update_layout(
+            title='Propiedades Nuevas Descubiertas por Día',
+            xaxis_title='Fecha',
+            yaxis_title='Cantidad de Propiedades',
+            hovermode='x unified',
+            height=400,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)'
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor='rgba(128, 128, 128, 0.2)'
+            )
+        )
+        
+        st.plotly_chart(fig_scraping, use_container_width=True)
+        
+        # Warning for low scraping days
+        low_days = scraping_df[scraping_df['count'] < avg_scraped * 0.5]
+        if not low_days.empty:
+            st.warning(f"⚠️ **{len(low_days)} días con scraping bajo detectados** (menos del 50% del promedio). "
+                      f"Esto puede indicar scrapes incompletos que marcan incorrectamente propiedades como vendidas.")
+            
+            # Show low scraping days
+            with st.expander("Ver días con scraping bajo"):
+                low_days_display = low_days.copy()
+                low_days_display['date'] = low_days_display['date'].dt.strftime('%Y-%m-%d')
+                low_days_display.columns = ['Fecha', 'Propiedades Scrapeadas']
+                st.dataframe(
+                    low_days_display.sort_values('Fecha', ascending=False),
+                    hide_index=True,
+                    use_container_width=True
+                )
+    else:
+        st.info("No hay datos de scraping disponibles para los últimos 30 días.")
     
     # Top Barrios Section
     st.markdown("---")
@@ -1424,30 +1548,52 @@ def main():
             
             st.markdown("---")
             
-            # Display table
-            display_df = drops_df[[
-                'title', 'distrito', 'barrio', 'old_price', 'new_price', 
-                'change_amount', 'change_percent', 'date_recorded', 'rooms', 'size_sqm'
-            ]].copy()
+            # Display table with clickable links
+            st.markdown("#### 📋 Propiedades con Bajadas de Precio")
             
-            display_df.columns = [
-                'Título', 'Distrito', 'Barrio', 'Precio Anterior', 'Precio Actual',
-                'Bajada (€)', 'Bajada (%)', 'Fecha', 'Hab.', 'm²'
-            ]
+            # Create display dataframe
+            display_df = drops_df[['url', 'title', 'distrito', 'barrio', 'old_price', 'new_price', 
+                                     'change_amount', 'change_percent', 'date_recorded', 'rooms', 'size_sqm']].copy()
             
-            # Format columns
-            display_df['Precio Anterior'] = display_df['Precio Anterior'].apply(lambda x: f"€{x:,.0f}")
-            display_df['Precio Actual'] = display_df['Precio Actual'].apply(lambda x: f"€{x:,.0f}")
-            display_df['Bajada (€)'] = display_df['Bajada (€)'].apply(lambda x: f"€{abs(x):,.0f}")
-            display_df['Bajada (%)'] = display_df['Bajada (%)'].apply(lambda x: f"{abs(x):.1f}%")
-            display_df['m²'] = display_df['m²'].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
-            
-            st.dataframe(
-                display_df,
-                hide_index=True,
-                use_container_width=True,
-                height=400
-            )
+            # Format the data for display
+            for idx, row in display_df.iterrows():
+                col1, col2, col3, col4, col5, col6 = st.columns([3, 1.5, 1.5, 1, 1, 1])
+                
+                with col1:
+                    # Create clickable link
+                    st.markdown(f"[{row['title'][:60]}...]({row['url']})" if len(row['title']) > 60 else f"[{row['title']}]({row['url']})")
+                    st.caption(f"📍 {row['distrito']} - {row['barrio']}")
+                
+                with col2:
+                    st.metric(
+                        "Precio Anterior",
+                        f"€{row['old_price']:,.0f}",
+                        delta=None
+                    )
+                
+                with col3:
+                    st.metric(
+                        "Precio Actual",
+                        f"€{row['new_price']:,.0f}",
+                        delta=f"-€{abs(row['change_amount']):,.0f}"
+                    )
+                
+                with col4:
+                    st.metric(
+                        "Bajada",
+                        f"{abs(row['change_percent']):.1f}%",
+                        delta=None
+                    )
+                
+                with col5:
+                    st.write("**Hab.**")
+                    st.write(f"{int(row['rooms'])}" if pd.notna(row['rooms']) else "N/A")
+                
+                with col6:
+                    st.write("**m²**")
+                    st.write(f"{row['size_sqm']:.0f}" if pd.notna(row['size_sqm']) else "N/A")
+                
+                st.markdown("---")
             
             # Download button
             csv = drops_df.to_csv(index=False)
