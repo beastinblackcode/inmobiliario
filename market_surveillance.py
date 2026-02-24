@@ -320,7 +320,7 @@ def _render_internal_kpis(indicators: dict):
             st.metric(label="🏠 Cuota Hipotecaria", value="Sin datos")
 
     # Third row — new indicators
-    col9, col10, _, __ = st.columns(4)
+    col9, col10, col11, _ = st.columns(4)
 
     # 9. Price drop ratio (seller stress)
     pdr = indicators.get("price_drop_ratio", {})
@@ -358,6 +358,27 @@ def _render_internal_kpis(indicators: dict):
             )
         else:
             st.metric(label="📊 Esfuerzo Hipotecario", value="Sin datos")
+
+    # 11. Rental yield (average gross yield across barrios)
+    ry = indicators.get("rental_yield", {})
+    with col11:
+        avg_yield = ry.get("current")
+        barrio_count = ry.get("barrio_count", 0)
+        if avg_yield is not None:
+            badge = "🟢" if avg_yield >= 5.0 else ("🟡" if avg_yield >= 3.5 else "🔴")
+            st.metric(
+                label=f"🏘️ Rentabilidad Alquiler {badge}",
+                value=f"{avg_yield:.1f}%",
+                help=(f"Rentabilidad bruta media (alquiler anual / precio venta). "
+                      f"Calculada sobre {barrio_count} barrios con datos de alquiler. "
+                      f"Referencia Madrid: 3.5–5 %.")
+            )
+        else:
+            st.metric(
+                label="🏘️ Rentabilidad Alquiler",
+                value="Sin datos",
+                help="Requiere datos de alquiler. Se actualizan con cada ejecución del scraper."
+            )
 
 
 def _render_macro_kpis(macro: dict):
@@ -826,6 +847,74 @@ def _chart_zone_segmentation():
 
     if data.get("error"):
         st.caption(f"ℹ️ {data['error']}")
+
+    # ── Rental yield chart ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🏘️ Rentabilidad Bruta por Barrio (Top 20)")
+
+    ry = indicators.get("rental_yield", {})
+    all_yields = ry.get("all_yields", [])
+
+    if all_yields:
+        top20 = all_yields[:20]          # already sorted desc by yield_pct
+
+        # Color gradient: green (high yield) → red (low yield)
+        max_y = top20[0]["yield_pct"] or 1
+        min_y = top20[-1]["yield_pct"] or 0
+
+        def _yield_color(y):
+            ratio = (y - min_y) / (max_y - min_y) if max_y != min_y else 0.5
+            r = int(255 * (1 - ratio))
+            g = int(200 * ratio)
+            return f"rgba({r},{g},80,0.80)"
+
+        colors = [_yield_color(z["yield_pct"]) for z in top20]
+        labels_y = [f"{z['barrio']} ({z['distrito'][:4]})" for z in top20]
+
+        fig_ry = go.Figure(go.Bar(
+            y=labels_y,
+            x=[z["yield_pct"] for z in top20],
+            orientation="h",
+            marker_color=colors,
+            text=[f"{z['yield_pct']:.1f}%" for z in top20],
+            textposition="outside",
+            customdata=[[z["median_rent"], z["median_sale_price"], z["rental_listing_count"]]
+                        for z in top20],
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Rentabilidad: %{x:.2f}%<br>"
+                "Alquiler mediano: €%{customdata[0]:,.0f}/mes<br>"
+                "Venta mediana: €%{customdata[1]:,.0f}<br>"
+                "Anuncios alquiler: %{customdata[2]}<extra></extra>"
+            ),
+        ))
+        fig_ry.update_layout(
+            height=max(400, len(top20) * 28),
+            xaxis_title="Rentabilidad bruta (%)",
+            xaxis=dict(range=[0, max_y * 1.15]),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=70, t=20, b=40),
+        )
+        st.plotly_chart(fig_ry, use_container_width=True)
+
+        # Summary table (top 10)
+        st.caption("Top 10 barrios por rentabilidad bruta")
+        import pandas as pd
+        df_ry = pd.DataFrame(top20[:10])[[
+            "barrio", "distrito", "yield_pct", "median_rent", "median_sale_price",
+            "rental_listing_count", "date_recorded"
+        ]]
+        df_ry.columns = [
+            "Barrio", "Distrito", "Rent. Bruta (%)", "Alquiler Mediano (€/mes)",
+            "Venta Mediana (€)", "Anuncios Alquiler", "Fecha Datos"
+        ]
+        st.dataframe(df_ry, use_container_width=True, hide_index=True)
+    else:
+        st.info(
+            "📭 Sin datos de rentabilidad aún. "
+            "Se calculan automáticamente con cada ejecución del scraper (python scraper.py)."
+        )
 
 
 def _render_score_breakdown(score: dict):

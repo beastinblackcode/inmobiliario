@@ -36,7 +36,9 @@ from database import (
     mark_as_sold,
     mark_stale_as_sold,
     migrate_create_scraping_log_table,
-    log_scraping_execution
+    migrate_create_rental_prices_table,
+    log_scraping_execution,
+    upsert_rental_snapshot,
 )
 
 
@@ -1001,6 +1003,153 @@ def run_scraper(retry_only: bool = False):
         print("║" + "  Sin requests — todos los barrios ya estaban al día".center(58) + "║")
 
     print("╚" + "═" * 58 + "╝")
+
+    # -------------------------------------------------------------------------
+    # 🏘️  RENTAL PRICE SCRAPING (page 1 per barrio, ~184 extra requests)
+    # -------------------------------------------------------------------------
+    run_rental_scraping(proxies)
+
+    # -------------------------------------------------------------------------
+    # ☁️  AUTO-UPLOAD TO GOOGLE DRIVE
+    # -------------------------------------------------------------------------
+    _auto_upload_to_drive()
+
+
+# ============================================================================
+# RENTAL SCRAPING
+# ============================================================================
+
+def _parse_rental_prices(html: str) -> List[float]:
+    """
+    Extract monthly asking rents (€/mes) from a rental listing page.
+    Returns a list of valid rent values found on the page.
+    """
+    prices: List[float] = []
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        for article in soup.find_all('article', class_='item'):
+            price_elem = article.find('span', class_='item-price')
+            if not price_elem:
+                continue
+            price_text = price_elem.get_text(strip=True)
+            # Rental prices on Idealista are shown as "X.XXX €/mes"
+            value = extract_number(price_text)
+            if value and 100 <= value <= 20_000:   # sanity range for monthly rent
+                prices.append(float(value))
+    except Exception as exc:
+        print(f"  ⚠ Error parsing rental prices: {exc}")
+    return prices
+
+
+def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
+    """
+    Scrape page-1 of rental listings for every barrio in BARRIO_URLS,
+    compute the median monthly rent, and store it in the rental_prices table.
+
+    Only page 1 is requested per barrio (~184 extra Bright Data calls).
+    Skips barrios where fewer than 3 rental prices are found.
+
+    Args:
+        proxies: Proxy configuration (same as used for sale scraping)
+
+    Returns:
+        Number of barrio snapshots successfully stored
+    """
+    import statistics
+
+    print("\n")
+    print("╔" + "═" * 58 + "╗")
+    print("║" + "  🏘️   SCRAPING PRECIOS DE ALQUILER (pág. 1/barrio)".center(58) + "║")
+    print("╚" + "═" * 58 + "╝")
+
+    # Ensure rental table exists (migration safe to run multiple times)
+    migrate_create_rental_prices_table()
+
+    today      = datetime.now().strftime("%Y-%m-%d")
+    stored     = 0
+    skipped    = 0
+    errors     = 0
+
+    for distrito, barrio, sale_url_path in BARRIO_URLS:
+        # Convert sale URL to rental URL
+        rental_url_path = sale_url_path.replace(
+            "/venta-viviendas/", "/alquiler-viviendas/", 1
+        )
+        url = BASE_URL + rental_url_path
+
+        html, status_code = fetch_page(url, proxies)
+
+        if status_code == 404:
+            # Some barrios have no rental listings — expected, skip silently
+            skipped += 1
+            continue
+        if not html or status_code != 200:
+            print(f"  ⚠ {distrito}/{barrio}: HTTP {status_code} — omitiendo")
+            errors += 1
+            continue
+
+        prices = _parse_rental_prices(html)
+
+        if len(prices) < 3:
+            # Not enough data points for a meaningful median
+            skipped += 1
+            continue
+
+        median_rent = statistics.median(prices)
+        ok = upsert_rental_snapshot(
+            distrito=distrito,
+            barrio=barrio,
+            median_rent=median_rent,
+            listing_count=len(prices),
+            date=today,
+        )
+        if ok:
+            stored += 1
+
+        # Brief sleep to avoid hammering the proxy (rent scraping runs after the
+        # main scrape, so we use a shorter delay)
+        time.sleep(0.3)
+
+    print(f"\n  ✅ Alquiler: {stored} barrios guardados, "
+          f"{skipped} sin datos, {errors} errores")
+    return stored
+
+
+def _auto_upload_to_drive():
+    """
+    Upload real_estate.db to Google Drive automatically after scraping.
+    Skipped silently if credentials.json / token.json are not present,
+    so the scraper keeps working without the upload configured.
+    """
+    from pathlib import Path
+    credentials_file = Path(__file__).parent / "credentials.json"
+    token_file       = Path(__file__).parent / "token.json"
+
+    if not credentials_file.exists() and not token_file.exists():
+        print(
+            "\n💡 Upload automático no configurado. Para activarlo:\n"
+            "   python upload_to_drive.py\n"
+            "   (Solo necesitas hacerlo una vez)\n"
+        )
+        return
+
+    print("\n")
+    print("╔" + "═" * 58 + "╗")
+    print("║" + "  ☁️   SUBIENDO BASE DE DATOS A GOOGLE DRIVE".center(58) + "║")
+    print("╚" + "═" * 58 + "╝")
+
+    try:
+        from upload_to_drive import upload_db, get_credentials
+        get_credentials()
+        db_path = Path(__file__).parent / "real_estate.db"
+        success = upload_db(db_path)
+        if success:
+            print("✅ Dashboard actualizado con los datos del scraping de hoy.\n")
+        else:
+            print("⚠️  El upload falló. Sube real_estate.db manualmente a Drive.\n")
+    except Exception as exc:
+        print(f"⚠️  Error en upload automático: {exc}")
+        print("   Sube real_estate.db manualmente a Drive.\n")
 
 
 if __name__ == "__main__":

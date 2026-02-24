@@ -32,6 +32,10 @@ real_estate.db
 .DS_Store
 Thumbs.db
 
+# Google Drive OAuth (credentials.json has secrets; token.json is personal)
+credentials.json
+token.json
+
 # Scraper runtime state (generated automatically, not part of source)
 barrios_scrapeados_hoy.txt
 barrio_page_history.json

@@ -1467,6 +1467,69 @@ def get_sales_speed_by_zone(zone_type: str = "district") -> Dict:
 # Aggregated fetch
 # ============================================================================
 
+def get_rental_yield(min_listings: int = 3) -> Dict:
+    """
+    Compute average gross rental yield across all barrios with enough data.
+
+    Yield formula per barrio:
+        yield% = (median_monthly_rent × 12) / median_sale_price × 100
+
+    Returns a standard indicator dict compatible with the dashboard:
+        name, current (%), unit, trend, change, description,
+        top_barrios (list of top-5 by yield), all_yields (full list)
+    """
+    from database import get_rental_yields
+
+    all_yields = get_rental_yields(min_listings=min_listings)
+
+    if not all_yields:
+        return {
+            "name":        "Rentabilidad Bruta Alquiler",
+            "current":     None,
+            "unit":        "%",
+            "trend":       "stable",
+            "change":      0,
+            "description": "Sin datos de alquiler aún. Ejecuta el scraper para obtener datos.",
+            "top_barrios": [],
+            "all_yields":  [],
+        }
+
+    yields = [r["yield_pct"] for r in all_yields]
+    avg_yield = round(sum(yields) / len(yields), 2)
+
+    # Classify trend by average yield vs typical Madrid benchmarks
+    # Madrid gross yields typically range 3–5 %; below 3 % is low, above 5 % is high
+    if avg_yield >= 5.0:
+        trend       = "up"
+        description = (
+            f"Rentabilidad media del {avg_yield:.1f}% — mercado favorable para inversión."
+        )
+    elif avg_yield >= 3.5:
+        trend       = "stable"
+        description = (
+            f"Rentabilidad media del {avg_yield:.1f}% — en línea con el mercado madrileño."
+        )
+    else:
+        trend       = "down"
+        description = (
+            f"Rentabilidad media del {avg_yield:.1f}% — precios de venta elevados respecto al alquiler."
+        )
+
+    top_barrios = all_yields[:5]  # already sorted desc by yield_pct
+
+    return {
+        "name":        "Rentabilidad Bruta Alquiler",
+        "current":     avg_yield,
+        "unit":        "%",
+        "trend":       trend,
+        "change":      0,       # would need historical comparison
+        "description": description,
+        "top_barrios": top_barrios,
+        "all_yields":  all_yields,
+        "barrio_count": len(all_yields),
+    }
+
+
 def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
     """
     Fetch all internal market indicators at once.
@@ -1484,6 +1547,7 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
         "dispersion":       get_price_dispersion(),
         "affordability":    get_affordability_index(euribor_rate=euribor_rate),
         "price_drop_ratio": get_price_drop_ratio(),
+        "rental_yield":     get_rental_yield(),
     }
     return indicators
 

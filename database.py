@@ -159,10 +159,29 @@ def init_database():
             ON listings(distrito)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_last_seen 
+            CREATE INDEX IF NOT EXISTS idx_last_seen
             ON listings(last_seen_date)
         """)
-        
+
+        # ── Rental prices snapshot table ────────────────────────────────────
+        # One row per (barrio, date_recorded): lightweight daily snapshot of
+        # median rental asking price.  Used to compute gross rental yield.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rental_prices (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                distrito        TEXT    NOT NULL,
+                barrio          TEXT    NOT NULL,
+                date_recorded   TEXT    NOT NULL,
+                median_rent     REAL    NOT NULL,
+                listing_count   INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(barrio, date_recorded)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rental_barrio_date
+            ON rental_prices(barrio, date_recorded)
+        """)
+
         print("✓ Database initialized successfully")
 
 
@@ -1197,6 +1216,184 @@ def get_daily_price_drops(days: int = 30) -> List[Dict]:
     except Exception as e:
         print(f"Error getting daily price drops: {e}")
         return []
+
+# ============================================================================
+# RENTAL PRICE FUNCTIONS
+# ============================================================================
+
+def migrate_create_rental_prices_table():
+    """
+    Migration: Create rental_prices table on existing databases.
+    Safe to run multiple times (CREATE TABLE IF NOT EXISTS).
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS rental_prices (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                distrito        TEXT    NOT NULL,
+                barrio          TEXT    NOT NULL,
+                date_recorded   TEXT    NOT NULL,
+                median_rent     REAL    NOT NULL,
+                listing_count   INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(barrio, date_recorded)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rental_barrio_date
+            ON rental_prices(barrio, date_recorded)
+        """)
+        print("✓ Rental prices table initialized")
+
+
+def upsert_rental_snapshot(
+    distrito: str,
+    barrio: str,
+    median_rent: float,
+    listing_count: int,
+    date: Optional[str] = None,
+) -> bool:
+    """
+    Insert or replace today's rental snapshot for a barrio.
+
+    Args:
+        distrito:       District name (e.g. "Centro")
+        barrio:         Neighbourhood name (e.g. "Sol")
+        median_rent:    Median monthly asking rent in euros
+        listing_count:  Number of rental listings used to compute the median
+        date:           Date string YYYY-MM-DD (defaults to today)
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d")
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO rental_prices
+                    (distrito, barrio, date_recorded, median_rent, listing_count)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(barrio, date_recorded)
+                DO UPDATE SET
+                    median_rent   = excluded.median_rent,
+                    listing_count = excluded.listing_count,
+                    distrito      = excluded.distrito
+            """, (distrito, barrio, date, round(median_rent, 2), listing_count))
+        return True
+    except Exception as exc:
+        print(f"Error upserting rental snapshot for {barrio}: {exc}")
+        return False
+
+
+def get_rental_yields(min_listings: int = 3) -> List[Dict]:
+    """
+    Compute gross rental yield per barrio/distrito.
+
+    Yield = (median_rent_monthly × 12) / median_sale_price × 100
+
+    Uses the most recent rental snapshot and active sale listing medians.
+    Only includes barrios with at least `min_listings` rental listings.
+
+    Returns:
+        List of dicts sorted by yield desc, each with:
+          distrito, barrio, median_rent, median_sale_price,
+          yield_pct, rental_listing_count, sale_listing_count,
+          date_recorded
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Check table exists (migration may not have run yet)
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='rental_prices'"
+            )
+            if not cursor.fetchone():
+                return []
+
+            # Latest rental snapshot per barrio
+            cursor.execute("""
+                SELECT
+                    r.distrito,
+                    r.barrio,
+                    r.median_rent,
+                    r.listing_count  AS rental_count,
+                    r.date_recorded
+                FROM rental_prices r
+                INNER JOIN (
+                    SELECT barrio, MAX(date_recorded) AS latest
+                    FROM rental_prices
+                    GROUP BY barrio
+                ) latest_r ON r.barrio = latest_r.barrio
+                          AND r.date_recorded = latest_r.latest
+                WHERE r.listing_count >= ?
+            """, (min_listings,))
+
+            rental_rows = {
+                row[1]: {           # keyed by barrio
+                    "distrito":      row[0],
+                    "barrio":        row[1],
+                    "median_rent":   row[2],
+                    "rental_count":  row[3],
+                    "date_recorded": row[4],
+                }
+                for row in cursor.fetchall()
+            }
+
+            if not rental_rows:
+                return []
+
+            # Median sale price per barrio from active listings
+            cursor.execute("""
+                SELECT
+                    barrio,
+                    AVG(price)  AS median_sale,   -- approx median via AVG (fast)
+                    COUNT(*)    AS sale_count
+                FROM listings
+                WHERE status = 'active'
+                  AND price > 0
+                  AND barrio IS NOT NULL
+                GROUP BY barrio
+                HAVING COUNT(*) >= 5
+            """)
+
+            sale_rows = {
+                row[0]: {"median_sale": row[1], "sale_count": row[2]}
+                for row in cursor.fetchall()
+            }
+
+            results = []
+            for barrio, rental in rental_rows.items():
+                if barrio not in sale_rows:
+                    continue
+                sale = sale_rows[barrio]
+                median_sale = sale["median_sale"]
+                if not median_sale or median_sale <= 0:
+                    continue
+
+                annual_rent = rental["median_rent"] * 12
+                yield_pct   = round(annual_rent / median_sale * 100, 2)
+
+                results.append({
+                    "distrito":            rental["distrito"],
+                    "barrio":              barrio,
+                    "median_rent":         round(rental["median_rent"], 0),
+                    "median_sale_price":   round(median_sale, 0),
+                    "yield_pct":           yield_pct,
+                    "rental_listing_count": rental["rental_count"],
+                    "sale_listing_count":  sale["sale_count"],
+                    "date_recorded":       rental["date_recorded"],
+                })
+
+            results.sort(key=lambda x: x["yield_pct"], reverse=True)
+            return results
+
+    except Exception as exc:
+        print(f"Error computing rental yields: {exc}")
+        return []
+
 
 if __name__ == "__main__":
     # Initialize database when run directly
