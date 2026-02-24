@@ -166,6 +166,7 @@ def init_database():
         print("✓ Database initialized successfully")
 
 
+
 def migrate_add_description_column():
     """
     Migration: Add description column to existing databases.
@@ -184,6 +185,105 @@ def migrate_add_description_column():
             print("✓ Description column added successfully")
         else:
             print("✓ Description column already exists")
+
+
+def migrate_create_scraping_log_table():
+    """
+    Migration: Create scraping_log table for tracking execution stats.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scraping_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                start_time TEXT,
+                end_time TEXT,
+                duration_minutes REAL,
+                properties_processed INTEGER,
+                new_listings INTEGER,
+                updated_listings INTEGER,
+                total_requests INTEGER,
+                cost_estimate_usd REAL,
+                status TEXT
+            )
+        """)
+        print("✓ Scraping log table initialized")
+
+
+def log_scraping_execution(
+    start_time: datetime,
+    end_time: datetime,
+    properties_processed: int,
+    new_listings: int,
+    updated_listings: int,
+    total_requests: int,
+    cost_estimate_usd: float,
+    status: str = 'success'
+):
+    """
+    Log a scraping execution to the database.
+    """
+    try:
+        duration_minutes = (end_time - start_time).total_seconds() / 60.0
+        
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO scraping_log (
+                    start_time, end_time, duration_minutes,
+                    properties_processed, new_listings, updated_listings,
+                    total_requests, cost_estimate_usd, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                start_time.strftime("%Y-%m-%d %H:%M:%S"),
+                end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                round(duration_minutes, 2),
+                properties_processed,
+                new_listings,
+                updated_listings,
+                total_requests,
+                round(cost_estimate_usd, 4),
+                status
+            ))
+            print(f"  📝 Logged execution: {duration_minutes:.1f} min, ${cost_estimate_usd:.4f}")
+    except Exception as e:
+        print(f"Error logging execution: {e}")
+
+
+def get_scraping_log(limit: int = 50) -> List[Dict]:
+    """
+    Retrieve scraping execution history.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            # Check if table exists first (migration might not have run yet if scraper hasn't run)
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scraping_log'")
+            if not cursor.fetchone():
+                return []
+                
+            cursor.execute("""
+                SELECT 
+                    id, start_time, end_time, duration_minutes,
+                    properties_processed, new_listings, updated_listings,
+                    total_requests, cost_estimate_usd, status
+                FROM scraping_log
+                ORDER BY start_time DESC
+                LIMIT ?
+            """, (limit,))
+            
+            columns = [
+                'id', 'start_time', 'end_time', 'duration_minutes',
+                'properties_processed', 'new_listings', 'updated_listings',
+                'total_requests', 'cost_estimate_usd', 'status'
+            ]
+            
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"Error retrieving scraping log: {e}")
+        return []
+
 
 
 def get_active_listing_ids() -> Set[str]:
@@ -256,8 +356,10 @@ def insert_listing(data: Dict) -> bool:
             
             return True
     except sqlite3.IntegrityError:
-        # Listing already exists
-        return False
+        # Listing already exists (likely was 'sold_removed' and now reappeared)
+        # Fallback to update which handles status='active' reactivation
+        # print(f"  ♻️ Listing {data.get('listing_id')} exists. Reactivating...")
+        return update_listing(data.get('listing_id'), data)
     except Exception as e:
         print(f"Error inserting listing {data.get('listing_id')}: {e}")
         return False
@@ -267,6 +369,7 @@ def update_listing(listing_id: str, data: Dict) -> bool:
     """
     Update an existing listing's last_seen_date and price.
     Detects price changes and records them in price_history.
+    IMPORTANT: Reactivates properties that were marked as sold_removed.
     
     Args:
         listing_id: Unique listing identifier
@@ -280,14 +383,18 @@ def update_listing(listing_id: str, data: Dict) -> bool:
             cursor = conn.cursor()
             today = datetime.now().strftime("%Y-%m-%d")
             
-            # Get current price before updating
-            current_price = get_current_price(listing_id)
+            # Get current price and status before updating
+            cursor.execute("SELECT price, status FROM listings WHERE listing_id = ?", (listing_id,))
+            result = cursor.fetchone()
+            current_price = result[0] if result else None
+            current_status = result[1] if result else None
             new_price = data.get('price')
             
-            # Update listing
+            # Update listing - IMPORTANT: Set status to 'active' to reactivate sold properties
             cursor.execute("""
                 UPDATE listings 
                 SET last_seen_date = ?,
+                    status = 'active',
                     price = ?,
                     title = ?,
                     rooms = ?,
@@ -309,6 +416,10 @@ def update_listing(listing_id: str, data: Dict) -> bool:
                 data.get('description'),
                 listing_id
             ))
+            
+            # Log reactivation if property was previously sold
+            if current_status == 'sold_removed':
+                print(f"  ♻️ Reactivated property (was marked as sold)")
             
             # Check if price changed
             if current_price and new_price and current_price != new_price:
@@ -360,32 +471,67 @@ def mark_as_sold(listing_ids: Set[str]) -> int:
         return 0
 
 
-def mark_stale_as_sold(days_threshold: int = 7) -> int:
+def mark_stale_as_sold(days_threshold: int = 14) -> int:
     """
-    Mark listings as sold if they haven't been seen in N days.
+    Mark listings as sold if they haven't been seen in N days AND their barrio
+    has been successfully scraped during that window.
     
-    This prevents false positives from incomplete scrapes by only marking
-    properties as sold after they've been consistently missing for multiple days.
+    This prevents false positives from incomplete scrapes by:
+    1. Requiring the property's barrio was scraped at least once in the threshold window
+    2. Using a circuit breaker (max 200 marks per batch) to prevent mass false marks
+    3. Using a 14-day default threshold instead of 7
     
     Args:
-        days_threshold: Number of days without updates before marking as sold (default: 7)
+        days_threshold: Number of days without updates before marking as sold (default: 14)
         
     Returns:
         Number of listings marked as sold
     """
+    MAX_BATCH_SIZE = 200  # Circuit breaker: never mark more than 200 at once
+    
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
             cutoff_date = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d")
             
+            # Only mark as sold if:
+            # 1. The listing hasn't been seen since cutoff_date
+            # 2. Other listings in the SAME barrio HAVE been seen after cutoff_date
+            #    (proving the scraper covered that barrio recently)
             cursor.execute("""
-                UPDATE listings 
-                SET status = 'sold_removed'
+                SELECT listing_id FROM listings
                 WHERE status = 'active'
                 AND last_seen_date < ?
-            """, (cutoff_date,))
+                AND barrio IN (
+                    SELECT DISTINCT barrio FROM listings
+                    WHERE last_seen_date >= ?
+                    AND barrio IS NOT NULL
+                )
+                LIMIT ?
+            """, (cutoff_date, cutoff_date, MAX_BATCH_SIZE))
             
-            return cursor.rowcount
+            ids_to_mark = [row[0] for row in cursor.fetchall()]
+            
+            if not ids_to_mark:
+                return 0
+            
+            # Apply circuit breaker warning
+            if len(ids_to_mark) >= MAX_BATCH_SIZE:
+                print(f"⚠️ Circuit breaker: limiting to {MAX_BATCH_SIZE} marks. "
+                      f"There may be more stale listings.")
+            
+            placeholders = ','.join('?' * len(ids_to_mark))
+            cursor.execute(f"""
+                UPDATE listings 
+                SET status = 'sold_removed'
+                WHERE listing_id IN ({placeholders})
+            """, tuple(ids_to_mark))
+            
+            marked = cursor.rowcount
+            print(f"📊 Marked {marked} listings as sold_removed "
+                  f"(threshold: {days_threshold} days, cutoff: {cutoff_date})")
+            
+            return marked
     except Exception as e:
         print(f"Error marking stale listings as sold: {e}")
         return 0
@@ -540,7 +686,7 @@ def get_price_trends_by_zone(zone_type: str = 'distrito', min_properties: int = 
     """
     Calculate price trends by zone (distrito or barrio).
     
-    Compares average prices on earliest date vs latest date to detect trends.
+    Compares average prices per m² on earliest date vs latest date to detect trends.
     
     Args:
         zone_type: 'distrito' or 'barrio'
@@ -560,15 +706,16 @@ def get_price_trends_by_zone(zone_type: str = 'distrito', min_properties: int = 
         if not earliest_date or not latest_date or earliest_date == latest_date:
             return []
         
-        # Calculate average price per zone on earliest date
+        # Calculate average price per m² per zone on earliest date
         query_first = f"""
             SELECT 
                 {zone_type},
-                AVG(price) as avg_price,
+                AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)) as avg_price_sqm,
                 COUNT(*) as count
             FROM listings
             WHERE first_seen_date = ?
             AND price > 0
+            AND size_sqm > 0
             AND {zone_type} IS NOT NULL
             GROUP BY {zone_type}
             HAVING COUNT(*) >= ?
@@ -577,16 +724,17 @@ def get_price_trends_by_zone(zone_type: str = 'distrito', min_properties: int = 
         cursor.execute(query_first, (earliest_date, min_properties))
         first_prices = {row[0]: {'price': row[1], 'count': row[2]} for row in cursor.fetchall()}
         
-        # Calculate average price per zone on latest date
+        # Calculate average price per m² per zone on latest date
         query_last = f"""
             SELECT 
                 {zone_type},
-                AVG(price) as avg_price,
+                AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)) as avg_price_sqm,
                 COUNT(*) as count
             FROM listings
             WHERE last_seen_date = ?
             AND status = 'active'
             AND price > 0
+            AND size_sqm > 0
             AND {zone_type} IS NOT NULL
             GROUP BY {zone_type}
             HAVING COUNT(*) >= ?
@@ -799,6 +947,37 @@ def get_price_history(listing_id: str) -> List[Dict]:
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def get_price_history_for_listings(listing_ids: List[str]) -> List[Dict]:
+    """
+    Get price history for multiple listings at once.
+    
+    Args:
+        listing_ids: List of listing IDs
+        
+    Returns:
+        List of price records with listing_id, date, new_price, price_change
+    """
+    if not listing_ids:
+        return []
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        placeholders = ','.join('?' * len(listing_ids))
+        cursor.execute(f"""
+            SELECT 
+                listing_id,
+                date_recorded as date,
+                price as new_price,
+                change_amount as price_change
+            FROM price_history
+            WHERE listing_id IN ({placeholders})
+            ORDER BY date_recorded ASC
+        """, tuple(listing_ids))
+        
+        columns = ['listing_id', 'date', 'new_price', 'price_change']
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def get_recent_price_drops(days: int = 7, min_drop_percent: float = 5.0) -> List[Dict]:
     """
     Find properties with price drops in the last N days.
@@ -829,7 +1008,8 @@ def get_recent_price_drops(days: int = 7, min_drop_percent: float = 5.0) -> List
                 ph.change_percent,
                 ph.date_recorded,
                 l.size_sqm,
-                l.rooms
+                l.rooms,
+                l.floor
             FROM price_history ph
             JOIN listings l ON ph.listing_id = l.listing_id
             WHERE ph.date_recorded >= ?
@@ -842,7 +1022,7 @@ def get_recent_price_drops(days: int = 7, min_drop_percent: float = 5.0) -> List
         columns = [
             'listing_id', 'title', 'distrito', 'barrio', 'url',
             'new_price', 'change_amount', 'change_percent', 'date_recorded',
-            'size_sqm', 'rooms'
+            'size_sqm', 'rooms', 'floor'
         ]
         
         results = []
@@ -961,6 +1141,62 @@ def get_properties_with_multiple_drops(min_drops: int = 2, min_total_drop_pct: f
         return results
 
 
+
+def get_daily_price_drops(days: int = 30) -> List[Dict]:
+    """
+    Get daily statistics for price drops.
+    Returns a list of dicts with date, drop_count, active_count, and drop_pct.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Generate date range
+            dates = []
+            for i in range(days):
+                date = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
+                dates.append(date)
+            
+            stats = []
+            
+            for date in dates:
+                # 1. Count price drops on this date (distinct listings)
+                # CHANGE: Only count distinct listings that dropped price on this date
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT listing_id) 
+                    FROM price_history 
+                    WHERE date_recorded = ? 
+                    AND change_amount < 0
+                """, (date,))
+                drop_count = cursor.fetchone()[0]
+                
+                # 2. Count active listings on this date (approximate)
+                # A listing was active if first_seen <= date AND (status='active' OR last_seen >= date)
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM listings 
+                    WHERE first_seen_date <= ? 
+                    AND (status = 'active' OR last_seen_date >= ?)
+                """, (date, date))
+                active_count = cursor.fetchone()[0]
+                
+                drop_pct = (drop_count / active_count * 100) if active_count > 0 else 0
+                
+                stats.append({
+                    "date": date,
+                    "drop_count": drop_count,
+                    "active_count": active_count,
+                    "drop_pct": round(drop_pct, 2)
+                })
+            
+            # Sort by date ascending for charts
+            stats.sort(key=lambda x: x['date'])
+            
+            return stats
+            
+    except Exception as e:
+        print(f"Error getting daily price drops: {e}")
+        return []
 
 if __name__ == "__main__":
     # Initialize database when run directly

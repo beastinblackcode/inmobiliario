@@ -1,28 +1,32 @@
 # Arquitectura del Sistema: Madrid Real Estate Tracker
 
+> **Última actualización:** Febrero 2026
+
 ## 📋 Índice
 
 1. [Visión General](#visión-general)
-2. [Componentes del Sistema](#componentes-del-sistema)
-3. [Arquitectura de Datos](#arquitectura-de-datos)
-4. [Flujo de Operación](#flujo-de-operación)
-5. [Despliegue](#despliegue)
-6. [Seguridad](#seguridad)
-7. [Costes y Escalabilidad](#costes-y-escalabilidad)
+2. [Mapa de Archivos del Proyecto](#mapa-de-archivos-del-proyecto)
+3. [Componentes del Sistema](#componentes-del-sistema)
+4. [Arquitectura de Datos](#arquitectura-de-datos)
+5. [Panel de Vigilancia del Mercado](#panel-de-vigilancia-del-mercado)
+6. [Flujo de Operación](#flujo-de-operación)
+7. [Despliegue](#despliegue)
+8. [Seguridad](#seguridad)
+9. [Costes y Escalabilidad](#costes-y-escalabilidad)
 
 ---
 
 ## Visión General
 
-### Propósito
-
 Sistema de monitorización del mercado inmobiliario de Madrid que:
-- Rastrea diariamente ~184 barrios de Madrid
-- Detecta nuevas propiedades, cambios de precio y ventas
-- Visualiza tendencias y métricas del mercado
-- Proporciona acceso web seguro a los datos
 
-### Arquitectura General
+- Rastrea diariamente ~184 barrios de Madrid vía scraping de Idealista
+- Detecta nuevas propiedades, cambios de precio y ventas
+- Visualiza tendencias y métricas del mercado en un dashboard Streamlit
+- Calcula un score de salud del mercado combinando indicadores internos y macro
+- Proporciona acceso web seguro con autenticación multi-usuario
+
+### Diagrama General
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -32,62 +36,150 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              STREAMLIT CLOUD (Dashboard Web)                 │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  app.py (Streamlit Dashboard)                        │  │
-│  │  - Autenticación multi-usuario                       │  │
-│  │  - Visualización de datos                            │  │
-│  │  - Filtros y análisis                                │  │
-│  └────────────────────┬─────────────────────────────────┘  │
-│                       │                                      │
-│  ┌────────────────────▼─────────────────────────────────┐  │
-│  │  database.py (Capa de Datos)                         │  │
-│  │  - Descarga DB desde Google Drive                    │  │
-│  │  - Consultas SQL                                     │  │
-│  └────────────────────┬─────────────────────────────────┘  │
-└───────────────────────┼──────────────────────────────────────┘
-                        │
-                        ▼
-              ┌─────────────────────┐
-              │   GOOGLE DRIVE      │
-              │  real_estate.db     │
-              │  (6 MB SQLite)      │
-              └─────────────────────┘
-                        ▲
-                        │ Upload manual
-                        │
-┌───────────────────────┴──────────────────────────────────────┐
-│              MÁQUINA LOCAL (Scraping)                         │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  scraper.py                                          │   │
-│  │  - Scraping de Idealista                            │   │
-│  │  - Detección de cambios                             │   │
-│  │  - Actualización de DB local                        │   │
-│  └────────────────────┬─────────────────────────────────┘   │
-│                       │                                       │
-│  ┌────────────────────▼─────────────────────────────────┐   │
-│  │  database.py (Gestión DB)                            │   │
-│  │  - Inserciones/actualizaciones                       │   │
-│  │  - Marcado de vendidos                               │   │
-│  └────────────────────┬─────────────────────────────────┘   │
-│                       │                                       │
-│  ┌────────────────────▼─────────────────────────────────┐   │
-│  │  real_estate.db (SQLite local)                       │   │
-│  └──────────────────────────────────────────────────────┘   │
-└───────────────────────────────────────────────────────────────┘
-                        │
-                        ▼
-              ┌─────────────────────┐
-              │   BRIGHT DATA       │
-              │  (Web Unlocker)     │
-              │  Proxy + Anti-bot   │
-              └─────────────────────┘
-                        │
-                        ▼
-              ┌─────────────────────┐
-              │   IDEALISTA.COM     │
-              │  (Fuente de datos)  │
-              └─────────────────────┘
+│                                                             │
+│  app.py ──► tabs/dashboard_tab.py                           │
+│         ├──► tabs/map_tab.py                                │
+│         ├──► tabs/prediction_tab.py                         │
+│         ├──► tabs/search_tab.py                             │
+│         ├──► tabs/admin_tab.py                              │
+│         └──► market_surveillance.py                         │
+│                      │                                      │
+│              database.py / data_utils.py                    │
+│                      │                                      │
+│           analytics.py · market_indicators.py               │
+│           macro_data.py · predictive_model.py               │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ Descarga DB al iniciar
+                       ▼
+             ┌─────────────────────┐
+             │   GOOGLE DRIVE      │
+             │  real_estate.db     │
+             │  (~16 MB SQLite)    │
+             └─────────────────────┘
+                       ▲
+                       │ Upload tras scraping
+┌──────────────────────┴──────────────────────────────────────┐
+│              MÁQUINA LOCAL (Scraping)                        │
+│                                                             │
+│   scraper.py ──► database.py ──► real_estate.db             │
+│   retry_scraper.py                                          │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ▼
+             ┌─────────────────────┐      ┌─────────────────┐
+             │   BRIGHT DATA       │      │  BCE / INE      │
+             │  Web Unlocker Proxy │      │  (APIs macro)   │
+             └─────────────────────┘      └─────────────────┘
+                       │
+                       ▼
+             ┌─────────────────────┐
+             │   IDEALISTA.COM     │
+             └─────────────────────┘
 ```
+
+---
+
+## Mapa de Archivos del Proyecto
+
+### Núcleo del Dashboard
+
+| Archivo | Líneas | Función |
+|---------|--------|---------|
+| `app.py` | 287 | Orquestador: auth, sidebar, carga de datos, routing de tabs |
+| `data_utils.py` | 43 | `load_data()` con `@st.cache_data` compartido entre tabs |
+| `database.py` | 1,209 | Toda la capa de acceso a datos (CRUD, stats, historial) |
+| `analytics.py` | 559 | Análisis avanzado: chollos, velocidad, evolución de propiedades |
+
+### Tabs del Dashboard (`tabs/`)
+
+| Archivo | Líneas | Función |
+|---------|--------|---------|
+| `tabs/__init__.py` | 0 | Marca el directorio como paquete Python |
+| `tabs/dashboard_tab.py` | 941 | KPIs, gráficas de precios, analytics avanzado, histórico |
+| `tabs/map_tab.py` | 89 | Mapa interactivo Folium con heat layer por precio |
+| `tabs/prediction_tab.py` | 316 | Valuación con IA (Random Forest) e intervalos de confianza |
+| `tabs/search_tab.py` | 212 | Búsquedas personalizadas con seguimiento de precios |
+| `tabs/admin_tab.py` | 544 | Actividad scraping, costes, estadísticas distrito, buscador |
+
+### Vigilancia de Mercado
+
+| Archivo | Líneas | Función |
+|---------|--------|---------|
+| `market_surveillance.py` | 894 | Página completa de vigilancia: semáforo, KPIs, alertas, diagnóstico |
+| `market_indicators.py` | 1,530 | Cálculo de todos los indicadores internos y score de mercado |
+| `macro_data.py` | 569 | Datos macroeconómicos: Euríbor (BCE), desempleo (INE) |
+
+### Modelo Predictivo
+
+| Archivo | Función |
+|---------|---------|
+| `predictive_model.py` | Random Forest para valuación de propiedades |
+| `model_metadata.json` | Metadatos del modelo entrenado (generado en runtime) |
+
+### Scraper
+
+| Archivo | Función |
+|---------|---------|
+| `scraper.py` | Scraping principal de 184 barrios vía Bright Data |
+| `retry_scraper.py` | Reintento de barrios fallidos |
+
+### Utilidades de Visualización
+
+| Archivo | Función |
+|---------|---------|
+| `map_view.py` | Creación del mapa Folium con marcadores por precio |
+| `coordinates.py` | Diccionario de coordenadas lat/lon por barrio |
+
+### Scripts de Utilidad / Mantenimiento
+
+| Archivo | Uso |
+|---------|-----|
+| `fix_false_sold.py` | Corrige propiedades marcadas como vendidas por error |
+| `migration_add_price_history.py` | Migración de esquema para añadir tabla `price_history` |
+| `analyze_404_errors.py` | Análisis de errores 404 del scraper |
+| `check_missing_barrios.py` | Detecta barrios no scrapeados |
+| `geocode_barrios.py` | Geocodificación de barrios |
+| `validate_barrio_urls.py` | Valida URLs de barrios |
+| `inspect_html.py` | Inspección de HTML de Idealista |
+| `find_oldest.py` | Busca propiedades más antiguas en BD |
+| `test_description.py` | Tests del scraper |
+| `test_sold_logic.py` | Tests de la lógica de vendidos |
+
+### Archivos de Configuración
+
+| Archivo | Contenido |
+|---------|-----------|
+| `.env` | Credenciales Bright Data (local, no en git) |
+| `.env.example` | Plantilla de variables de entorno |
+| `.streamlit/secrets.toml` | Secrets de Streamlit Cloud (no en git) |
+| `.streamlit/config.toml` | Config del servidor Streamlit |
+| `requirements.txt` | Dependencias Python |
+| `.gitignore` | Archivos excluidos del repositorio |
+| `barrios_urls.csv` | URLs de todos los barrios a scrapeear |
+
+### Archivos de Documentación
+
+| Archivo | Contenido |
+|---------|-----------|
+| `ARCHITECTURE.md` | Este documento |
+| `README.md` | Guía general |
+| `AUTH_SETUP.md` | Configuración de autenticación |
+| `MULTI_USER_AUTH.md` | Multi-usuario |
+| `DATA_MODEL.md` | Modelo de datos detallado |
+| `DEPLOYMENT.md` | Guía de despliegue |
+| `QUICKSTART.md` | Inicio rápido |
+| `Arquitectura.docx` | Versión Word de este documento |
+
+### ⚠️ Archivos a Limpiar
+
+| Archivo | Problema |
+|---------|----------|
+| `madrid_housing.db` | BD vacía (0 bytes) — eliminar |
+| `real_estate_backup_*.db` | Backups pesados en repo — mover fuera del repo |
+| `404_errors.log`, `scraper_output.log` | Logs de runtime — añadir a `.gitignore` |
+| `barrios_scrapeados_hoy.txt` | Estado de ejecución — añadir a `.gitignore` |
+| `barrio_page_history.json` | Estado de ejecución — añadir a `.gitignore` |
+| `current_scraper_urls.txt`, `urls_from_web.txt` | Archivos temporales — añadir a `.gitignore` |
 
 ---
 
@@ -95,22 +187,21 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
 
 ### 1. Scraper (Ejecución Local)
 
-**Archivo:** `scraper.py`
+**Archivo:** `scraper.py` (1,009 líneas)
 
 **Responsabilidades:**
 - Scraping de 184 barrios de Madrid
 - Extracción de datos de propiedades
 - Detección de cambios (nuevas, actualizadas, vendidas)
 - Actualización de base de datos local
+- Registro de costes y duración por ejecución
 
 **Tecnologías:**
-- **Python 3.x**
-- **BeautifulSoup4** - Parsing HTML
-- **Requests** - HTTP requests
-- **Bright Data Web Unlocker** - Proxy anti-bot
-- **SQLite** - Base de datos local
+- Python 3.x + BeautifulSoup4 + Requests
+- Bright Data Web Unlocker (proxy anti-bot)
+- SQLite (base de datos local)
 
-**Datos Extraídos:**
+**Datos extraídos por propiedad:**
 ```python
 {
     'listing_id': str,           # ID único de Idealista
@@ -123,25 +214,24 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
     'size_sqm': float,           # Superficie en m²
     'floor': str,                # Planta
     'orientation': str,          # Interior/Exterior
+    'has_lift': bool,            # Ascensor
+    'is_exterior': bool,         # Exterior
     'seller_type': str,          # Particular/Agencia
     'is_new_development': bool,  # Obra nueva
     'description': str,          # Descripción parcial
 }
 ```
 
-**Frecuencia de Ejecución:**
-- Manual o programada (cron/scheduler)
-- Recomendado: Diario
-
 ---
 
 ### 2. Base de Datos (SQLite)
 
-**Archivo:** `real_estate.db`
+**Archivo activo:** `real_estate.db` (~16 MB)
 
-**Esquema:**
+**Esquema completo:**
 
 ```sql
+-- Tabla principal de propiedades
 CREATE TABLE listings (
     listing_id TEXT PRIMARY KEY,
     title TEXT,
@@ -153,92 +243,176 @@ CREATE TABLE listings (
     size_sqm REAL,
     floor TEXT,
     orientation TEXT,
+    has_lift BOOLEAN,
+    is_exterior BOOLEAN,
     seller_type TEXT,
     is_new_development BOOLEAN,
     description TEXT,
-    first_seen_date TEXT,      -- Fecha primera vez visto
-    last_seen_date TEXT,       -- Fecha última vez visto
-    status TEXT DEFAULT 'active'  -- active/sold
+    first_seen_date TEXT,
+    last_seen_date TEXT,
+    status TEXT DEFAULT 'active'   -- active | sold_removed
 );
 
--- Índices para optimizar consultas
-CREATE INDEX idx_status ON listings(status);
-CREATE INDEX idx_distrito ON listings(distrito);
-CREATE INDEX idx_last_seen ON listings(last_seen_date);
-CREATE INDEX idx_price ON listings(price);
+-- Historial de cambios de precio
+CREATE TABLE price_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id TEXT,
+    date TEXT,
+    old_price INTEGER,
+    new_price INTEGER,
+    price_change INTEGER,          -- new_price - old_price
+    FOREIGN KEY (listing_id) REFERENCES listings(listing_id)
+);
+
+-- Log de ejecuciones del scraper
+CREATE TABLE scraping_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    start_time TEXT,
+    end_time TEXT,
+    duration_minutes REAL,
+    properties_processed INTEGER,
+    new_listings INTEGER,
+    updated_listings INTEGER,
+    sold_listings INTEGER,
+    cost_estimate_usd REAL,
+    status TEXT
+);
+
+-- Índices
+CREATE INDEX idx_status       ON listings(status);
+CREATE INDEX idx_distrito     ON listings(distrito);
+CREATE INDEX idx_last_seen    ON listings(last_seen_date);
+CREATE INDEX idx_first_seen   ON listings(first_seen_date);
+CREATE INDEX idx_price        ON listings(price);
+CREATE INDEX idx_ph_listing   ON price_history(listing_id);
+CREATE INDEX idx_ph_date      ON price_history(date);
 ```
-
-**Tamaño:** ~6 MB (varía según número de listings)
-
-**Ubicación:**
-- **Local:** `/Users/luisnuno/Downloads/workspace/inmobiliario/real_estate.db`
-- **Cloud:** Google Drive (compartido públicamente)
 
 ---
 
 ### 3. Dashboard Web (Streamlit Cloud)
 
-**Archivo:** `app.py`
+**Orquestador:** `app.py` (287 líneas — thin orchestrator)
 
-**Responsabilidades:**
-- Interfaz web de visualización
-- Autenticación de usuarios
-- Análisis y filtros de datos
-- Exportación de datos
+El `app.py` solo gestiona: autenticación, sidebar con filtros, carga de datos vía `data_utils.load_data()`, y routing a cada tab. Todo el rendering está delegado al paquete `tabs/`.
 
-**Características:**
+#### Estructura de navegación
 
-#### Autenticación
-- Multi-usuario con contraseñas individuales
-- Sesión persistente
-- Credenciales en Streamlit Secrets
+```
+app.py
+├── Página: 🏠 Dashboard Principal
+│   ├── 📊 Dashboard     → tabs/dashboard_tab.py
+│   ├── 🗺️ Mapa          → tabs/map_tab.py
+│   ├── 🔮 Predicción    → tabs/prediction_tab.py
+│   ├── 🔍 Mis Búsquedas → tabs/search_tab.py
+│   └── ⚙️ Administración → tabs/admin_tab.py
+└── Página: 🛡️ Vigilancia del Mercado → market_surveillance.py
+```
 
-#### Visualizaciones
-- **Métricas principales:** Total activos, nuevos, vendidos, precio medio
-- **Gráficos:** Distribución de precios, tendencias temporales
-- **Tablas:** Listados detallados con filtros
-- **Mapas:** Distribución por distrito/barrio
+#### Tab: 📊 Dashboard (`tabs/dashboard_tab.py`)
 
-#### Filtros
-- Precio (mín/máx)
-- Distrito/Barrio
-- Tipo de vendedor
-- Estado (activo/vendido)
-- Fecha
+- KPIs principales: precio mediano, €/m², activos, vendidos 30d
+- Evolución de bajadas de precio diarias
+- Top barrios por precio/m²
+- Distribución por tipo de vendedor (pie chart)
+- Precio por distrito (grouped bar)
+- Evolución del precio/m² semanal con filtros
+- Analytics avanzado: velocidad de venta, oportunidades, chollos
+- Tiempo en mercado por distrito
+- Zonas con bajadas de precio
+- Historial: bajadas, evolución de propiedades, vendedores desesperados
+
+#### Tab: 🗺️ Mapa (`tabs/map_tab.py`)
+
+- Mapa Folium interactivo con marcadores coloreados por precio
+- Heat layer de intensidad de precios
+- Selector de límite de propiedades (100/500/1000/Todos)
+- Solo muestra propiedades activas con coordenadas disponibles
+
+#### Tab: 🔮 Predicción (`tabs/prediction_tab.py`)
+
+- Modelo Random Forest entrenado sobre propiedades activas
+- Inputs: distrito, barrio, m², habitaciones, planta, ascensor, exterior
+- Output: precio estimado + intervalo P10-P90 por percentiles de árboles
+- Métricas de rendimiento: R², MAE, RMSE, MAPE
+- Importancia de variables
+- Comparación con precio medio de la zona
+
+#### Tab: 🔍 Mis Búsquedas (`tabs/search_tab.py`)
+
+- Búsqueda fija: activos 250k-450k€, ≥40m², con ascensor, sin bajos
+- Distritos: Centro, Chamberí, Retiro, Salamanca, Chamartín, etc.
+- Seguimiento de evolución de precios de los resultados
+- Tabla de bajadas de precio recientes
+
+#### Tab: ⚙️ Administración (`tabs/admin_tab.py`)
+
+- Actividad de scraping (30 días): daily bar chart con alertas de días bajos
+- Control de costes: coste por ejecución y duración (últimas 30 ejecuciones)
+- Propiedades nuevas por distrito y fecha (tabla pivote / lista detallada)
+- Buscador de propiedad por URL o ID con historial completo de precios
 
 ---
 
-### 4. Capa de Datos (database.py)
+### 4. Panel de Vigilancia del Mercado
 
-**Archivo:** `database.py`
+**Archivo:** `market_surveillance.py` (894 líneas)
 
-**Funciones Principales:**
+Página independiente que combina indicadores internos (calculados sobre la BD) con datos macroeconómicos externos.
 
-```python
-# Inicialización
-init_database()
+#### Score de Salud del Mercado
 
-# Descarga desde Google Drive (solo en cloud)
-download_database_from_cloud()
+Índice 0-100 calculado como media ponderada de 7 componentes:
 
-# Operaciones CRUD
-insert_listing(data: Dict) -> bool
-update_listing(listing_id: str, data: Dict) -> bool
-mark_as_sold(listing_ids: Set[str]) -> int
+| Componente | Peso | Qué mide | Fuente |
+|---|---|---|---|
+| Tendencia de precios | 25% | Variación % semanal del precio mediano | BD interna |
+| Velocidad de ventas | 20% | Días medianos hasta venta/retirada | BD interna |
+| Ratio oferta/demanda | 15% | Nuevas publicaciones / vendidas (semanal) | BD interna |
+| Asequibilidad | 15% | Cuota hipotecaria / ingreso de referencia | BD + Euríbor |
+| Euríbor + tendencia | 10% | Nivel actual ± ajuste por tendencia (±5 pts) | BCE |
+| Estrés vendedor | 10% | % activos con ≥1 bajada en 30 días | BD interna |
+| Desempleo | 5% | Tasa de paro EPA | INE |
 
-# Consultas
-get_active_listing_ids() -> Set[str]
-get_listings(status, distrito, barrio, ...) -> List[Dict]
-get_price_statistics() -> Dict
-get_sold_last_n_days(days: int) -> int
-```
+**Interpretación:**
+- 🟢 75-100 → **ALCISTA**: demanda sólida, vendedores con poder
+- 🟡 40-74 → **EN TRANSICIÓN**: señales mixtas
+- 🔴 0-39 → **BAJISTA**: demanda débil, estrés vendedor generalizado
 
-**Detección de Entorno:**
-```python
-def is_streamlit_cloud():
-    # Detecta si corre en Streamlit Cloud
-    return "database" in st.secrets
-```
+#### Indicadores Internos (`market_indicators.py`)
+
+| Función | Qué calcula |
+|---------|-------------|
+| `get_weekly_price_evolution()` | Serie semanal de precio mediano con breakpoint detection |
+| `get_weekly_sales_speed()` | Días medianos en mercado de propiedades vendidas |
+| `get_supply_demand_ratio()` | Ratio nuevas/vendidas semanal (cap en 10x) |
+| `get_inventory_evolution()` | Evolución del stock activo |
+| `get_rotation_rate()` | % de rotación rolling 4 semanas |
+| `get_price_dispersion()` | Diferencia media/mediana como proxy de outliers |
+| `get_affordability_index()` | Cuota hipotecaria (80% LTV, 25 años, Euríbor+spread) |
+| `get_price_drop_ratio()` | % activos con bajada en 30 días + profundidad media |
+| `get_price_by_zone()` | Precio mediano por distrito/barrio |
+| `get_sales_speed_by_zone()` | Velocidad de venta por distrito/barrio |
+| `get_market_alerts()` | Lista de alertas por nivel (critical/warning/info) |
+| `calculate_market_score()` | Score compuesto 0-100 con 7 componentes |
+
+#### Datos Macroeconómicos (`macro_data.py`)
+
+| Indicador | Fuente | Frecuencia |
+|-----------|--------|------------|
+| Euríbor 12M | BCE API | Mensual |
+| Tasa de paro EPA | INE API | Trimestral |
+
+---
+
+### 5. Modelo Predictivo (`predictive_model.py`)
+
+- **Algoritmo:** Random Forest Regressor (scikit-learn Pipeline)
+- **Features:** distrito, barrio, m², habitaciones, planta, ascensor, exterior
+- **Validación:** Cross-validation k-fold
+- **Output:** precio central + percentiles P10/P90 de los árboles individuales
+- **Reentrenamiento automático:** cuando los datos son más recientes que el modelo
+- **Métricas persistidas:** `model_metadata.json` (R², MAE, RMSE, MAPE, fecha, importancias)
 
 ---
 
@@ -247,150 +421,56 @@ def is_streamlit_cloud():
 ### Flujo de Datos
 
 ```
-1. SCRAPING (Local)
-   ├─ Idealista.com
-   ├─ Bright Data Proxy
-   ├─ BeautifulSoup parsing
-   └─ SQLite local (real_estate.db)
-
-2. UPLOAD (Manual)
-   ├─ Google Drive upload
-   └─ Compartir públicamente
-
-3. DASHBOARD (Cloud)
-   ├─ Download from Google Drive
-   ├─ Cache en Streamlit Cloud
-   └─ Visualización web
+1. SCRAPING (Local, diario)
+   Idealista.com → Bright Data proxy → BeautifulSoup → real_estate.db (local)
+   ↓
+2. UPLOAD (Manual tras scraping)
+   real_estate.db → Google Drive (File ID: 1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p)
+   ↓
+3. DASHBOARD (Streamlit Cloud, bajo demanda)
+   Google Drive → download → Streamlit cache → visualización
 ```
 
-### Sincronización de Datos
+### Detección de Cambios en el Scraper
 
-**Problema:** Base de datos local vs cloud
+En cada ejecución el scraper:
+1. Obtiene todos los `listing_id` activos de la BD
+2. Scrapea todos los barrios configurados en `barrios_urls.csv`
+3. Compara: nuevos → `INSERT`, precio cambiado → `UPDATE` + registro en `price_history`, no vistos hoy → `mark_as_sold`
+4. Registra la ejecución en `scraping_log` con coste estimado y duración
 
-**Solución Actual:** Upload manual a Google Drive
+### Semana ISO en SQL
 
-**Proceso:**
-1. Ejecutar scraper localmente
-2. Subir `real_estate.db` a Google Drive
-3. Dashboard descarga automáticamente en próximo acceso
+Todas las consultas semanales usan `strftime('%Y-%W', date)` para evitar el bug de agrupación cross-year (semana 01 de 2025 vs 2026).
 
 ---
 
 ## Flujo de Operación
 
-### 🔄 Ciclo Completo de Actualización
+### Ciclo Diario
 
-#### Paso 1: Scraping Local
+```
+[ ] 1. Ejecutar scraper (2-4h)
+       cd ~/inmobiliario && source venv/bin/activate && python scraper.py
 
-```bash
-# En tu máquina local
-cd /Users/luisnuno/Downloads/workspace/inmobiliario
-source venv/bin/activate
-python scraper.py
+[ ] 2. Verificar logs y días bajos en pestaña ⚙️ Administración
+
+[ ] 3. Subir real_estate.db a Google Drive (2 min)
+       - Opción manual: Drive → Gestionar versiones → Subir nueva versión
+       - Opción CLI: gdrive update 1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p real_estate.db
+
+[ ] 4. (Opcional) Reboot app en Streamlit Cloud si los datos no se actualizan
+
+[ ] 5. Verificar métricas en dashboard y score de vigilancia
 ```
 
-**Duración:** ~2-4 horas (184 barrios)
-
-**Output:**
-- Base de datos actualizada: `real_estate.db`
-- Logs de progreso
-- Estadísticas de cambios
-
-**Cambios Detectados:**
-- ✅ **Nuevos listings:** Insertados con `first_seen_date = today`
-- 🔄 **Actualizados:** `last_seen_date = today`, precio actualizado
-- ❌ **Vendidos:** Marcados como `status = 'sold'`
-
----
-
-#### Paso 2: Upload a Google Drive
-
-**Opción A: Manual (Interfaz Web)**
-
-1. Ve a [Google Drive](https://drive.google.com)
-2. Busca el archivo `real_estate.db` existente
-3. Click derecho → "Gestionar versiones"
-4. "Subir nueva versión"
-5. Selecciona `/Users/luisnuno/Downloads/workspace/inmobiliario/real_estate.db`
-6. Espera a que termine la subida
-
-**Opción B: Manual (Drag & Drop)**
-
-1. Ve a Google Drive
-2. Borra el archivo `real_estate.db` antiguo
-3. Arrastra el nuevo `real_estate.db` desde tu carpeta local
-4. Asegúrate que está compartido como "Cualquiera con el enlace puede ver"
-
-**Opción C: Automatizada (gdrive CLI) - Opcional**
-
-```bash
-# Instalar gdrive (una sola vez)
-brew install gdrive
-
-# Autenticar (una sola vez)
-gdrive about
-
-# Subir archivo (reemplazar FILE_ID con tu ID)
-gdrive update FILE_ID real_estate.db
-```
-
-**File ID actual:** `1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p`
-
----
-
-#### Paso 3: Actualización Automática del Dashboard
-
-**Comportamiento:**
-- Streamlit Cloud descarga la DB al iniciar
-- Si ya existe, usa versión cacheada
-- Para forzar actualización: **Reboot app** en Streamlit Cloud
-
-**Verificación:**
-1. Abre el dashboard: `inmobiliario-beastinblackcode.streamlit.app`
-2. Login con tus credenciales
-3. Verifica la fecha de "Última actualización"
-4. Comprueba las métricas de nuevos/vendidos
-
----
-
-### 📅 Frecuencia Recomendada
+### Frecuencia Recomendada
 
 | Actividad | Frecuencia | Duración |
-|-----------|-----------|----------|
-| Scraping | Diario (noche) | 2-4h |
-| Upload a Drive | Después de scraping | 2-5 min |
-| Reboot dashboard | Opcional | 30s |
-
----
-
-### 🔧 Troubleshooting
-
-#### "Database file not found" en dashboard
-
-**Causa:** DB no descargada desde Google Drive
-
-**Solución:**
-1. Verifica que el file ID es correcto en secrets
-2. Verifica que el archivo está compartido públicamente
-3. Reboot app en Streamlit Cloud
-
-#### Scraper muy lento
-
-**Causa:** Bright Data rate limiting o problemas de red
-
-**Solución:**
-1. Verifica credenciales de Bright Data
-2. Reduce concurrencia (si aplicable)
-3. Ejecuta en horarios de menos tráfico
-
-#### Datos no actualizados en dashboard
-
-**Causa:** Dashboard usando versión cacheada
-
-**Solución:**
-1. Streamlit Cloud → Settings → Reboot app
-2. Espera 30 segundos
-3. Refresca navegador
+|-----------|------------|----------|
+| Scraping completo | Diario (noche) | 2-4h |
+| Upload a Drive | Después de cada scraping | 2-5 min |
+| Revisión del score | Semanal | — |
 
 ---
 
@@ -398,87 +478,46 @@ gdrive update FILE_ID real_estate.db
 
 ### Entorno Local (Scraping)
 
-**Requisitos:**
-- Python 3.8+
-- pip
-- virtualenv
-
-**Setup:**
 ```bash
-cd /Users/luisnuno/Downloads/workspace/inmobiliario
+cd ~/inmobiliario
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
 
-**Variables de Entorno (.env):**
-```bash
-BRIGHTDATA_USER=your_username
-BRIGHTDATA_PASS=your_password
+# Variables en .env
+BRIGHTDATA_USER=tu_usuario
+BRIGHTDATA_PASS=tu_contraseña
 BRIGHTDATA_HOST=brd.superproxy.io:33335
 ```
 
----
-
 ### Streamlit Cloud (Dashboard)
 
-**Configuración:**
+- **Repositorio:** `github.com/beastinblackcode/inmobiliario`
+- **Branch:** `main` · **Main file:** `app.py`
+- **Auto-deploy** en cada push a `main`
 
-**Repository:** `github.com/beastinblackcode/inmobiliario`
-**Branch:** `main`
-**Main file:** `app.py`
-
-**Secrets:**
+**Secrets necesarios (`.streamlit/secrets.toml`):**
 ```toml
 [database]
 google_drive_file_id = "1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p"
 
 [auth.users]
-admin = "ContraseñaAdmin123"
-luis = "ContraseñaLuis456"
+admin = "ContraseñaAdmin"
+luis  = "ContraseñaLuis"
 ```
-
-**Deployment:**
-- Auto-deploy en cada push a `main`
-- Manual reboot disponible en Settings
 
 ---
 
 ## Seguridad
 
-### Autenticación
-
-**Método:** Username/Password con session state
-
-**Almacenamiento:** Streamlit Secrets (encriptado)
-
-**Características:**
-- ✅ Multi-usuario
-- ✅ Contraseñas individuales
-- ✅ Sesión persistente
-- ✅ HTTPS automático
-
-### Protección de Datos
-
-**Base de Datos:**
-- ✅ No contiene datos personales sensibles
-- ✅ Solo información pública de Idealista
-- ✅ Compartida públicamente (read-only)
-
-**Credenciales:**
-- ✅ Bright Data en `.env` (no en git)
-- ✅ Streamlit secrets encriptados
-- ✅ `.gitignore` configurado
-
-### Prevención de Indexación
-
-**robots.txt:**
-```
-User-agent: *
-Disallow: /
-```
-
-Bloquea crawlers de búsqueda.
+| Aspecto | Implementación |
+|---------|---------------|
+| Autenticación | Username + password en Streamlit Secrets |
+| Multi-usuario | Credenciales individuales por usuario |
+| HTTPS | Automático en Streamlit Cloud |
+| Credenciales Bright Data | Solo en `.env` local (en `.gitignore`) |
+| DB solo lectura | La DB de Google Drive es pública pero read-only |
+| Indexación bots | `public/robots.txt` con `Disallow: /` |
 
 ---
 
@@ -486,154 +525,33 @@ Bloquea crawlers de búsqueda.
 
 ### Costes Actuales
 
-**Bright Data:**
-- ~$4 por 1000 requests
-- ~5000 requests por scraping completo
-- **Coste por scraping:** ~$20
-- **Mensual (diario):** ~$600
+| Servicio | Coste |
+|----------|-------|
+| Bright Data | ~$0.02-0.04 por ejecución (post-optimización) |
+| Streamlit Cloud | Gratis (Community tier) |
+| Google Drive | Gratis (15 GB incluidos; DB actual ~16 MB) |
 
-**Streamlit Cloud:**
-- **Gratis** (Community tier)
-- Límites: 1 app, recursos compartidos
+> La optimización del scraper redujo el coste por ejecución de ~$20 a menos de $0.05 mediante uso de API JSON en lugar de parsing HTML completo donde es posible.
 
-**Google Drive:**
-- **Gratis** (15 GB incluidos)
-- DB actual: 6 MB
+### Escalabilidad
 
-**Total mensual:** ~$600 (solo Bright Data)
-
----
-
-### Optimizaciones Posibles
-
-#### Reducir Costes de Scraping
-
-1. **Scraping Selectivo:**
-   - Solo barrios de interés
-   - Reducir frecuencia (semanal vs diario)
-
-2. **Proxy Alternativo:**
-   - Proxies residenciales más baratos
-   - Rotación manual de IPs
-
-3. **Rate Limiting:**
-   - Delays entre requests
-   - Menos páginas por barrio
-
-#### Escalabilidad
-
-**Actual:** ~20,000 listings, 6 MB DB
-
-**Límites:**
-- SQLite: Hasta ~140 TB (teórico)
-- Streamlit Cloud: ~1 GB RAM
-- Google Drive: 15 GB gratis
-
-**Proyección:**
-- 1 año de datos: ~50 MB
-- 5 años: ~250 MB
-- **Conclusión:** Escalable para años
+| Dimensión | Estado actual | Límite práctico |
+|-----------|--------------|-----------------|
+| Listings activos | ~20,000 | Sin límite relevante |
+| Tamaño DB | ~16 MB | SQLite aguanta hasta ~140 TB |
+| RAM Streamlit | <200 MB | ~1 GB disponible |
+| Proyección 5 años | ~250 MB | Sin problema |
 
 ---
 
-## Mejoras Futuras
+## Mejoras Futuras Pendientes
 
-### Automatización
-
-**Opción 1: GitHub Actions**
-```yaml
-# .github/workflows/scrape.yml
-name: Daily Scrape
-on:
-  schedule:
-    - cron: '0 2 * * *'  # 2 AM diario
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - run: python scraper.py
-      - run: gdrive update $FILE_ID real_estate.db
-```
-
-**Opción 2: Cron Job Local**
-```bash
-# crontab -e
-0 2 * * * cd /path/to/inmobiliario && ./run_scraper.sh
-```
-
-**Opción 3: Cloud Function**
-- Google Cloud Functions
-- AWS Lambda
-- Ejecutar scraper en cloud
-
----
-
-### Base de Datos Cloud
-
-**Migrar a PostgreSQL/MySQL:**
-
-**Ventajas:**
-- ✅ Actualización en tiempo real
-- ✅ No upload manual
-- ✅ Mejor concurrencia
-
-**Desventajas:**
-- ❌ Coste mensual ($10-50)
-- ❌ Más complejidad
-
-**Proveedores:**
-- Supabase (PostgreSQL gratis hasta 500 MB)
-- PlanetScale (MySQL gratis hasta 5 GB)
-- Railway (PostgreSQL $5/mes)
-
----
-
-### Notificaciones
-
-**Alertas automáticas:**
-- Nuevas propiedades en barrios favoritos
-- Bajadas de precio significativas
-- Propiedades vendidas
-
-**Canales:**
-- Email (SendGrid, Mailgun)
-- Telegram Bot
-- Slack webhook
-
----
-
-## Resumen Operativo
-
-### ✅ Checklist Diario
-
-```
-[ ] 1. Ejecutar scraper local (2-4h)
-[ ] 2. Verificar logs de errores
-[ ] 3. Subir real_estate.db a Google Drive (2 min)
-[ ] 4. (Opcional) Reboot dashboard en Streamlit Cloud
-[ ] 5. Verificar métricas en dashboard
-```
-
-### 📊 Métricas Clave
-
-- **Listings activos:** ~20,000
-- **Nuevos diarios:** ~200-500
-- **Vendidos diarios:** ~100-300
-- **Tiempo de scraping:** 2-4 horas
-- **Tamaño DB:** 6 MB
-- **Coste mensual:** ~$600
-
----
-
-## Contacto y Soporte
-
-**Repositorio:** `github.com/beastinblackcode/inmobiliario`
-
-**Dashboard:** `inmobiliario-beastinblackcode.streamlit.app`
-
-**Documentación:**
-- `README.md` - Guía general
-- `AUTH_SETUP.md` - Configuración de autenticación
-- `MULTI_USER_AUTH.md` - Multi-usuario
-- `walkthrough.md` - Implementaciones recientes
+| Mejora | Prioridad | Complejidad |
+|--------|-----------|-------------|
+| Indicador de precio de alquiler en score | Alta | Media (requiere nueva fuente) |
+| Indicador de rentabilidad bruta (yield) | Alta | Baja (precio alquiler / precio compra) |
+| Visados de obra nueva (INE trimestral) | Media | Media |
+| Automatización del upload a Drive (gdrive CLI) | Media | Baja |
+| Notificaciones Telegram / email por alertas | Media | Media |
+| Migración a PostgreSQL (eliminación upload manual) | Baja | Alta |
+| GitHub Actions para scraping automático | Baja | Media |

@@ -31,3 +31,10 @@ real_estate.db
 # OS
 .DS_Store
 Thumbs.db
+
+# Scraper runtime state (generated automatically, not part of source)
+barrios_scrapeados_hoy.txt
+barrio_page_history.json
+current_scraper_urls.txt
+urls_from_web.txt
+model_metadata.json
