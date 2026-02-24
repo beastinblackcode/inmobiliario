@@ -1014,6 +1014,11 @@ def run_scraper(retry_only: bool = False):
     # -------------------------------------------------------------------------
     _auto_upload_to_drive()
 
+    # -------------------------------------------------------------------------
+    # 📬  DAILY EMAIL REPORT
+    # -------------------------------------------------------------------------
+    _send_email_report()
+
 
 # ============================================================================
 # RENTAL SCRAPING
@@ -1150,6 +1155,22 @@ def _auto_upload_to_drive():
     except Exception as exc:
         print(f"⚠️  Error en upload automático: {exc}")
         print("   Sube real_estate.db manualmente a Drive.\n")
+
+
+def _send_email_report():
+    """
+    Send daily HTML market report via Gmail.
+    Skipped silently if GMAIL_APP_PASSWORD is not set in .env.
+    """
+    try:
+        from email_report import send_daily_report
+        print("\n")
+        print("╔" + "═" * 58 + "╗")
+        print("║" + "  📬  ENVIANDO INFORME DIARIO POR EMAIL".center(58) + "║")
+        print("╚" + "═" * 58 + "╝")
+        send_daily_report()
+    except Exception as exc:
+        print(f"⚠️  Error enviando informe por email: {exc}")
 
 
 if __name__ == "__main__":
