@@ -47,8 +47,10 @@ jobs:
       # ── 5. Scraping ──────────────────────────────────────────────────────────
       - name: Run scraper
         env:
-          # Headless: no abrir navegador, sin progress bars interactivos
           PYTHONUNBUFFERED: "1"
+          BRIGHTDATA_USER: ${{ secrets.BRIGHTDATA_USER }}
+          BRIGHTDATA_PASS: ${{ secrets.BRIGHTDATA_PASS }}
+          BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
         run: python scraper.py
 
       # ── 6. Email diario (opcional) ───────────────────────────────────────────
