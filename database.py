@@ -1552,6 +1552,208 @@ def get_rental_yields(min_listings: int = 3) -> List[Dict]:
         return []
 
 
+def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[Dict]:
+    """
+    Return new listings (first seen within `hours` hours) with a high opportunity score.
+
+    Opportunity score (0-100):
+        40% → price vs barrio median €/m²  (needs barrio_price_stats)
+        30% → days on market               (0 for brand-new listings → neutral 50)
+        30% → price drops                  (0 for brand-new → neutral 50)
+
+    Args:
+        hours:     Look-back window in hours (default 24 → "today's new listings").
+        min_score: Minimum opportunity score to include in results.
+
+    Returns:
+        List of dicts sorted by score descending, each with keys:
+        listing_id, url, barrio, distrito, price, size_sqm, rooms, price_per_sqm,
+        vs_barrio_pct, barrio_median_sqm, score_oportunidad, first_seen_date.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 1. Fetch listings first seen in the last `hours` hours
+            cursor.execute("""
+                SELECT
+                    listing_id, url, barrio, distrito,
+                    price, size_sqm, rooms,
+                    CAST(price AS FLOAT) / NULLIF(size_sqm, 0) AS price_per_sqm,
+                    first_seen_date
+                FROM listings
+                WHERE status = 'active'
+                  AND price  > 0
+                  AND size_sqm > 10
+                  AND first_seen_date >= datetime('now', ? || ' hours')
+                ORDER BY first_seen_date DESC
+            """, (f"-{hours}",))
+
+            rows = cursor.fetchall()
+            if not rows:
+                return []
+
+        # 2. Get barrio price stats to compute vs-barrio %
+        barrio_stats = get_barrio_price_stats(min_listings=3)
+
+        results = []
+        for row in rows:
+            (lid, url, barrio, distrito,
+             price, size_sqm, rooms, price_per_sqm,
+             first_seen) = row
+
+            # vs barrio %  (positive = more expensive, negative = cheaper = good)
+            barrio_median = None
+            vs_barrio_pct = None
+            if barrio and barrio in barrio_stats:
+                barrio_median = barrio_stats[barrio].get("median_price_sqm")
+                if barrio_median and price_per_sqm:
+                    vs_barrio_pct = (price_per_sqm - barrio_median) / barrio_median * 100
+
+            # Price component  (40 %)
+            if vs_barrio_pct is not None:
+                pct_clamped = max(-20.0, min(20.0, vs_barrio_pct))
+                price_score = 100 * (1 - (pct_clamped + 20) / 40)   # 0 pct → 50, -20 → 100, +20 → 0
+            else:
+                price_score = 50  # neutral when no barrio data
+
+            # For brand-new listings: days=0 → speed score neutral (50)
+            # and drops=0 → drop score neutral (50)
+            speed_score = 50
+            drop_score  = 50
+
+            score = round(0.40 * price_score + 0.30 * speed_score + 0.30 * drop_score)
+
+            if score < min_score:
+                continue
+
+            results.append({
+                "listing_id":       lid,
+                "url":              url,
+                "barrio":           barrio or "—",
+                "distrito":         distrito or "—",
+                "price":            price,
+                "size_sqm":         size_sqm,
+                "rooms":            rooms,
+                "price_per_sqm":    round(price_per_sqm, 0) if price_per_sqm else None,
+                "barrio_median_sqm": round(barrio_median, 0) if barrio_median else None,
+                "vs_barrio_pct":    round(vs_barrio_pct, 1) if vs_barrio_pct is not None else None,
+                "score_oportunidad": score,
+                "first_seen_date":  first_seen,
+            })
+
+        results.sort(key=lambda x: x["score_oportunidad"], reverse=True)
+        return results
+
+    except Exception as exc:
+        print(f"Error getting new opportunity listings: {exc}")
+        return []
+
+
+def get_rental_yield_history(weeks: int = 12) -> List[Dict]:
+    """
+    Return weekly average gross rental yield (all barrios combined) for the last `weeks` weeks.
+
+    Uses `rental_prices` snapshots + the corresponding active sale prices.
+
+    Returns:
+        List of dicts sorted by week ascending:
+        [ { week: "YYYY-WW", week_start: "YYYY-MM-DD", avg_yield_pct: float, barrio_count: int }, … ]
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Check table exists
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='rental_prices'"
+            )
+            if not cursor.fetchone():
+                return []
+
+            # Get weekly snapshots from rental_prices
+            cursor.execute("""
+                SELECT
+                    strftime('%Y-%W', date_recorded)   AS week,
+                    MIN(date_recorded)                 AS week_start,
+                    barrio,
+                    AVG(median_rent)                   AS avg_rent,
+                    SUM(listing_count)                 AS cnt
+                FROM rental_prices
+                WHERE date_recorded >= date('now', ? || ' days')
+                  AND median_rent > 0
+                  AND listing_count >= 3
+                GROUP BY strftime('%Y-%W', date_recorded), barrio
+                HAVING SUM(listing_count) >= 3
+            """, (f"-{weeks * 7}",))
+
+            rental_rows = cursor.fetchall()
+            if not rental_rows:
+                return []
+
+            # Build weekly median sale price per barrio from sale listing snapshots
+            # We approximate using the listings table (current state) crossed with rental week data
+            # For each barrio, get the median sale price from the closest active snapshot
+            cursor.execute("""
+                SELECT
+                    barrio,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)) AS avg_sqm,
+                    COUNT(*) AS cnt
+                FROM listings
+                WHERE status = 'active'
+                  AND price > 0
+                  AND size_sqm > 10
+                  AND barrio IS NOT NULL
+                GROUP BY barrio
+                HAVING COUNT(*) >= 3
+            """)
+            sale_by_barrio = {row[0]: row[1] for row in cursor.fetchall() if row[1]}
+
+        if not sale_by_barrio:
+            return []
+
+        # Aggregate: for each (week, barrio) compute yield, then average across barrios per week
+        from collections import defaultdict
+        weekly_yields: dict = defaultdict(list)
+        weekly_starts: dict = {}
+
+        for week, week_start, barrio, avg_rent, cnt in rental_rows:
+            sale_sqm = sale_by_barrio.get(barrio)
+            if not sale_sqm or sale_sqm <= 0:
+                continue
+            # Estimate median sale price using avg size=80m² as proxy (or just use per-m² × typical sqm)
+            # Better: use avg_sqm × typical_size to get median price, but we don't have size here.
+            # Use the rental/sqm approach: yield = (rent*12) / (avg_sqm * typical_sqm)
+            # Simpler: yield = (rent * 12) / (sale_sqm * 80) -- approximate
+            typical_sqm = 80  # Madrid typical apartment size
+            approx_sale_price = sale_sqm * typical_sqm
+            if approx_sale_price <= 0:
+                continue
+            y = (avg_rent * 12) / approx_sale_price * 100
+            if 0 < y < 20:  # sanity filter
+                weekly_yields[week].append(y)
+                weekly_starts[week] = week_start
+
+        if not weekly_yields:
+            return []
+
+        results = []
+        for week in sorted(weekly_yields.keys()):
+            yields_list = weekly_yields[week]
+            results.append({
+                "week":          week,
+                "week_start":    weekly_starts[week],
+                "avg_yield_pct": round(sum(yields_list) / len(yields_list), 2),
+                "barrio_count":  len(yields_list),
+            })
+
+        return results
+
+    except Exception as exc:
+        print(f"Error getting rental yield history: {exc}")
+        return []
+
+
 if __name__ == "__main__":
     # Initialize database when run directly
     init_database()

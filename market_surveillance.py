@@ -916,6 +916,84 @@ def _chart_zone_segmentation(indicators: dict):
             "Se calculan automáticamente con cada ejecución del scraper (python scraper.py)."
         )
 
+    # ── Rental yield history chart ──────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📈 Evolución Semanal de Rentabilidad Bruta Media")
+
+    from database import get_rental_yield_history
+    import pandas as pd
+
+    yield_history = get_rental_yield_history(weeks=12)
+
+    if len(yield_history) >= 2:
+        df_yh = pd.DataFrame(yield_history)
+        df_yh["week_start"] = pd.to_datetime(df_yh["week_start"])
+
+        # Determine color for trend arrow
+        first_val = df_yh["avg_yield_pct"].iloc[0]
+        last_val  = df_yh["avg_yield_pct"].iloc[-1]
+        trend_delta = last_val - first_val
+        trend_arrow = "📈" if trend_delta > 0.1 else ("📉" if trend_delta < -0.1 else "➡️")
+        trend_color = "#1b7f3a" if trend_delta > 0.1 else ("#c0392b" if trend_delta < -0.1 else "#e69c1a")
+
+        # Line chart
+        fig_yh = go.Figure()
+        fig_yh.add_trace(go.Scatter(
+            x=df_yh["week_start"],
+            y=df_yh["avg_yield_pct"],
+            mode="lines+markers",
+            name="Yield bruto medio",
+            line=dict(color="#2e9e52", width=2.5),
+            marker=dict(size=7, color="#2e9e52"),
+            fill="tozeroy",
+            fillcolor="rgba(46,158,82,0.08)",
+            customdata=df_yh[["barrio_count"]].values,
+            hovertemplate=(
+                "<b>Semana %{x|%d %b %Y}</b><br>"
+                "Yield bruto: %{y:.2f}%<br>"
+                "Barrios con datos: %{customdata[0]}<extra></extra>"
+            ),
+        ))
+
+        # Reference lines at 3.5% and 5%
+        fig_yh.add_hline(
+            y=5.0, line_dash="dot", line_color="rgba(27,127,58,0.5)",
+            annotation_text="5% (alto)", annotation_position="bottom right"
+        )
+        fig_yh.add_hline(
+            y=3.5, line_dash="dot", line_color="rgba(230,156,26,0.5)",
+            annotation_text="3.5% (mínimo)", annotation_position="bottom right"
+        )
+
+        fig_yh.update_layout(
+            height=320,
+            yaxis_title="Rentabilidad bruta (%)",
+            yaxis=dict(rangemode="tozero"),
+            xaxis_title=None,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=20, t=20, b=40),
+            legend=dict(orientation="h", y=1.05),
+        )
+        st.plotly_chart(fig_yh, use_container_width=True)
+
+        # Summary caption
+        st.caption(
+            f"{trend_arrow} Rentabilidad actual: **{last_val:.2f}%** "
+            f"({trend_delta:+.2f} pp vs hace 12 semanas) — "
+            f"Media del período: {df_yh['avg_yield_pct'].mean():.2f}%"
+        )
+    elif len(yield_history) == 1:
+        st.info(
+            f"📊 Solo hay datos de una semana ({yield_history[0]['avg_yield_pct']:.2f}%). "
+            "El gráfico de evolución se activa con ≥ 2 semanas de datos."
+        )
+    else:
+        st.info(
+            "📭 Sin histórico de rentabilidades todavía. "
+            "Aparecerá aquí después de varias ejecuciones del scraper."
+        )
+
 
 def _render_score_breakdown(score: dict):
     """Render market score breakdown."""

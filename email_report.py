@@ -95,6 +95,51 @@ def _chol_row(idx: int, p: Dict) -> str:
         </tr>"""
 
 
+def _new_opp_row(idx: int, p: Dict) -> str:
+    """Render a row for new opportunity listings section."""
+    score      = p.get("score_oportunidad", 0)
+    vs_barrio  = p.get("vs_barrio_pct")
+    price      = p.get("price", 0)
+    sqm        = p.get("size_sqm") or "—"
+    rooms      = p.get("rooms") or "—"
+    barrio     = p.get("barrio", "—")
+    distrito   = p.get("distrito", "—")
+    url        = p.get("url", "#")
+    ppsqm      = p.get("price_per_sqm")
+    barrio_med = p.get("barrio_median_sqm")
+    first_seen = p.get("first_seen_date", "")[:10] if p.get("first_seen_date") else "—"
+
+    # Score badge colour
+    score_color = "#1b7f3a" if score >= 80 else ("#e69c1a" if score >= 70 else "#888")
+
+    vs_str = f"{vs_barrio:+.1f}%" if vs_barrio is not None else "—"
+    vs_color = "#1b7f3a" if (vs_barrio or 0) < -5 else ("#e69c1a" if (vs_barrio or 0) < 0 else "#c0392b")
+    sqm_str = f"{sqm:.0f} m²" if isinstance(sqm, (int, float)) else str(sqm)
+    ppsqm_str = f"€{int(ppsqm):,}/m²" if ppsqm else "—"
+    barrio_med_str = f"€{int(barrio_med):,}/m²" if barrio_med else "—"
+
+    bg = "#f8fff8" if idx % 2 == 0 else ""
+    return f"""
+        <tr style='{"background:" + bg + ";" if bg else ""}'>
+          <td style='padding:10px 12px;font-size:13px;'>
+            <a href='{url}' style='color:#1a73e8;font-weight:600;text-decoration:none;'>#{idx} — {barrio}, {distrito}</a><br>
+            <span style='color:#888;font-size:11px;'>{rooms} hab · {sqm_str} · {ppsqm_str} · visto: {first_seen}</span>
+          </td>
+          <td style='padding:10px 12px;text-align:right;font-size:13px;font-weight:700;'>
+            €{price:,}
+          </td>
+          <td style='padding:10px 12px;text-align:right;font-size:13px;color:{vs_color};font-weight:700;'>
+            {vs_str}<br>
+            <span style='color:#aaa;font-size:10px;font-weight:400;'>barrio: {barrio_med_str}</span>
+          </td>
+          <td style='padding:10px 12px;text-align:center;'>
+            <span style='background:{score_color};color:white;border-radius:12px;padding:3px 10px;font-size:12px;font-weight:700;'>
+              {score}
+            </span>
+          </td>
+        </tr>"""
+
+
 def _yield_row(idx: int, r: Dict) -> str:
     bg = "#f0fff4" if idx % 2 == 0 else ""
     return f"""
@@ -114,6 +159,7 @@ def build_html_report(
     chollos: List[Dict],
     yields: List[Dict],
     alerts: List[Dict],
+    new_opportunities: List[Dict] = None,
 ) -> str:
     today     = datetime.now().strftime("%d/%m/%Y")
     score_val = score.get("score", 0)
@@ -155,9 +201,10 @@ def build_html_report(
                              f"{ry['current']:.1f}%",
                              f"Sobre {ry.get('barrio_count', 0)} barrios")
     if euribor.get("current") is not None:
+        euribor_change = euribor.get("change") or 0
         kpi_rows += _kpi_row("🏦 Euríbor 12M",
                              f"{euribor['current']:.2f}%",
-                             f"{euribor.get('change', 0):+.3f} pp")
+                             f"{euribor_change:+.3f} pp")
     if paro.get("current") is not None:
         kpi_rows += _kpi_row("👥 Paro España", f"{paro['current']:.1f}%")
 
@@ -174,6 +221,29 @@ def build_html_report(
           <p style='margin:0 0 10px;font-weight:700;font-size:14px;color:#b47d00;'>⚠️ Alertas de Mercado</p>
           <ul style='margin:0;padding-left:18px;'>{alert_items}</ul>
         </div>"""
+
+    # ── New opportunities section ─────────────────────────────────────────────
+    new_opps = new_opportunities or []
+    if new_opps:
+        new_opp_rows = "".join(_new_opp_row(i + 1, p) for i, p in enumerate(new_opps[:10]))
+        new_opps_html = f"""
+        <div style='background:#e8f5e9;border-left:4px solid #2e7d32;border-radius:6px;padding:16px 20px;margin:24px 0 0;'>
+          <p style='margin:0 0 4px;font-weight:700;font-size:15px;color:#1b5e20;'>🆕 Nuevas Oportunidades Detectadas Hoy</p>
+          <p style='margin:0 0 12px;color:#388e3c;font-size:12px;'>Anuncios publicados en las últimas 24h con score de oportunidad ≥ 70</p>
+        </div>
+        <table style='width:100%;border-collapse:collapse;font-family:Arial,sans-serif;'>
+          <thead>
+            <tr style='background:#e8f5e9;'>
+              <th style='padding:10px 12px;text-align:left;font-size:12px;color:#555;'>Propiedad</th>
+              <th style='padding:10px 12px;text-align:right;font-size:12px;color:#555;'>Precio</th>
+              <th style='padding:10px 12px;text-align:right;font-size:12px;color:#555;'>vs Barrio</th>
+              <th style='padding:10px 12px;text-align:center;font-size:12px;color:#555;'>Score</th>
+            </tr>
+          </thead>
+          <tbody>{new_opp_rows}</tbody>
+        </table>"""
+    else:
+        new_opps_html = ""
 
     # ── Chollos section ──────────────────────────────────────────────────────
     chollos_rows = "".join(_chol_row(i + 1, c) for i, c in enumerate(chollos[:10]))
@@ -250,6 +320,9 @@ def build_html_report(
 
   <!-- ALERTS -->
   <tr><td style='padding:0 32px;'>{alerts_html}</td></tr>
+
+  <!-- NEW OPPORTUNITIES -->
+  <tr><td style='padding:0 32px;'>{new_opps_html}</td></tr>
 
   <!-- KPIs -->
   <tr><td style='padding:8px 32px 0;'>
@@ -344,7 +417,11 @@ def send_daily_report() -> bool:
             get_market_alerts,
         )
         from macro_data import get_all_macro_data, get_euribor_data, get_paro_data
-        from database import get_properties_with_multiple_drops, get_rental_yields
+        from database import (
+            get_properties_with_multiple_drops,
+            get_rental_yields,
+            get_new_opportunity_listings,
+        )
 
         # Gather data
         euribor   = get_euribor_data()
@@ -374,11 +451,13 @@ def send_daily_report() -> bool:
             macro         = macro,
         )
 
-        chollos = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
-        yields  = get_rental_yields(min_listings=3)
+        chollos          = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
+        yields           = get_rental_yields(min_listings=3)
+        new_opps         = get_new_opportunity_listings(hours=24, min_score=70)
 
         # Build & send
-        html    = build_html_report(score, indicators, macro, chollos, yields, alerts)
+        html    = build_html_report(score, indicators, macro, chollos, yields, alerts,
+                                    new_opportunities=new_opps)
         today   = datetime.now().strftime("%d/%m/%Y")
         subject = (
             f"📊 Mercado Madrid {today} — Score {score.get('score', '?')}/100 "
@@ -406,7 +485,11 @@ if __name__ == "__main__":
         try:
             from market_indicators import get_all_internal_indicators, calculate_market_score, get_market_alerts
             from macro_data import get_all_macro_data, get_euribor_data, get_paro_data
-            from database import get_properties_with_multiple_drops, get_rental_yields
+            from database import (
+                get_properties_with_multiple_drops,
+                get_rental_yields,
+                get_new_opportunity_listings,
+            )
 
             euribor      = get_euribor_data()
             euribor_rate = euribor.get("current") if euribor else None
@@ -432,9 +515,11 @@ if __name__ == "__main__":
                 affordability = indicators.get("affordability", {}),
                 macro         = macro,
             )
-            chollos = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
-            yields  = get_rental_yields(min_listings=3)
-            html    = build_html_report(score, indicators, macro, chollos, yields, alerts)
+            chollos  = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
+            yields   = get_rental_yields(min_listings=3)
+            new_opps = get_new_opportunity_listings(hours=24, min_score=70)
+            html     = build_html_report(score, indicators, macro, chollos, yields, alerts,
+                                         new_opportunities=new_opps)
 
             out = "email_preview.html"
             with open(out, "w", encoding="utf-8") as f:
