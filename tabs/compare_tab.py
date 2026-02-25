@@ -18,6 +18,13 @@ import plotly.graph_objects as go
 BARRIO_COLORS = ["#4fc3f7", "#81c784", "#ffb74d", "#f48fb1"]
 
 
+def _hex_to_rgba(hex_color: str, alpha: float = 0.15) -> str:
+    """Convert a #RRGGBB hex string to an rgba() string with the given alpha."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def _fmt(value, fmt="{:,.0f}", fallback="—"):
     if value is None or (isinstance(value, float) and value != value):
         return fallback
@@ -160,8 +167,7 @@ def render_compare_tab() -> None:
             fill  = "toself",
             name  = barrio,
             line  = dict(color=BARRIO_COLORS[i % len(BARRIO_COLORS)], width=2),
-            fillcolor=BARRIO_COLORS[i % len(BARRIO_COLORS)].replace(")", ", 0.15)").replace("rgb", "rgba")
-                  if BARRIO_COLORS[i].startswith("rgb") else BARRIO_COLORS[i % len(BARRIO_COLORS)] + "26",
+            fillcolor=_hex_to_rgba(BARRIO_COLORS[i % len(BARRIO_COLORS)], alpha=0.15),
             hovertemplate=(
                 f"<b>{barrio}</b><br>"
                 "%{theta}: %{r:.0f}/100<extra></extra>"
