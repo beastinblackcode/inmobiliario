@@ -35,11 +35,25 @@ DB_PATH          = BASE_DIR / "real_estate.db"
 CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 TOKEN_FILE       = BASE_DIR / "token.json"
 
-# Google Drive file ID (same as in Streamlit secrets)
-# Find it in the URL of the file: drive.google.com/file/d/<FILE_ID>/view
-DRIVE_FILE_ID = "1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p"
+# Google Drive file ID — persisted in drive_file_id.txt after the first upload.
+# If the file is deleted from Drive, just delete drive_file_id.txt and a new
+# one will be created automatically on the next run.
+DRIVE_FILE_ID_FILE = BASE_DIR / "drive_file_id.txt"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+
+def _load_drive_file_id() -> str:
+    """Return the persisted Drive file ID, or empty string if not set."""
+    if DRIVE_FILE_ID_FILE.exists():
+        return DRIVE_FILE_ID_FILE.read_text().strip()
+    return ""
+
+
+def _save_drive_file_id(file_id: str) -> None:
+    """Persist Drive file ID to disk for future runs."""
+    DRIVE_FILE_ID_FILE.write_text(file_id)
+    print(f"  💾 ID de Drive guardado en {DRIVE_FILE_ID_FILE.name}: {file_id}")
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -93,7 +107,10 @@ def get_credentials():
 
 def upload_db(db_path: Path, dry_run: bool = False) -> bool:
     """
-    Update the existing Google Drive file with the local DB.
+    Upload the local DB to Google Drive.
+    - If a file ID is saved in drive_file_id.txt, updates that file.
+    - If the file no longer exists in Drive (404) or no ID is saved,
+      creates a new file and persists the new ID for future runs.
     Returns True on success, False on error.
     """
     if not db_path.exists():
@@ -118,17 +135,47 @@ def upload_db(db_path: Path, dry_run: bool = False) -> bool:
         media = MediaFileUpload(
             str(db_path),
             mimetype="application/octet-stream",
-            resumable=True,        # resumable upload handles large files safely
+            resumable=True,
         )
 
-        start = datetime.now()
+        file_id = _load_drive_file_id()
+        start   = datetime.now()
 
-        request = service.files().update(
-            fileId=DRIVE_FILE_ID,
+        # ── Try to update existing file ──────────────────────────────────────
+        if file_id:
+            try:
+                request = service.files().update(
+                    fileId=file_id,
+                    media_body=media,
+                )
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status:
+                        pct = int(status.progress() * 100)
+                        print(f"\r  ▶ Progreso: {pct}%", end="", flush=True)
+
+                elapsed = (datetime.now() - start).total_seconds()
+                speed   = size_mb / elapsed if elapsed > 0 else 0
+                print(f"\r  ✅ Actualizado en {elapsed:.1f}s ({speed:.1f} MB/s)       ")
+                print(f"  🔗 https://drive.google.com/file/d/{file_id}/view")
+                return True
+
+            except HttpError as e:
+                if e.resp.status == 404:
+                    print(f"  ⚠ Archivo anterior no encontrado en Drive — creando uno nuevo...")
+                    # Fall through to create a new file below
+                else:
+                    raise
+
+        # ── Create new file (first upload or after 404) ──────────────────────
+        print("  📁 Creando archivo nuevo en Google Drive...")
+        file_metadata = {"name": db_path.name}
+        request = service.files().create(
+            body=file_metadata,
             media_body=media,
+            fields="id",
         )
-
-        # Execute with progress reporting
         response = None
         while response is None:
             status, response = request.next_chunk()
@@ -136,12 +183,16 @@ def upload_db(db_path: Path, dry_run: bool = False) -> bool:
                 pct = int(status.progress() * 100)
                 print(f"\r  ▶ Progreso: {pct}%", end="", flush=True)
 
+        new_id  = response.get("id")
         elapsed = (datetime.now() - start).total_seconds()
         speed   = size_mb / elapsed if elapsed > 0 else 0
-
-        print(f"\r  ✅ Subida completada en {elapsed:.1f}s ({speed:.1f} MB/s)       ")
-        print(f"  🔗 https://drive.google.com/file/d/{DRIVE_FILE_ID}/view")
-
+        print(f"\r  ✅ Creado en {elapsed:.1f}s ({speed:.1f} MB/s)       ")
+        print(f"  🔗 https://drive.google.com/file/d/{new_id}/view")
+        _save_drive_file_id(new_id)
+        print(
+            f"\n  💡 Actualiza el secreto de Streamlit con el nuevo ID:\n"
+            f"     google_drive_file_id = \"{new_id}\"\n"
+        )
         return True
 
     except ImportError:

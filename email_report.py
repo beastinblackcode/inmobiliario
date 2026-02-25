@@ -369,8 +369,9 @@ def send_daily_report() -> bool:
             sales_speed   = indicators.get("sales_speed", {}),
             supply_demand = indicators.get("supply_demand", {}),
             inventory     = indicators.get("inventory", {}),
-            euribor       = euribor,
-            paro          = paro,
+            rotation      = indicators.get("rotation", {}),
+            affordability = indicators.get("affordability", {}),
+            macro         = macro,
         )
 
         chollos = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
@@ -423,11 +424,13 @@ if __name__ == "__main__":
                 price_drop_ratio = indicators.get("price_drop_ratio"),
             )
             alerts  = get_market_alerts(
-                price_trend=indicators.get("price_trend", {}),
-                sales_speed=indicators.get("sales_speed", {}),
-                supply_demand=indicators.get("supply_demand", {}),
-                inventory=indicators.get("inventory", {}),
-                euribor=euribor, paro=paro,
+                price_trend   = indicators.get("price_trend", {}),
+                sales_speed   = indicators.get("sales_speed", {}),
+                supply_demand = indicators.get("supply_demand", {}),
+                inventory     = indicators.get("inventory", {}),
+                rotation      = indicators.get("rotation", {}),
+                affordability = indicators.get("affordability", {}),
+                macro         = macro,
             )
             chollos = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
             yields  = get_rental_yields(min_listings=3)

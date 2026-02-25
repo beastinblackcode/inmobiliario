@@ -35,6 +35,7 @@ Thumbs.db
 # Google Drive OAuth (credentials.json has secrets; token.json is personal)
 credentials.json
 token.json
+drive_file_id.txt
 
 # Scraper runtime state (generated automatically, not part of source)
 barrios_scrapeados_hoy.txt
