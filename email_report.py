@@ -152,6 +152,38 @@ def _yield_row(idx: int, r: Dict) -> str:
         </tr>"""
 
 
+def _watchlist_drop_row(idx: int, p: Dict) -> str:
+    """Render a row for the watchlist price-drop section in the email."""
+    change_amt = p.get("change_amount", 0) or 0
+    change_pct = p.get("change_percent", 0) or 0
+    old_price  = p.get("old_price", 0)
+    new_price  = p.get("new_price", 0)
+    barrio     = p.get("barrio", "—")
+    distrito   = p.get("distrito", "—")
+    rooms      = p.get("rooms") or "—"
+    sqm        = p.get("size_sqm") or "—"
+    url        = p.get("url", "#")
+    drop_date  = p.get("drop_date", "")[:10] if p.get("drop_date") else "—"
+
+    sqm_str = f"{sqm:.0f} m²" if isinstance(sqm, (int, float)) else str(sqm)
+    bg = "#f0fff4" if idx % 2 == 0 else ""
+    return f"""
+        <tr style='{"background:" + bg + ";" if bg else ""}'>
+          <td style='padding:10px 12px;font-size:13px;'>
+            <a href='{url}' style='color:#1a73e8;font-weight:600;text-decoration:none;'>#{idx} — {barrio}, {distrito}</a><br>
+            <span style='color:#888;font-size:11px;'>{rooms} hab · {sqm_str} · bajada detectada: {drop_date}</span>
+          </td>
+          <td style='padding:10px 12px;text-align:right;font-size:13px;'>
+            <span style='font-weight:700;'>€{int(new_price):,}</span><br>
+            <span style='color:#888;font-size:11px;text-decoration:line-through;'>€{int(old_price):,}</span>
+          </td>
+          <td style='padding:10px 12px;text-align:right;font-size:13px;color:#1b7f3a;font-weight:700;'>
+            {change_pct:.1f}%<br>
+            <span style='font-size:11px;'>€{abs(int(change_amt)):,} menos</span>
+          </td>
+        </tr>"""
+
+
 def build_html_report(
     score: Dict,
     indicators: Dict,
@@ -160,6 +192,7 @@ def build_html_report(
     yields: List[Dict],
     alerts: List[Dict],
     new_opportunities: List[Dict] = None,
+    watchlist_drops: List[Dict] = None,
 ) -> str:
     today     = datetime.now().strftime("%d/%m/%Y")
     score_val = score.get("score", 0)
@@ -245,6 +278,28 @@ def build_html_report(
     else:
         new_opps_html = ""
 
+    # ── Watchlist drops section ───────────────────────────────────────────────
+    wl_drops = watchlist_drops or []
+    if wl_drops:
+        wl_rows = "".join(_watchlist_drop_row(i + 1, p) for i, p in enumerate(wl_drops[:10]))
+        watchlist_html = f"""
+        <div style='background:#e3f2fd;border-left:4px solid #1565c0;border-radius:6px;padding:16px 20px;margin:24px 0 0;'>
+          <p style='margin:0 0 4px;font-weight:700;font-size:15px;color:#0d47a1;'>⭐ Bajadas en Tu Watchlist</p>
+          <p style='margin:0 0 12px;color:#1976d2;font-size:12px;'>Propiedades guardadas que bajaron de precio en las últimas 24h</p>
+        </div>
+        <table style='width:100%;border-collapse:collapse;font-family:Arial,sans-serif;'>
+          <thead>
+            <tr style='background:#e3f2fd;'>
+              <th style='padding:10px 12px;text-align:left;font-size:12px;color:#555;'>Propiedad</th>
+              <th style='padding:10px 12px;text-align:right;font-size:12px;color:#555;'>Precio actual</th>
+              <th style='padding:10px 12px;text-align:right;font-size:12px;color:#555;'>Bajada</th>
+            </tr>
+          </thead>
+          <tbody>{wl_rows}</tbody>
+        </table>"""
+    else:
+        watchlist_html = ""
+
     # ── Chollos section ──────────────────────────────────────────────────────
     chollos_rows = "".join(_chol_row(i + 1, c) for i, c in enumerate(chollos[:10]))
     chollos_html = f"""
@@ -323,6 +378,9 @@ def build_html_report(
 
   <!-- NEW OPPORTUNITIES -->
   <tr><td style='padding:0 32px;'>{new_opps_html}</td></tr>
+
+  <!-- WATCHLIST DROPS -->
+  <tr><td style='padding:0 32px;'>{watchlist_html}</td></tr>
 
   <!-- KPIs -->
   <tr><td style='padding:8px 32px 0;'>
@@ -421,6 +479,7 @@ def send_daily_report() -> bool:
             get_properties_with_multiple_drops,
             get_rental_yields,
             get_new_opportunity_listings,
+            get_watchlist_price_drops,
         )
 
         # Gather data
@@ -454,10 +513,12 @@ def send_daily_report() -> bool:
         chollos          = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
         yields           = get_rental_yields(min_listings=3)
         new_opps         = get_new_opportunity_listings(hours=24, min_score=70)
+        wl_drops         = get_watchlist_price_drops(since_days=1)
 
         # Build & send
         html    = build_html_report(score, indicators, macro, chollos, yields, alerts,
-                                    new_opportunities=new_opps)
+                                    new_opportunities=new_opps,
+                                    watchlist_drops=wl_drops)
         today   = datetime.now().strftime("%d/%m/%Y")
         subject = (
             f"📊 Mercado Madrid {today} — Score {score.get('score', '?')}/100 "
@@ -489,6 +550,7 @@ if __name__ == "__main__":
                 get_properties_with_multiple_drops,
                 get_rental_yields,
                 get_new_opportunity_listings,
+                get_watchlist_price_drops,
             )
 
             euribor      = get_euribor_data()
@@ -518,8 +580,10 @@ if __name__ == "__main__":
             chollos  = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
             yields   = get_rental_yields(min_listings=3)
             new_opps = get_new_opportunity_listings(hours=24, min_score=70)
+            wl_drops = get_watchlist_price_drops(since_days=1)
             html     = build_html_report(score, indicators, macro, chollos, yields, alerts,
-                                         new_opportunities=new_opps)
+                                         new_opportunities=new_opps,
+                                         watchlist_drops=wl_drops)
 
             out = "email_preview.html"
             with open(out, "w", encoding="utf-8") as f:

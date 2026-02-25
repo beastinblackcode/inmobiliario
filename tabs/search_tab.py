@@ -287,6 +287,9 @@ def render_search_tab() -> None:
     )
 
     # ── Top 5 oportunidades ───────────────────────────────────────────────────
+    from database import add_to_watchlist, remove_from_watchlist, get_watchlist_ids
+    watchlist_ids = get_watchlist_ids()
+
     top5 = df[df["score_oportunidad"].notna()].head(5)
     if not top5.empty:
         st.markdown("### 🏆 Top 5 Oportunidades")
@@ -296,7 +299,10 @@ def render_search_tab() -> None:
             vs    = f"{row['vs_barrio_pct']:+.1f}%" if pd.notna(row["vs_barrio_pct"]) else "—"
             days  = int(row["dias_mercado"]) if pd.notna(row["dias_mercado"]) else "—"
             rooms_str = f"{int(row['rooms'])} hab · " if pd.notna(row.get("rooms")) else ""
-            col_a, col_b = st.columns([4, 1])
+            lid   = row["listing_id"]
+            saved = lid in watchlist_ids
+
+            col_a, col_b, col_c = st.columns([4, 1, 1])
             with col_a:
                 st.markdown(
                     f"**{badge} [{row['title'][:65]}]({row['url']})**  \n"
@@ -306,6 +312,15 @@ def render_search_tab() -> None:
                 )
             with col_b:
                 st.metric("Score", f"{score}/100")
+            with col_c:
+                btn_label = "⭐ Guardado" if saved else "☆ Guardar"
+                btn_type  = "secondary" if saved else "primary"
+                if st.button(btn_label, key=f"wl_top_{lid}", type=btn_type, use_container_width=True):
+                    if saved:
+                        remove_from_watchlist(lid)
+                    else:
+                        add_to_watchlist(lid)
+                    st.rerun()
 
     # ── Price evolution chart ─────────────────────────────────────────────────
     st.markdown("### 📉 Seguimiento de Precios")

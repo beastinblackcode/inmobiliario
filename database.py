@@ -182,6 +182,23 @@ def init_database():
             ON rental_prices(barrio, date_recorded)
         """)
 
+        # ── Watchlist table ─────────────────────────────────────────────────
+        # User-saved properties for price tracking and alerts.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id      TEXT    NOT NULL UNIQUE,
+                added_date      TEXT    NOT NULL DEFAULT (date('now')),
+                note            TEXT,
+                price_at_add    INTEGER,
+                alert_on_drop   BOOLEAN NOT NULL DEFAULT 1
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_watchlist_listing
+            ON watchlist(listing_id)
+        """)
+
         print("✓ Database initialized successfully")
 
 
@@ -1549,6 +1566,228 @@ def get_rental_yields(min_listings: int = 3) -> List[Dict]:
 
     except Exception as exc:
         print(f"Error computing rental yields: {exc}")
+        return []
+
+
+# =============================================================================
+# WATCHLIST — user-saved properties for price tracking
+# =============================================================================
+
+def migrate_create_watchlist_table():
+    """Migration: create watchlist table on existing databases. Safe to run multiple times."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    listing_id      TEXT    NOT NULL UNIQUE,
+                    added_date      TEXT    NOT NULL DEFAULT (date('now')),
+                    note            TEXT,
+                    price_at_add    INTEGER,
+                    alert_on_drop   BOOLEAN NOT NULL DEFAULT 1
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_watchlist_listing
+                ON watchlist(listing_id)
+            """)
+            conn.commit()
+            print("✓ Watchlist table ready")
+    except Exception as exc:
+        print(f"Migration error (watchlist): {exc}")
+
+
+def add_to_watchlist(listing_id: str, note: str = "", alert_on_drop: bool = True) -> bool:
+    """
+    Add a listing to the watchlist. Records the current price automatically.
+    Returns True if added, False if already present.
+    """
+    try:
+        current_price = get_current_price(listing_id)
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO watchlist (listing_id, added_date, note, price_at_add, alert_on_drop)
+                VALUES (?, date('now'), ?, ?, ?)
+            """, (listing_id, note or "", current_price, 1 if alert_on_drop else 0))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as exc:
+        print(f"Error adding to watchlist: {exc}")
+        return False
+
+
+def remove_from_watchlist(listing_id: str) -> bool:
+    """Remove a listing from the watchlist. Returns True if removed."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM watchlist WHERE listing_id = ?", (listing_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+    except Exception as exc:
+        print(f"Error removing from watchlist: {exc}")
+        return False
+
+
+def is_in_watchlist(listing_id: str) -> bool:
+    """Return True if the listing is currently in the watchlist."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM watchlist WHERE listing_id = ?", (listing_id,))
+            return cursor.fetchone() is not None
+    except Exception:
+        return False
+
+
+def get_watchlist_ids() -> set:
+    """Return the set of all listing_ids currently in the watchlist."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT listing_id FROM watchlist")
+            return {row[0] for row in cursor.fetchall()}
+    except Exception:
+        return set()
+
+
+def get_watchlist(include_sold: bool = True) -> List[Dict]:
+    """
+    Return all watchlist entries joined with current listing data.
+
+    Each entry has:
+        listing_id, url, barrio, distrito, price, size_sqm, rooms,
+        price_per_sqm, status, price_at_add, price_change, price_change_pct,
+        added_date, note, alert_on_drop, days_watched, num_drops
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            query = """
+                SELECT
+                    w.listing_id,
+                    w.added_date,
+                    w.note,
+                    w.price_at_add,
+                    w.alert_on_drop,
+                    l.url,
+                    l.barrio,
+                    l.distrito,
+                    l.price          AS current_price,
+                    l.size_sqm,
+                    l.rooms,
+                    CAST(l.price AS FLOAT) / NULLIF(l.size_sqm, 0) AS price_per_sqm,
+                    l.status,
+                    l.first_seen_date,
+                    julianday('now') - julianday(w.added_date) AS days_watched
+                FROM watchlist w
+                LEFT JOIN listings l ON l.listing_id = w.listing_id
+                ORDER BY w.added_date DESC
+            """
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+        # Get drop counts for watchlist listings
+        ids = [r[0] for r in rows]
+        drop_counts = get_drop_counts_for_listings(ids) if ids else {}
+
+        results = []
+        for row in rows:
+            (lid, added_date, note, price_at_add, alert_on_drop,
+             url, barrio, distrito, current_price, size_sqm, rooms,
+             price_per_sqm, status, first_seen, days_watched) = row
+
+            if not include_sold and status != "active":
+                continue
+
+            price_change     = None
+            price_change_pct = None
+            if price_at_add and current_price:
+                price_change     = current_price - price_at_add
+                price_change_pct = price_change / price_at_add * 100
+
+            results.append({
+                "listing_id":       lid,
+                "url":              url or "#",
+                "barrio":           barrio or "—",
+                "distrito":         distrito or "—",
+                "current_price":    current_price,
+                "size_sqm":         size_sqm,
+                "rooms":            rooms,
+                "price_per_sqm":    round(price_per_sqm, 0) if price_per_sqm else None,
+                "status":           status or "unknown",
+                "price_at_add":     price_at_add,
+                "price_change":     price_change,
+                "price_change_pct": round(price_change_pct, 1) if price_change_pct is not None else None,
+                "added_date":       added_date,
+                "note":             note or "",
+                "alert_on_drop":    bool(alert_on_drop),
+                "days_watched":     int(days_watched) if days_watched else 0,
+                "num_drops":        drop_counts.get(lid, 0),
+            })
+        return results
+    except Exception as exc:
+        print(f"Error getting watchlist: {exc}")
+        return []
+
+
+def get_watchlist_price_drops(since_days: int = 1) -> List[Dict]:
+    """
+    Return watchlist entries where the price dropped in the last `since_days` days.
+    Used to build the email alert section.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    w.listing_id,
+                    l.url,
+                    l.barrio,
+                    l.distrito,
+                    l.price             AS current_price,
+                    l.size_sqm,
+                    l.rooms,
+                    l.status,
+                    ph.old_price,
+                    ph.new_price,
+                    ph.change_amount,
+                    ph.change_percent,
+                    ph.date_recorded    AS drop_date
+                FROM watchlist w
+                JOIN listings l       ON l.listing_id = w.listing_id
+                JOIN price_history ph ON ph.listing_id = w.listing_id
+                WHERE ph.change_amount < 0
+                  AND ph.date_recorded >= date('now', ? || ' days')
+                  AND l.status = 'active'
+                ORDER BY ph.change_percent ASC
+            """, (f"-{since_days}",))
+            rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            (lid, url, barrio, distrito, current_price, size_sqm, rooms, status,
+             old_price, new_price, change_amount, change_percent, drop_date) = row
+            results.append({
+                "listing_id":     lid,
+                "url":            url or "#",
+                "barrio":         barrio or "—",
+                "distrito":       distrito or "—",
+                "current_price":  current_price,
+                "size_sqm":       size_sqm,
+                "rooms":          rooms,
+                "status":         status,
+                "old_price":      old_price,
+                "new_price":      new_price,
+                "change_amount":  change_amount,
+                "change_percent": round(change_percent, 1) if change_percent else None,
+                "drop_date":      drop_date,
+            })
+        return results
+    except Exception as exc:
+        print(f"Error getting watchlist price drops: {exc}")
         return []
 
 
