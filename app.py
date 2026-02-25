@@ -161,7 +161,43 @@ def main():
         }[x],
         index=0,
     )
+    # ── Version & environment info ──────────────────────────────────────────
     st.sidebar.markdown("---")
+
+    # Git commit hash
+    try:
+        import subprocess
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).parent),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        commit = "—"
+
+    # Last scrape date from DB
+    try:
+        from database import get_scraping_log
+        log = get_scraping_log(limit=1)
+        last_scrape = log[0]["start_time"][:10] if log else "sin datos"
+    except Exception:
+        last_scrape = "—"
+
+    # DB size
+    try:
+        db_size_mb = Path(DATABASE_PATH).stat().st_size / (1024 * 1024)
+        db_size_str = f"{db_size_mb:.1f} MB"
+    except Exception:
+        db_size_str = "—"
+
+    env_label = "☁️ Streamlit Cloud" if is_streamlit_cloud() else "💻 Local"
+    st.sidebar.caption(f"**{env_label}**")
+    if commit != "—":
+        st.sidebar.caption(f"🔖 Versión: `{commit}`")
+    st.sidebar.caption(f"🕐 Último scrape: {last_scrape}")
+    st.sidebar.caption(f"🗄️ Base de datos: {db_size_str}")
+    if "current_user" in st.session_state:
+        st.sidebar.caption(f"👤 {st.session_state['current_user']}")
 
     # Route: Market Surveillance (no sidebar filters needed)
     if page == "surveillance":
@@ -213,43 +249,6 @@ def main():
     seller_type = st.sidebar.selectbox(
         "Tipo de Vendedor", options=["All", "Particular", "Agencia"]
     )
-
-    # ── Version & environment info ──────────────────────────────────────────
-    st.sidebar.markdown("---")
-
-    # Git commit hash
-    try:
-        import subprocess
-        commit = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=__file__.replace("app.py", ""),
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except Exception:
-        commit = "unknown"
-
-    # Last scrape date from DB
-    try:
-        from database import get_scraping_log
-        log = get_scraping_log(limit=1)
-        last_scrape = log[0]["start_time"][:10] if log else "sin datos"
-    except Exception:
-        last_scrape = "—"
-
-    # DB size
-    try:
-        db_size_mb = Path(DATABASE_PATH).stat().st_size / (1024 * 1024)
-        db_size_str = f"{db_size_mb:.1f} MB"
-    except Exception:
-        db_size_str = "—"
-
-    env_label = "☁️ Streamlit Cloud" if is_streamlit_cloud() else "💻 Local"
-    st.sidebar.caption(f"**{env_label}**")
-    st.sidebar.caption(f"🔖 Versión: `{commit}`")
-    st.sidebar.caption(f"🕐 Último scrape: {last_scrape}")
-    st.sidebar.caption(f"🗄️ Base de datos: {db_size_str}")
-    if "current_user" in st.session_state:
-        st.sidebar.caption(f"👤 {st.session_state['current_user']}")
 
     # ------------------------------------------------------------------
     # Load data
