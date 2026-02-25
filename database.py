@@ -1293,6 +1293,87 @@ def get_drop_counts_for_listings(listing_ids: List[str]) -> Dict[str, int]:
         return {lid: 0 for lid in listing_ids}
 
 
+def get_price_evolution_by_barrio(barrios: List[str], weeks: int = 16) -> List[Dict]:
+    """
+    Return weekly median price/m² evolution for a list of barrios.
+
+    Args:
+        barrios: List of barrio names to include.
+        weeks:   Number of weeks to look back.
+
+    Returns:
+        List of dicts with: barrio, week_start, median_price_sqm, listing_count.
+        Sorted by barrio then week_start ascending.
+    """
+    if not barrios:
+        return []
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - timedelta(weeks=weeks)).strftime("%Y-%m-%d")
+            placeholders = ",".join("?" * len(barrios))
+            cursor.execute(f"""
+                SELECT
+                    barrio,
+                    strftime('%Y-%W', first_seen_date)          AS week,
+                    MIN(first_seen_date)                        AS week_start,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm,0)) AS median_price_sqm,
+                    COUNT(*)                                    AS listing_count
+                FROM listings
+                WHERE barrio IN ({placeholders})
+                  AND first_seen_date >= ?
+                  AND price   > 0
+                  AND size_sqm > 10
+                GROUP BY barrio, week
+                ORDER BY barrio, week_start
+            """, (*barrios, cutoff))
+            cols = ["barrio", "week", "week_start", "median_price_sqm", "listing_count"]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+    except Exception as exc:
+        print(f"Error getting barrio price evolution: {exc}")
+        return []
+
+
+def get_barrio_summary(barrios: List[str]) -> List[Dict]:
+    """
+    Return a rich summary row per barrio for the comparator:
+      barrio, distrito, active_count, median_price, median_price_sqm,
+      avg_size_sqm, avg_rooms, avg_days_market.
+    """
+    if not barrios:
+        return []
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(barrios))
+            cursor.execute(f"""
+                SELECT
+                    barrio,
+                    MAX(distrito)                                    AS distrito,
+                    COUNT(*)                                         AS active_count,
+                    AVG(price)                                       AS median_price,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)) AS median_price_sqm,
+                    AVG(size_sqm)                                    AS avg_size_sqm,
+                    AVG(rooms)                                       AS avg_rooms,
+                    AVG(
+                        julianday(last_seen_date) - julianday(first_seen_date)
+                    )                                                AS avg_days_market
+                FROM listings
+                WHERE barrio IN ({placeholders})
+                  AND status = 'active'
+                  AND price   > 0
+                GROUP BY barrio
+            """, tuple(barrios))
+            cols = [
+                "barrio", "distrito", "active_count", "median_price",
+                "median_price_sqm", "avg_size_sqm", "avg_rooms", "avg_days_market",
+            ]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+    except Exception as exc:
+        print(f"Error getting barrio summary: {exc}")
+        return []
+
+
 # ============================================================================
 # RENTAL PRICE FUNCTIONS
 # ============================================================================
