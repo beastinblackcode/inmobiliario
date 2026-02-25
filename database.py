@@ -2224,6 +2224,182 @@ def get_rental_yield_history(weeks: int = 12) -> List[Dict]:
         return []
 
 
+def get_price_drop_stats() -> Dict:
+    """
+    Returns comprehensive price-drop statistics for the dashboard.
+
+    Sections:
+      - overview: headline KPIs
+      - by_barrio: per-neighbourhood breakdown (min 5 active listings)
+      - recent_drops: listings whose price dropped in the last 7 days
+      - drop_magnitude_buckets: histogram of drop sizes
+    """
+    try:
+        with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+
+            # ── Overview KPIs ────────────────────────────────────────────────
+            cur.execute("""
+                SELECT COUNT(DISTINCT listing_id) AS total_active
+                FROM listings
+                WHERE status = 'active'
+            """)
+            row0 = cur.fetchone()
+            total_active = row0["total_active"] if row0 else 0
+
+            cur.execute("""
+                SELECT COUNT(DISTINCT ph.listing_id) AS with_drops
+                FROM price_history ph
+                JOIN listings l ON l.listing_id = ph.listing_id
+                WHERE ph.change_amount < 0 AND l.status = 'active'
+            """)
+            row0 = cur.fetchone()
+            with_drops = row0["with_drops"] if row0 else 0
+
+            cur.execute("""
+                SELECT AVG(ph.change_percent)  AS avg_pct,
+                       MIN(ph.change_percent)  AS min_pct,
+                       COUNT(*)                AS n_events
+                FROM price_history ph
+                JOIN listings l ON l.listing_id = ph.listing_id
+                WHERE ph.change_amount < 0 AND l.status = 'active'
+            """)
+            row = cur.fetchone() or {}
+            avg_drop_pct = round(row["avg_pct"] or 0, 2)
+            max_drop_pct = round(row["min_pct"] or 0, 2)   # most negative = largest drop
+            n_drop_events = row["n_events"] or 0
+
+            # Average days from first_seen_date to first price drop
+            cur.execute("""
+                SELECT AVG(julianday(ph.date_recorded) - julianday(l.first_seen_date))
+                FROM price_history ph
+                JOIN listings l ON l.listing_id = ph.listing_id
+                WHERE ph.change_amount < 0
+                  AND ph.date_recorded = (
+                      SELECT MIN(p2.date_recorded)
+                      FROM price_history p2
+                      WHERE p2.listing_id = ph.listing_id AND p2.change_amount < 0
+                  )
+            """)
+            avg_days_to_drop = round((cur.fetchone()[0] or 0), 1)
+
+            # Listings that dropped in the last 7 days
+            cur.execute("""
+                SELECT COUNT(DISTINCT listing_id)
+                FROM price_history
+                WHERE change_amount < 0
+                  AND date_recorded >= date('now', '-7 days')
+            """)
+            recent_7d = (cur.fetchone() or [0])[0] or 0
+
+            # Listings that dropped in the last 30 days
+            cur.execute("""
+                SELECT COUNT(DISTINCT listing_id)
+                FROM price_history
+                WHERE change_amount < 0
+                  AND date_recorded >= date('now', '-30 days')
+            """)
+            recent_30d = (cur.fetchone() or [0])[0] or 0
+
+            overview = {
+                "total_active":      total_active,
+                "with_drops":        with_drops,
+                "drop_pct_of_total": round(100 * with_drops / total_active, 1) if total_active else 0,
+                "avg_drop_pct":      avg_drop_pct,
+                "max_drop_pct":      max_drop_pct,
+                "n_drop_events":     n_drop_events,
+                "avg_days_to_drop":  avg_days_to_drop,
+                "recent_7d":         recent_7d,
+                "recent_30d":        recent_30d,
+            }
+
+            # ── Per-barrio breakdown ─────────────────────────────────────────
+            cur.execute("""
+                SELECT
+                    l.barrio,
+                    l.distrito,
+                    COUNT(DISTINCT l.listing_id)              AS total,
+                    COUNT(DISTINCT ph.listing_id)             AS with_drops,
+                    ROUND(AVG(ph.change_percent), 2)          AS avg_drop_pct,
+                    ROUND(MIN(ph.change_percent), 2)          AS max_drop_pct,
+                    ROUND(
+                        100.0 * COUNT(DISTINCT ph.listing_id)
+                        / NULLIF(COUNT(DISTINCT l.listing_id), 0)
+                    , 1)                                      AS drop_rate_pct
+                FROM listings l
+                LEFT JOIN price_history ph
+                    ON ph.listing_id = l.listing_id AND ph.change_amount < 0
+                WHERE l.status = 'active'
+                GROUP BY l.barrio
+                HAVING total >= 5
+                ORDER BY drop_rate_pct DESC
+            """)
+            by_barrio = [dict(r) for r in cur.fetchall()]
+
+            # ── Recent drops (last 7 days) with listing detail ───────────────
+            cur.execute("""
+                SELECT
+                    ph.listing_id,
+                    l.title,
+                    l.barrio,
+                    l.distrito,
+                    l.price             AS current_price,
+                    ph.change_amount,
+                    ph.change_percent,
+                    ph.date_recorded,
+                    l.url,
+                    l.size_sqm,
+                    l.rooms
+                FROM price_history ph
+                JOIN listings l ON l.listing_id = ph.listing_id
+                WHERE ph.change_amount < 0
+                  AND ph.date_recorded >= date('now', '-7 days')
+                  AND l.status = 'active'
+                ORDER BY ph.change_percent ASC
+                LIMIT 50
+            """)
+            recent_drops = [dict(r) for r in cur.fetchall()]
+
+            # ── Drop magnitude histogram ─────────────────────────────────────
+            # Buckets: 0-2%, 2-5%, 5-10%, 10-20%, >20%
+            buckets = {"0-2%": 0, "2-5%": 0, "5-10%": 0, "10-20%": 0, ">20%": 0}
+            cur.execute("""
+                SELECT change_percent FROM price_history
+                WHERE change_amount < 0
+            """)
+            for (pct,) in cur.fetchall():
+                if pct is None:
+                    continue
+                p = abs(pct)
+                if p < 2:
+                    buckets["0-2%"] += 1
+                elif p < 5:
+                    buckets["2-5%"] += 1
+                elif p < 10:
+                    buckets["5-10%"] += 1
+                elif p < 20:
+                    buckets["10-20%"] += 1
+                else:
+                    buckets[">20%"] += 1
+
+            return {
+                "overview":               overview,
+                "by_barrio":              by_barrio,
+                "recent_drops":           recent_drops,
+                "drop_magnitude_buckets": buckets,
+            }
+
+    except Exception as exc:
+        print(f"Error getting price drop stats: {exc}")
+        return {
+            "overview":               {},
+            "by_barrio":              [],
+            "recent_drops":           [],
+            "drop_magnitude_buckets": {},
+        }
+
+
 if __name__ == "__main__":
     # Initialize database when run directly
     init_database()

@@ -1,0 +1,80 @@
+name: Daily Scraper
+
+on:
+  schedule:
+    # Runs every day at 07:00 UTC (09:00 Madrid en verano, 08:00 en invierno)
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    # Permite lanzar manualmente desde la pestaña Actions de GitHub
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # Aborta si el scraper se cuelga
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python ────────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Dependencias ──────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Descargar DB desde Google Drive ───────────────────────────────────
+      - name: Download database from Google Drive
+        env:
+          GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
+        run: |
+          python - <<'EOF'
+          import os, gdown
+          file_id = os.environ["GOOGLE_DRIVE_FILE_ID"]
+          url = f"https://drive.google.com/uc?id={file_id}"
+          print(f"Downloading DB (file_id={file_id}) ...")
+          gdown.download(url, "real_estate.db", quiet=False)
+          import pathlib
+          size = pathlib.Path("real_estate.db").stat().st_size / 1024 / 1024
+          print(f"Downloaded: {size:.1f} MB")
+          EOF
+
+      # ── 5. Scraping ──────────────────────────────────────────────────────────
+      - name: Run scraper
+        env:
+          # Headless: no abrir navegador, sin progress bars interactivos
+          PYTHONUNBUFFERED: "1"
+        run: python scraper.py
+
+      # ── 6. Email diario (opcional) ───────────────────────────────────────────
+      - name: Send daily email report
+        if: ${{ secrets.EMAIL_PASSWORD != '' }}
+        env:
+          EMAIL_PASSWORD:    ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENTS:  ${{ secrets.EMAIL_RECIPIENTS }}
+          EMAIL_SENDER:      ${{ secrets.EMAIL_SENDER }}
+        run: python email_report.py
+        continue-on-error: true    # No bloquear el pipeline si el email falla
+
+      # ── 7. Subir DB actualizada a Google Drive ───────────────────────────────
+      - name: Upload updated database to Google Drive
+        env:
+          GOOGLE_SA_CREDENTIALS: ${{ secrets.GOOGLE_SA_CREDENTIALS }}
+          GOOGLE_DRIVE_FILE_ID:  ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
+        run: python ci_drive_upload.py
+
+      # ── 8. Resumen ────────────────────────────────────────────────────────────
+      - name: Scrape summary
+        run: |
+          python - <<'EOF'
+          from database import get_database_stats
+          s = get_database_stats()
+          print(f"✅ Active listings:  {s['active_count']:,}")
+          print(f"   Sold/removed:     {s['sold_count']:,}")
+          print(f"   Avg price:        €{s['avg_price']:,.0f}")
+          EOF
