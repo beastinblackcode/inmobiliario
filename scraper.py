@@ -752,10 +752,13 @@ def retry_failed_barrios(
         print(f"  {i}. {distrito} - {barrio} (HTTP {error_code})")
 
     if not auto:
-        response = input("\n¿Quieres reintentar estos barrios? (y/n): ")
-        if response.lower() != 'y':
-            print("Skipping retries.")
-            return 0, 0, 0
+        if sys.stdin.isatty():
+            response = input("\n¿Quieres reintentar estos barrios? (y/n): ")
+            if response.lower() != 'y':
+                print("Skipping retries.")
+                return 0, 0, 0
+        else:
+            print("\nNon-interactive mode — retrying automatically.")
 
     print("\n🔄 Retrying failed barrios...")
 
@@ -863,10 +866,13 @@ def run_scraper(retry_only: bool = False):
     proxies = get_proxy_config()
     if not proxies:
         print("\n⚠ Running without proxy (may get blocked by Idealista)")
-        response = input("Continue anyway? (y/n): ")
-        if response.lower() != 'y':
-            print("Aborted.")
-            return
+        if sys.stdin.isatty():
+            response = input("Continue anyway? (y/n): ")
+            if response.lower() != 'y':
+                print("Aborted.")
+                return
+        else:
+            print("  Non-interactive mode — continuing without proxy.")
 
     # Load active listing IDs (for sold detection)
     print("\n📊 Loading active listings from database...")
