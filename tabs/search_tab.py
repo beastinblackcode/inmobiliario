@@ -204,11 +204,27 @@ def render_search_tab() -> None:
     drop_counts = get_drop_counts_for_listings(listing_ids)
     df["bajadas"] = df["listing_id"].map(drop_counts).fillna(0).astype(int)
 
+    # ── NLP signals ───────────────────────────────────────────────────────────
+    try:
+        from nlp_analyzer import get_signals_for_listings, signals_to_badges
+        nlp_signals = get_signals_for_listings(listing_ids)
+    except Exception:
+        nlp_signals = {}
+
+    df["nlp_bonus"]  = df["listing_id"].map(
+        lambda lid: nlp_signals.get(lid, {}).get("nlp_bonus", 0)
+    )
+    df["nlp_badges"] = df["listing_id"].map(
+        lambda lid: signals_to_badges(nlp_signals.get(lid, {})) if nlp_signals else ""
+    )
+
     def _score(row):
         vs, days, drops = row["vs_barrio_pct"], row["dias_mercado"], row["bajadas"]
         if vs is None or days is None:
             return None
-        return compute_opportunity_score(vs, days, drops)
+        base = compute_opportunity_score(vs, days, drops)
+        bonus = int(row.get("nlp_bonus", 0))
+        return min(100, base + bonus)
 
     df["score_oportunidad"] = df.apply(_score, axis=1)
 
@@ -250,7 +266,7 @@ def render_search_tab() -> None:
         "barrio_median_sqm", "vs_barrio_pct",
         "distrito", "barrio", "size_sqm", "rooms",
         "dias_mercado", "bajadas", "score_oportunidad",
-        "floor", "seller_type", "url",
+        "nlp_badges", "floor", "seller_type", "url",
     ]].copy()
 
     display_df["score_oportunidad"] = display_df["score_oportunidad"].apply(
@@ -281,6 +297,8 @@ def render_search_tab() -> None:
                                      help="Score de oportunidad 0-100"),
             "floor":             st.column_config.TextColumn("Planta"),
             "seller_type":       st.column_config.TextColumn("Vendedor"),
+            "nlp_badges":        st.column_config.TextColumn("🔍 Señales",
+                                     help="Señales NLP detectadas en la descripción"),
             "url":               st.column_config.LinkColumn("Enlace"),
         },
         hide_index=True,
@@ -302,6 +320,8 @@ def render_search_tab() -> None:
             lid   = row["listing_id"]
             saved = lid in watchlist_ids
 
+            nlp_str = row.get("nlp_badges", "")
+
             col_a, col_b, col_c = st.columns([4, 1, 1])
             with col_a:
                 st.markdown(
@@ -309,6 +329,7 @@ def render_search_tab() -> None:
                     f"€{row['price']:,} · {row['barrio']}, {row['distrito']} · "
                     f"{rooms_str}{row['size_sqm']:.0f} m² · "
                     f"{vs} vs barrio · {days} días · {int(row['bajadas'])} bajadas"
+                    + (f"  \n{nlp_str}" if nlp_str else "")
                 )
             with col_b:
                 st.metric("Score", f"{score}/100")
