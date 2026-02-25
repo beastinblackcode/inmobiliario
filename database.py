@@ -1218,6 +1218,82 @@ def get_daily_price_drops(days: int = 30) -> List[Dict]:
         return []
 
 # ============================================================================
+# OPPORTUNITY SCORE HELPERS
+# ============================================================================
+
+def get_barrio_price_stats(min_listings: int = 5) -> Dict[str, Dict]:
+    """
+    Return median price/m² and listing count per barrio for active listings.
+
+    Args:
+        min_listings: Minimum active listings required to include a barrio.
+
+    Returns:
+        Dict keyed by barrio name:
+          { barrio: { median_price_sqm, avg_price_sqm, listing_count } }
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT
+                    barrio,
+                    COUNT(*)                                         AS listing_count,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)) AS avg_price_sqm
+                FROM listings
+                WHERE status  = 'active'
+                  AND price   > 0
+                  AND size_sqm > 10
+                  AND barrio IS NOT NULL
+                GROUP BY barrio
+                HAVING COUNT(*) >= ?
+            """, (min_listings,))
+
+            result = {}
+            for row in cursor.fetchall():
+                barrio, count, avg_sqm = row
+                result[barrio] = {
+                    "median_price_sqm": round(avg_sqm, 2) if avg_sqm else None,
+                    "listing_count":    count,
+                }
+            return result
+    except Exception as exc:
+        print(f"Error getting barrio price stats: {exc}")
+        return {}
+
+
+def get_drop_counts_for_listings(listing_ids: List[str]) -> Dict[str, int]:
+    """
+    Return the number of price drops per listing_id.
+
+    Args:
+        listing_ids: List of listing IDs to query.
+
+    Returns:
+        Dict mapping listing_id → number of price drops (0 if none).
+    """
+    if not listing_ids:
+        return {}
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ",".join("?" * len(listing_ids))
+            cursor.execute(f"""
+                SELECT listing_id, COUNT(*) AS drop_count
+                FROM price_history
+                WHERE listing_id IN ({placeholders})
+                  AND change_amount < 0
+                GROUP BY listing_id
+            """, tuple(listing_ids))
+            counts = {row[0]: row[1] for row in cursor.fetchall()}
+            # Ensure every requested listing_id has an entry (default 0)
+            return {lid: counts.get(lid, 0) for lid in listing_ids}
+    except Exception as exc:
+        print(f"Error getting drop counts: {exc}")
+        return {lid: 0 for lid in listing_ids}
+
+
+# ============================================================================
 # RENTAL PRICE FUNCTIONS
 # ============================================================================
 
