@@ -251,9 +251,9 @@ def main():
     # ------------------------------------------------------------------
     # Tabs
     # ------------------------------------------------------------------
-    dashboard_tab, map_tab, prediction_tab, personal_tab, watchlist_tab, compare_tab, admin_tab = st.tabs(
+    dashboard_tab, map_tab, prediction_tab, personal_tab, watchlist_tab, ranking_tab, compare_tab, admin_tab = st.tabs(
         ["📊 Dashboard", "🗺️ Mapa", "🔮 Predicción", "🔍 Mis Búsquedas",
-         "⭐ Mi Watchlist", "📊 Comparar Barrios", "⚙️ Administración"]
+         "⭐ Mi Watchlist", "🏆 Ranking Barrios", "📊 Comparar Barrios", "⚙️ Administración"]
     )
 
     with dashboard_tab:
@@ -275,6 +275,10 @@ def main():
     with watchlist_tab:
         from tabs.watchlist_tab import render_watchlist_tab
         render_watchlist_tab()
+
+    with ranking_tab:
+        from tabs.ranking_tab import render_ranking_tab
+        render_ranking_tab()
 
     with compare_tab:
         from tabs.compare_tab import render_compare_tab

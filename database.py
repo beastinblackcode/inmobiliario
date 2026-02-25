@@ -1570,6 +1570,188 @@ def get_rental_yields(min_listings: int = 3) -> List[Dict]:
 
 
 # =============================================================================
+# BARRIO RANKING
+# =============================================================================
+
+def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
+    """
+    Return a composite ranking (0-100) for every barrio with enough data.
+
+    Score components (buyer perspective):
+        25 % — Precio bajo      : €/m² vs Madrid median (lower = better)
+        20 % — Tendencia        : weekly price change   (falling = better)
+        20 % — Tiempo mercado   : avg days on market    (longer = more room to negotiate)
+        20 % — Rentabilidad     : gross rental yield    (higher = better)
+        15 % — Oferta           : active listings count (more = better choice)
+
+    Each component is normalised 0-100 across all barrios before weighting.
+
+    Returns list of dicts sorted by ranking_score descending:
+        barrio, distrito, ranking_score, active_count,
+        avg_price_sqm, days_on_market, yield_pct,
+        price_trend_pct, score_precio, score_tendencia,
+        score_tiempo, score_rentabilidad, score_oferta
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # ── Base stats per barrio (active listings) ──────────────────────
+            cursor.execute("""
+                SELECT
+                    barrio,
+                    MAX(distrito)                                       AS distrito,
+                    COUNT(*)                                            AS active_count,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0))    AS avg_price_sqm,
+                    AVG(julianday('now') - julianday(first_seen_date))  AS avg_days_market
+                FROM listings
+                WHERE status  = 'active'
+                  AND price   > 0
+                  AND size_sqm > 10
+                  AND barrio IS NOT NULL
+                GROUP BY barrio
+                HAVING COUNT(*) >= ?
+            """, (min_listings,))
+            base_rows = {row[0]: {
+                "barrio":          row[0],
+                "distrito":        row[1],
+                "active_count":    row[2],
+                "avg_price_sqm":   round(row[3], 0) if row[3] else None,
+                "days_on_market":  round(row[4], 0) if row[4] else None,
+            } for row in cursor.fetchall()}
+
+            if not base_rows:
+                return []
+
+            # ── Weekly price trend per barrio ─────────────────────────────────
+            cursor.execute("""
+                SELECT
+                    l.barrio,
+                    AVG(CASE WHEN ph.date_recorded >= date('now', '-7 days')
+                             THEN ph.price END) AS price_last_week,
+                    AVG(CASE WHEN ph.date_recorded >= date('now', '-14 days')
+                              AND ph.date_recorded <  date('now', '-7 days')
+                             THEN ph.price END) AS price_prev_week
+                FROM price_history ph
+                JOIN listings l ON l.listing_id = ph.listing_id
+                WHERE l.barrio IS NOT NULL
+                GROUP BY l.barrio
+            """)
+            trend_by_barrio = {}
+            for row in cursor.fetchall():
+                barrio, last, prev = row
+                if last and prev and prev > 0:
+                    trend_by_barrio[barrio] = (last - prev) / prev * 100
+
+            # ── Rental yield per barrio (latest snapshot) ─────────────────────
+            yield_by_barrio = {}
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='rental_prices'"
+            )
+            if cursor.fetchone():
+                cursor.execute("""
+                    SELECT r.barrio, r.median_rent,
+                           AVG(CAST(l.price AS FLOAT) / NULLIF(l.size_sqm, 0)) AS avg_sqm
+                    FROM rental_prices r
+                    JOIN listings l ON l.barrio = r.barrio AND l.status = 'active'
+                    WHERE r.date_recorded = (
+                        SELECT MAX(date_recorded) FROM rental_prices rr
+                        WHERE rr.barrio = r.barrio
+                    )
+                      AND r.listing_count >= 3
+                    GROUP BY r.barrio
+                    HAVING COUNT(l.listing_id) >= 3
+                """)
+                for row in cursor.fetchall():
+                    barrio, rent, sqm = row
+                    if rent and sqm and sqm > 0:
+                        typical_sqm = 80
+                        sale_price = sqm * typical_sqm
+                        y = (rent * 12) / sale_price * 100
+                        if 0 < y < 20:
+                            yield_by_barrio[barrio] = round(y, 2)
+
+        # ── Merge all signals ─────────────────────────────────────────────────
+        rows = []
+        for barrio, base in base_rows.items():
+            rows.append({
+                **base,
+                "price_trend_pct": trend_by_barrio.get(barrio),
+                "yield_pct":       yield_by_barrio.get(barrio),
+            })
+
+        if not rows:
+            return []
+
+        # ── Normalise each component 0-100 ────────────────────────────────────
+        def _norm(values: list, invert: bool = False) -> list:
+            """Min-max normalise; invert=True means lower raw → higher score."""
+            valid = [v for v in values if v is not None]
+            if not valid or max(valid) == min(valid):
+                return [50 if v is not None else None for v in values]
+            lo, hi = min(valid), max(valid)
+            normed = []
+            for v in values:
+                if v is None:
+                    normed.append(None)
+                else:
+                    n = (v - lo) / (hi - lo) * 100
+                    normed.append(round(100 - n if invert else n, 1))
+            return normed
+
+        prices     = [r["avg_price_sqm"]   for r in rows]
+        days       = [r["days_on_market"]   for r in rows]
+        trends     = [r["price_trend_pct"]  for r in rows]
+        yields     = [r["yield_pct"]        for r in rows]
+        counts     = [r["active_count"]     for r in rows]
+
+        score_precio      = _norm(prices, invert=True)   # low price → high score
+        score_tendencia   = _norm(trends, invert=True)   # falling trend → high score
+        score_tiempo      = _norm(days,   invert=False)  # long days → high score
+        score_rentabilidad = _norm(yields, invert=False) # high yield → high score
+        score_oferta      = _norm(counts, invert=False)  # more listings → high score
+
+        WEIGHTS = dict(precio=0.25, tendencia=0.20, tiempo=0.20,
+                       rentabilidad=0.20, oferta=0.15)
+
+        results = []
+        for i, row in enumerate(rows):
+            sp  = score_precio[i]      or 50
+            st  = score_tendencia[i]   or 50
+            sti = score_tiempo[i]      or 50
+            sr  = score_rentabilidad[i] or 50
+            so  = score_oferta[i]      or 50
+
+            composite = round(
+                WEIGHTS["precio"]       * sp  +
+                WEIGHTS["tendencia"]    * st  +
+                WEIGHTS["tiempo"]       * sti +
+                WEIGHTS["rentabilidad"] * sr  +
+                WEIGHTS["oferta"]       * so
+            )
+            results.append({
+                **row,
+                "ranking_score":     composite,
+                "score_precio":      round(sp),
+                "score_tendencia":   round(st),
+                "score_tiempo":      round(sti),
+                "score_rentabilidad": round(sr),
+                "score_oferta":      round(so),
+            })
+
+        results.sort(key=lambda x: x["ranking_score"], reverse=True)
+        # Add rank position
+        for idx, r in enumerate(results, start=1):
+            r["rank"] = idx
+
+        return results
+
+    except Exception as exc:
+        print(f"Error computing barrio ranking: {exc}")
+        return []
+
+
+# =============================================================================
 # WATCHLIST — user-saved properties for price tracking
 # =============================================================================
 
