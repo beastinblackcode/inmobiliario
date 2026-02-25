@@ -341,7 +341,12 @@ def get_brightdata_cost_estimate():
     }
 
 
-def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> tuple:
+def fetch_page(
+    url: str,
+    proxies: Optional[Dict] = None,
+    retries: int = 3,
+    silent_404: bool = False,
+) -> tuple:
     """
     Fetch HTML content from URL with smart retry logic.
 
@@ -349,9 +354,11 @@ def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> tu
     Returns immediately on definitive errors (404, 502) to save API calls.
 
     Args:
-        url: Target URL
-        proxies: Proxy configuration
-        retries: Number of retry attempts (only for transient errors)
+        url:         Target URL
+        proxies:     Proxy configuration
+        retries:     Number of retry attempts (only for transient errors)
+        silent_404:  If True, suppress 404 log file writes and console warnings.
+                     Use for rental scraping where 404 = no listings (expected).
 
     Returns:
         Tuple of (HTML content or None, status_code)
@@ -385,9 +392,10 @@ def fetch_page(url: str, proxies: Optional[Dict] = None, retries: int = 3) -> tu
                 # Definitive error: return immediately, do NOT retry
                 request_counter['failed'] += 1
                 if response.status_code == 404:
-                    with open('404_errors.log', 'a') as f:
-                        f.write(f"{url}\n")
-                    print(f"  ⚠ HTTP 404 Not Found - logged (no retry)")
+                    if not silent_404:
+                        with open('404_errors.log', 'a') as f:
+                            f.write(f"{url}\n")
+                        print(f"  ⚠ HTTP 404 Not Found - logged (no retry)")
                 else:
                     print(f"  ⚠ HTTP {response.status_code} - definitive error (no retry)")
                 return None, response.status_code
@@ -1074,18 +1082,24 @@ def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
     stored     = 0
     skipped    = 0
     errors     = 0
+    total      = len(BARRIO_URLS)
 
-    for distrito, barrio, sale_url_path in BARRIO_URLS:
+    for idx, (distrito, barrio, sale_url_path) in enumerate(BARRIO_URLS, 1):
+        # Progress every 20 barrios
+        if idx == 1 or idx % 20 == 0 or idx == total:
+            print(f"  [{idx}/{total}] {distrito} - {barrio}...")
+
         # Convert sale URL to rental URL
         rental_url_path = sale_url_path.replace(
             "/venta-viviendas/", "/alquiler-viviendas/", 1
         )
         url = BASE_URL + rental_url_path
 
-        html, status_code = fetch_page(url, proxies)
+        # silent_404=True: 404 means no rental listings in this barrio — expected,
+        # no need to log to 404_errors.log or print a warning
+        html, status_code = fetch_page(url, proxies, silent_404=True)
 
         if status_code == 404:
-            # Some barrios have no rental listings — expected, skip silently
             skipped += 1
             continue
         if not html or status_code != 200:
@@ -1111,12 +1125,11 @@ def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
         if ok:
             stored += 1
 
-        # Brief sleep to avoid hammering the proxy (rent scraping runs after the
-        # main scrape, so we use a shorter delay)
+        # Brief sleep to avoid hammering the proxy
         time.sleep(0.3)
 
     print(f"\n  ✅ Alquiler: {stored} barrios guardados, "
-          f"{skipped} sin datos, {errors} errores")
+          f"{skipped} sin datos (sin anuncios), {errors} errores")
     return stored
 
 
