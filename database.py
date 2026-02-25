@@ -14,13 +14,21 @@ from pathlib import Path
 DATABASE_PATH = "real_estate.db"
 
 
-def is_streamlit_cloud():
-    """Detect if running on Streamlit Cloud."""
+def is_streamlit_cloud() -> bool:
+    """
+    Detect if running on Streamlit Community Cloud.
+    Uses the STREAMLIT_SHARING_MODE env var (set automatically by Streamlit Cloud)
+    and falls back to checking for the [database] secret.
+    """
+    import os
+    # Streamlit Cloud sets this env var automatically
+    if os.environ.get("STREAMLIT_SHARING_MODE"):
+        return True
+    # Fallback: check for the database secret block
     try:
         import streamlit as st
-        # If secrets exist and contain database config, we're on cloud
         return "database" in st.secrets
-    except:
+    except Exception:
         return False
 
 

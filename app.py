@@ -9,11 +9,13 @@ modules in the `tabs/` package.
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
 
 from database import (
     get_database_stats,
     download_database_from_cloud,
     is_streamlit_cloud,
+    DATABASE_PATH,
 )
 from data_utils import load_data
 
@@ -212,14 +214,42 @@ def main():
         "Tipo de Vendedor", options=["All", "Particular", "Agencia"]
     )
 
-    # Deployment / user info
+    # ── Version & environment info ──────────────────────────────────────────
     st.sidebar.markdown("---")
-    if is_streamlit_cloud():
-        st.sidebar.caption("☁️ Deployed on Streamlit Cloud")
-    else:
-        st.sidebar.caption("💻 Running locally")
+
+    # Git commit hash
+    try:
+        import subprocess
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=__file__.replace("app.py", ""),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        commit = "unknown"
+
+    # Last scrape date from DB
+    try:
+        from database import get_scraping_log
+        log = get_scraping_log(limit=1)
+        last_scrape = log[0]["start_time"][:10] if log else "sin datos"
+    except Exception:
+        last_scrape = "—"
+
+    # DB size
+    try:
+        db_size_mb = Path(DATABASE_PATH).stat().st_size / (1024 * 1024)
+        db_size_str = f"{db_size_mb:.1f} MB"
+    except Exception:
+        db_size_str = "—"
+
+    env_label = "☁️ Streamlit Cloud" if is_streamlit_cloud() else "💻 Local"
+    st.sidebar.caption(f"**{env_label}**")
+    st.sidebar.caption(f"🔖 Versión: `{commit}`")
+    st.sidebar.caption(f"🕐 Último scrape: {last_scrape}")
+    st.sidebar.caption(f"🗄️ Base de datos: {db_size_str}")
     if "current_user" in st.session_state:
-        st.sidebar.caption(f"👤 Usuario: {st.session_state['current_user']}")
+        st.sidebar.caption(f"👤 {st.session_state['current_user']}")
 
     # ------------------------------------------------------------------
     # Load data
