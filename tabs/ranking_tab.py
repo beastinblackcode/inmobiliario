@@ -105,7 +105,7 @@ def render_ranking_tab():
         display_df = filtered[[
             "rank", "barrio", "distrito", "ranking_score",
             "avg_price_sqm", "yield_pct", "price_trend_pct",
-            "days_on_market", "active_count",
+            "days_on_market", "active_count", "urgency_pct",
         ]].copy()
 
         display_df["ranking_score"] = display_df["ranking_score"].apply(
@@ -123,9 +123,12 @@ def render_ranking_tab():
         display_df["days_on_market"] = display_df["days_on_market"].apply(
             lambda v: f"{int(v)}d" if pd.notna(v) and v else "—"
         )
+        display_df["urgency_pct"] = display_df["urgency_pct"].apply(
+            lambda v: f"🔴 {v:.0f}%" if pd.notna(v) and v else "—"
+        )
         display_df.columns = [
             "#", "Barrio", "Distrito", "Score",
-            "€/m²", "Yield", "Tendencia", "Días mercado", "Anuncios",
+            "€/m²", "Yield", "Tendencia", "Días mercado", "Anuncios", "🔴 Urgencia",
         ]
         st.dataframe(display_df, use_container_width=True, hide_index=True, height=520)
 
@@ -220,6 +223,7 @@ def render_ranking_tab():
                 "active_count": True,
                 "ranking_score": True,
                 "days_on_market": ":.0f",
+                "urgency_pct": ":.1f",
             },
             labels={
                 "avg_price_sqm":  "€/m² (precio venta)",
@@ -227,6 +231,7 @@ def render_ranking_tab():
                 "active_count":   "Anuncios activos",
                 "ranking_score":  "Score",
                 "days_on_market": "Días en mercado",
+                "urgency_pct":    "🔴 Urgentes (%)",
             },
             size_max=30,
         )

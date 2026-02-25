@@ -24,6 +24,7 @@ def render_watchlist_tab():
         get_price_history,
         migrate_create_watchlist_table,
     )
+    from nlp_analyzer import get_signals_for_listings, signals_to_badges
 
     # Ensure table exists on older DBs
     migrate_create_watchlist_table()
@@ -32,6 +33,10 @@ def render_watchlist_tab():
     st.markdown("Propiedades guardadas para seguimiento de precio y alertas.")
 
     entries = get_watchlist(include_sold=True)
+
+    # Pre-fetch NLP signals for all watchlist entries
+    wl_ids = [e["listing_id"] for e in entries]
+    nlp_signals = get_signals_for_listings(wl_ids) if wl_ids else {}
 
     if not entries:
         st.info(
@@ -102,11 +107,13 @@ def render_watchlist_tab():
                 sqm_str   = f"{sqm:.0f} m² · " if sqm else ""
                 price_str = f"€{price_now:,}" if price_now else "—"
                 add_str   = f"€{price_add:,}" if price_add else "—"
+                nlp_str = signals_to_badges(nlp_signals.get(lid, {}))
                 st.markdown(
                     f"**[{barrio}, {distrito}]({url})**  \n"
                     f"{rooms_str}{sqm_str}"
                     f"Precio actual: **{price_str}** · Al guardar: {add_str} · "
                     f"{status_badge} · {drops} bajadas · {days_watched}d vigilado"
+                    + (f"  \n{nlp_str}" if nlp_str else "")
                 )
                 if note:
                     st.caption(f"📝 {note}")

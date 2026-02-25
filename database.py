@@ -1740,6 +1740,30 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
             })
 
         results.sort(key=lambda x: x["ranking_score"], reverse=True)
+
+        # ── NLP urgency rate per barrio ───────────────────────────────────────
+        try:
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT l.barrio,
+                           COUNT(*)                                    AS total,
+                           SUM(CASE WHEN s.urgency = 1 THEN 1 ELSE 0 END) AS urgent
+                    FROM listings l
+                    LEFT JOIN listing_signals s ON s.listing_id = l.listing_id
+                    WHERE l.status = 'active' AND l.barrio IS NOT NULL
+                    GROUP BY l.barrio
+                """)
+                urgency_by_barrio = {
+                    row[0]: round(row[2] / row[1] * 100, 1) if row[1] else 0
+                    for row in cursor.fetchall()
+                }
+            for r in results:
+                r["urgency_pct"] = urgency_by_barrio.get(r["barrio"], 0)
+        except Exception:
+            for r in results:
+                r["urgency_pct"] = None
+
         # Add rank position
         for idx, r in enumerate(results, start=1):
             r["rank"] = idx
@@ -2064,6 +2088,23 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
             })
 
         results.sort(key=lambda x: x["score_oportunidad"], reverse=True)
+
+        # Enrich with NLP signals
+        try:
+            from nlp_analyzer import get_signals_for_listings
+            ids = [r["listing_id"] for r in results]
+            signals_map = get_signals_for_listings(ids)
+            for r in results:
+                sig = signals_map.get(r["listing_id"], {})
+                r["urgency"]    = sig.get("urgency", False)
+                r["direct"]     = sig.get("direct", False)
+                r["negotiable"] = sig.get("negotiable", False)
+                r["renovated"]  = sig.get("renovated", False)
+                r["needs_work"] = sig.get("needs_work", False)
+                r["nlp_bonus"]  = sig.get("nlp_bonus", 0)
+        except Exception:
+            pass
+
         return results
 
     except Exception as exc:

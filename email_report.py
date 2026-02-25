@@ -118,12 +118,25 @@ def _new_opp_row(idx: int, p: Dict) -> str:
     ppsqm_str = f"€{int(ppsqm):,}/m²" if ppsqm else "—"
     barrio_med_str = f"€{int(barrio_med):,}/m²" if barrio_med else "—"
 
+    # NLP badges
+    nlp_parts = []
+    if p.get("urgency"):    nlp_parts.append("🔴 Urgente")
+    if p.get("direct"):     nlp_parts.append("💼 Directo")
+    if p.get("negotiable"): nlp_parts.append("🟡 Negociable")
+    if p.get("renovated"):  nlp_parts.append("🟢 Reformado")
+    if p.get("needs_work"): nlp_parts.append("🔧 A reformar")
+    nlp_html = (
+        f"<br><span style='font-size:11px;color:#555;'>{' &nbsp;·&nbsp; '.join(nlp_parts)}</span>"
+        if nlp_parts else ""
+    )
+
     bg = "#f8fff8" if idx % 2 == 0 else ""
     return f"""
         <tr style='{"background:" + bg + ";" if bg else ""}'>
           <td style='padding:10px 12px;font-size:13px;'>
             <a href='{url}' style='color:#1a73e8;font-weight:600;text-decoration:none;'>#{idx} — {barrio}, {distrito}</a><br>
             <span style='color:#888;font-size:11px;'>{rooms} hab · {sqm_str} · {ppsqm_str} · visto: {first_seen}</span>
+            {nlp_html}
           </td>
           <td style='padding:10px 12px;text-align:right;font-size:13px;font-weight:700;'>
             €{price:,}
