@@ -1,5 +1,5 @@
 """
-Search tab — personalised property search with price tracking,
+Search tab — personalised property search with configurable filters,
 fair-price indicator and opportunity score.
 
 Entry point: render_search_tab()
@@ -19,41 +19,28 @@ from datetime import datetime
 # ── Opportunity score helpers ─────────────────────────────────────────────────
 
 def _price_score(vs_barrio_pct: float) -> float:
-    """
-    Score based on how cheap a property is vs its barrio median price/m².
-    vs_barrio_pct < 0 → below median (good for buyer).
-    """
-    # Linear mapping: -20 % or better → 100 pts, +20 % or worse → 0 pts
     pct = max(-20.0, min(20.0, vs_barrio_pct))
     return round(((-pct + 20) / 40) * 100)
 
-
 def _days_score(days: int) -> float:
-    """Score based on days on market. Longer = more negotiating power."""
-    if days < 30:   return 10
-    if days < 60:   return 30
-    if days < 90:   return 55
-    if days < 180:  return 75
+    if days < 30:  return 10
+    if days < 60:  return 30
+    if days < 90:  return 55
+    if days < 180: return 75
     return 95
 
-
 def _drops_score(drops: int) -> float:
-    """Score based on number of price drops. More drops = motivated seller."""
     if drops == 0: return 0
     if drops == 1: return 40
     if drops == 2: return 70
     return 100
 
-
 def compute_opportunity_score(vs_barrio_pct: float, days: int, drops: int) -> int:
-    """Weighted 0-100 opportunity score."""
-    score = (
+    return int(round(
         0.40 * _price_score(vs_barrio_pct) +
         0.30 * _days_score(days) +
         0.30 * _drops_score(drops)
-    )
-    return int(round(score))
-
+    ))
 
 def score_badge(score: int) -> str:
     if score >= 70: return f"🟢 {score}"
@@ -67,89 +54,141 @@ def render_search_tab() -> None:
     """Render all content for the 🔍 Mis Búsquedas tab."""
 
     st.subheader("🔍 Mis Búsquedas Personalizadas")
-    st.info(
-        "Mostrando inmuebles activos entre 250k-450k €, ≥40m², sin bajos, "
-        "con ascensor (zona centro/norte/este)."
-    )
+
+    ALL_DISTRICTS = [
+        "Arganzuela", "Barajas", "Carabanchel", "Centro", "Chamartín",
+        "Chamberí", "Ciudad Lineal", "Fuencarral-El Pardo", "Hortaleza",
+        "Latina", "Moncloa-Aravaca", "Moratalaz", "Puente de Vallecas",
+        "Retiro", "Salamanca", "San Blas-Canillejas", "Tetuán", "Usera",
+        "Vicálvaro", "Villa de Vallecas", "Villaverde",
+    ]
+
+    # ── Configurable filters ──────────────────────────────────────────────────
+    with st.expander("⚙️ Filtros de Búsqueda", expanded=True):
+        fc1, fc2 = st.columns(2)
+
+        with fc1:
+            st.markdown("**💰 Precio**")
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                min_price = st.number_input(
+                    "Mínimo (€)", min_value=0, max_value=5_000_000,
+                    value=250_000, step=10_000, format="%d",
+                )
+            with pc2:
+                max_price = st.number_input(
+                    "Máximo (€)", min_value=0, max_value=5_000_000,
+                    value=450_000, step=10_000, format="%d",
+                )
+
+            st.markdown("**📐 Superficie**")
+            min_sqm = st.slider("Superficie mínima (m²)", 0, 300, 40, step=5)
+
+            st.markdown("**🛏️ Habitaciones**")
+            min_rooms = st.slider("Habitaciones mínimas", 0, 10, 0, step=1,
+                                  help="0 = sin filtro")
+
+        with fc2:
+            st.markdown("**📍 Distritos**")
+            selected_districts = st.multiselect(
+                "Distritos (vacío = todos)",
+                options=ALL_DISTRICTS,
+                default=["Centro", "Chamberí", "Moratalaz", "Retiro",
+                         "Tetuán", "Arganzuela", "Chamartín", "Salamanca",
+                         "Hortaleza"],
+            )
+
+            st.markdown("**🏢 Vendedor**")
+            seller_filter = st.selectbox(
+                "Tipo de vendedor",
+                options=["Todos", "Particular", "Agencia"],
+            )
+
+            st.markdown("**🚪 Planta y extras**")
+            exclude_bajo = st.checkbox("Excluir Bajos", value=True)
+            require_elevator = st.checkbox("Requiere ascensor", value=True)
+
+        sort_by = st.selectbox(
+            "🔢 Ordenar por",
+            options=["score_oportunidad", "price", "price_per_sqm",
+                     "vs_barrio_pct", "dias_mercado", "bajadas"],
+            format_func=lambda x: {
+                "score_oportunidad": "🎯 Score Oportunidad (mejor primero)",
+                "price":             "💰 Precio (menor primero)",
+                "price_per_sqm":     "📏 €/m² (menor primero)",
+                "vs_barrio_pct":     "📊 vs Barrio % (más barato primero)",
+                "dias_mercado":      "⏱️ Días en mercado (más antiguo primero)",
+                "bajadas":           "📉 Nº bajadas (más bajadas primero)",
+            }[x],
+        )
 
     # ── Load & filter ─────────────────────────────────────────────────────────
     from database import (
-        get_listings as get_listings_personal,
+        get_listings as get_listings_db,
         get_barrio_price_stats,
         get_drop_counts_for_listings,
     )
 
-    personal_raw = get_listings_personal(
+    raw = get_listings_db(
         status="active",
-        min_price=250000,
-        max_price=450000,
+        distrito=selected_districts if selected_districts else None,
+        min_price=min_price if min_price > 0 else None,
+        max_price=max_price if max_price < 5_000_000 else None,
+        seller_type=seller_filter if seller_filter != "Todos" else None,
     )
-    personal_df = pd.DataFrame(personal_raw)
+    df = pd.DataFrame(raw)
 
-    if personal_df.empty:
-        st.warning("No se encontraron inmuebles en el rango de precio 250k-450k €.")
+    if df.empty:
+        st.warning("No se encontraron inmuebles con los filtros actuales.")
         return
 
-    # price_per_sqm
-    personal_df["price_per_sqm"] = personal_df.apply(
-        lambda row: row["price"] / row["size_sqm"]
-        if row.get("size_sqm") and row["size_sqm"] > 0 else None,
+    # Derived columns
+    df["price_per_sqm"] = df.apply(
+        lambda r: r["price"] / r["size_sqm"]
+        if r.get("size_sqm") and r["size_sqm"] > 0 else None,
         axis=1,
     )
+    df["floor"]       = df["floor"].fillna("").astype(str)
+    df["description"] = df["description"].fillna("").astype(str)
+    df["rooms"]       = pd.to_numeric(df["rooms"], errors="coerce")
+    df["size_sqm"]    = pd.to_numeric(df["size_sqm"], errors="coerce")
 
-    # Size >= 40 m²
-    personal_df = personal_df[personal_df["size_sqm"].fillna(0) >= 40]
+    # Apply optional filters
+    if min_sqm > 0:
+        df = df[df["size_sqm"].fillna(0) >= min_sqm]
 
-    # Floor — not "Bajo"
-    personal_df["floor"] = personal_df["floor"].fillna("").astype(str)
-    personal_df = personal_df[
-        ~personal_df["floor"].str.contains("bajo", case=False, na=False)
-    ]
+    if min_rooms > 0:
+        df = df[df["rooms"].fillna(0) >= min_rooms]
 
-    # Elevator
-    personal_df["description"] = personal_df["description"].fillna("").astype(str)
-    has_elevator   = personal_df["description"].str.contains("ascensor", case=False, na=False)
-    no_sin         = ~personal_df["description"].str.contains("sin ascensor", case=False, na=False)
-    no_no_dispone  = ~personal_df["description"].str.contains("no dispone de ascensor", case=False, na=False)
-    personal_df    = personal_df[has_elevator & no_sin & no_no_dispone]
+    if exclude_bajo:
+        df = df[~df["floor"].str.contains("bajo", case=False, na=False)]
 
-    # Location
-    target_districts = [
-        "Centro", "Chamberí", "Moratalaz", "Retiro",
-        "Tetuán", "Arganzuela", "Chamartín", "Salamanca", "Hortaleza",
-    ]
-    target_barrios = ["Argüelles"]
-    personal_df = personal_df[
-        (personal_df["distrito"].isin(target_districts))
-        | (personal_df["barrio"].isin(target_barrios))
-    ]
+    if require_elevator:
+        has_lift  = df["description"].str.contains("ascensor", case=False, na=False)
+        not_sin   = ~df["description"].str.contains("sin ascensor", case=False, na=False)
+        not_no    = ~df["description"].str.contains("no dispone de ascensor", case=False, na=False)
+        df = df[has_lift & not_sin & not_no]
 
-    if personal_df.empty:
-        st.warning("No se encontraron inmuebles que coincidan con todos los criterios.")
+    if df.empty:
+        st.warning("No hay resultados con los filtros aplicados. Prueba a ampliar el rango.")
         return
 
     # ── Enrich with fair-price and opportunity data ───────────────────────────
     today = datetime.now().date()
-
-    # 1. Barrio median price/m²
     barrio_stats = get_barrio_price_stats(min_listings=5)
 
     def _vs_barrio(row):
-        barrio   = row.get("barrio")
-        ppsqm    = row.get("price_per_sqm")
-        if not barrio or not ppsqm or barrio not in barrio_stats:
+        b, ppsqm = row.get("barrio"), row.get("price_per_sqm")
+        if not b or not ppsqm or b not in barrio_stats:
             return None
-        median = barrio_stats[barrio]["median_price_sqm"]
-        if not median:
-            return None
-        return round((ppsqm - median) / median * 100, 1)
+        median = barrio_stats[b]["median_price_sqm"]
+        return round((ppsqm - median) / median * 100, 1) if median else None
 
-    personal_df["vs_barrio_pct"] = personal_df.apply(_vs_barrio, axis=1)
-    personal_df["barrio_median_sqm"] = personal_df["barrio"].map(
+    df["vs_barrio_pct"]     = df.apply(_vs_barrio, axis=1)
+    df["barrio_median_sqm"] = df["barrio"].map(
         lambda b: barrio_stats.get(b, {}).get("median_price_sqm")
     )
 
-    # 2. Days on market
     def _days(row):
         fsd = row.get("first_seen_date")
         if not fsd:
@@ -159,53 +198,43 @@ def render_search_tab() -> None:
         except Exception:
             return None
 
-    personal_df["dias_mercado"] = personal_df.apply(_days, axis=1)
+    df["dias_mercado"] = df.apply(_days, axis=1)
 
-    # 3. Price drop count
-    listing_ids = personal_df["listing_id"].tolist()
+    listing_ids = df["listing_id"].tolist()
     drop_counts = get_drop_counts_for_listings(listing_ids)
-    personal_df["bajadas"] = personal_df["listing_id"].map(drop_counts).fillna(0).astype(int)
+    df["bajadas"] = df["listing_id"].map(drop_counts).fillna(0).astype(int)
 
-    # 4. Opportunity score
     def _score(row):
-        vs    = row["vs_barrio_pct"]
-        days  = row["dias_mercado"]
-        drops = row["bajadas"]
+        vs, days, drops = row["vs_barrio_pct"], row["dias_mercado"], row["bajadas"]
         if vs is None or days is None:
             return None
         return compute_opportunity_score(vs, days, drops)
 
-    personal_df["score_oportunidad"] = personal_df.apply(_score, axis=1)
+    df["score_oportunidad"] = df.apply(_score, axis=1)
 
-    # Sort by score descending (None goes last)
-    personal_df = personal_df.sort_values(
-        "score_oportunidad", ascending=False, na_position="last"
-    )
+    # Sort
+    ascending = sort_by in ("price", "price_per_sqm", "vs_barrio_pct")
+    df = df.sort_values(sort_by, ascending=ascending, na_position="last")
 
     # ── Summary metrics ───────────────────────────────────────────────────────
-    st.success(f"Se encontraron **{len(personal_df)}** inmuebles.")
+    st.success(f"**{len(df)}** inmuebles encontrados.")
 
-    p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-    with p_col1:
-        st.metric("Precio Medio", f"€{personal_df['price'].mean():,.0f}")
-    with p_col2:
-        avg_sqm = personal_df["price_per_sqm"].dropna().mean()
-        st.metric("Precio Medio/m²", f"€{avg_sqm:,.0f}" if pd.notna(avg_sqm) else "N/A")
-    with p_col3:
-        st.metric("Tamaño Medio", f"{personal_df['size_sqm'].mean():.0f} m²")
-    with p_col4:
-        top_score = personal_df["score_oportunidad"].dropna()
-        st.metric(
-            "Mejor Score",
-            f"{int(top_score.iloc[0])}/100" if not top_score.empty else "N/A",
-            help="Score de oportunidad del mejor inmueble filtrado"
-        )
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Precio Medio", f"€{df['price'].mean():,.0f}")
+    with m2:
+        avg_sqm = df["price_per_sqm"].dropna().mean()
+        st.metric("€/m² Medio", f"€{avg_sqm:,.0f}" if pd.notna(avg_sqm) else "N/A")
+    with m3:
+        st.metric("Tamaño Medio", f"{df['size_sqm'].mean():.0f} m²")
+    with m4:
+        top = df["score_oportunidad"].dropna()
+        st.metric("Mejor Score", f"{int(top.iloc[0])}/100" if not top.empty else "N/A",
+                  help="Score de oportunidad del primer resultado")
 
     # ── Score legend ──────────────────────────────────────────────────────────
     with st.expander("ℹ️ Cómo se calcula el Score de Oportunidad"):
         st.markdown("""
-El **Score de Oportunidad (0-100)** combina tres señales:
-
 | Componente | Peso | Lógica |
 |---|---|---|
 | 💰 Precio vs barrio | 40% | Cuánto más barato que la mediana €/m² del barrio |
@@ -216,15 +245,14 @@ El **Score de Oportunidad (0-100)** combina tres señales:
         """)
 
     # ── Results table ─────────────────────────────────────────────────────────
-    display_df = personal_df[[
+    display_df = df[[
         "listing_id", "title", "price", "price_per_sqm",
         "barrio_median_sqm", "vs_barrio_pct",
         "distrito", "barrio", "size_sqm", "rooms",
         "dias_mercado", "bajadas", "score_oportunidad",
-        "floor", "url",
+        "floor", "seller_type", "url",
     ]].copy()
 
-    # Format score badge
     display_df["score_oportunidad"] = display_df["score_oportunidad"].apply(
         lambda s: score_badge(int(s)) if pd.notna(s) else "—"
     )
@@ -240,43 +268,46 @@ El **Score de Oportunidad (0-100)** combina tres señales:
             "title":             st.column_config.TextColumn("Título"),
             "price":             st.column_config.NumberColumn("Precio", format="€%d"),
             "price_per_sqm":     st.column_config.NumberColumn("€/m²", format="€%.0f"),
-            "barrio_median_sqm": st.column_config.NumberColumn("Mediana barrio €/m²", format="€%.0f"),
-            "vs_barrio_pct":     st.column_config.TextColumn("vs Barrio", help="% sobre/bajo la mediana €/m² del barrio"),
+            "barrio_median_sqm": st.column_config.NumberColumn("Mediana barrio", format="€%.0f"),
+            "vs_barrio_pct":     st.column_config.TextColumn("vs Barrio",
+                                     help="% sobre/bajo la mediana €/m² del barrio"),
             "distrito":          st.column_config.TextColumn("Distrito"),
             "barrio":            st.column_config.TextColumn("Barrio"),
             "size_sqm":          st.column_config.NumberColumn("m²", format="%d m²"),
             "rooms":             st.column_config.NumberColumn("Hab.", format="%d"),
-            "dias_mercado":      st.column_config.NumberColumn("Días mercado"),
-            "bajadas":           st.column_config.NumberColumn("Bajadas precio"),
-            "score_oportunidad": st.column_config.TextColumn("🎯 Score", help="Score de oportunidad 0-100"),
+            "dias_mercado":      st.column_config.NumberColumn("Días"),
+            "bajadas":           st.column_config.NumberColumn("Bajadas"),
+            "score_oportunidad": st.column_config.TextColumn("🎯 Score",
+                                     help="Score de oportunidad 0-100"),
             "floor":             st.column_config.TextColumn("Planta"),
+            "seller_type":       st.column_config.TextColumn("Vendedor"),
             "url":               st.column_config.LinkColumn("Enlace"),
         },
         hide_index=True,
     )
 
-    # ── Top opportunities highlight ───────────────────────────────────────────
-    top = personal_df[personal_df["score_oportunidad"].notna()].head(5)
-    if not top.empty:
+    # ── Top 5 oportunidades ───────────────────────────────────────────────────
+    top5 = df[df["score_oportunidad"].notna()].head(5)
+    if not top5.empty:
         st.markdown("### 🏆 Top 5 Oportunidades")
-        for _, row in top.iterrows():
-            score = int(row["score_oportunidad"]) if pd.notna(row["score_oportunidad"]) else 0
+        for _, row in top5.iterrows():
+            score = int(row["score_oportunidad"])
             badge = "🟢" if score >= 70 else ("🟡" if score >= 40 else "🔴")
             vs    = f"{row['vs_barrio_pct']:+.1f}%" if pd.notna(row["vs_barrio_pct"]) else "—"
             days  = int(row["dias_mercado"]) if pd.notna(row["dias_mercado"]) else "—"
-            drops = int(row["bajadas"])
+            rooms_str = f"{int(row['rooms'])} hab · " if pd.notna(row.get("rooms")) else ""
             col_a, col_b = st.columns([4, 1])
             with col_a:
                 st.markdown(
-                    f"**{badge} [{row['title'][:60]}]({row['url']})**  \n"
+                    f"**{badge} [{row['title'][:65]}]({row['url']})**  \n"
                     f"€{row['price']:,} · {row['barrio']}, {row['distrito']} · "
-                    f"{row['size_sqm']:.0f} m² · {vs} vs barrio · "
-                    f"{days} días · {drops} bajadas"
+                    f"{rooms_str}{row['size_sqm']:.0f} m² · "
+                    f"{vs} vs barrio · {days} días · {int(row['bajadas'])} bajadas"
                 )
             with col_b:
                 st.metric("Score", f"{score}/100")
 
-    # ── Price evolution ───────────────────────────────────────────────────────
+    # ── Price evolution chart ─────────────────────────────────────────────────
     st.markdown("### 📉 Seguimiento de Precios")
 
     from database import get_price_history_for_listings
@@ -297,27 +328,26 @@ El **Score de Oportunidad (0-100)** combina tres señales:
             if len(daily_avg) > 1:
                 fig_evol = go.Figure()
                 fig_evol.add_trace(go.Scatter(
-                    x=daily_avg["date"],
-                    y=daily_avg["avg_price"],
-                    mode="lines+markers",
-                    name="Precio Medio",
-                    line=dict(color="#8e44ad", width=3),
-                    marker=dict(size=6),
+                    x=daily_avg["date"], y=daily_avg["avg_price"],
+                    mode="lines+markers", name="Precio Medio",
+                    line=dict(color="#8e44ad", width=3), marker=dict(size=6),
                     hovertemplate="<b>%{x|%d/%m/%Y}</b><br>Precio: %{y:,.0f} €<extra></extra>",
                 ))
                 fig_evol.update_layout(
-                    title="Evolución Precio Medio (Inmuebles Filtrados)",
+                    title="Evolución Precio Medio (resultados filtrados)",
                     xaxis_title="Fecha", yaxis_title="Precio (€)",
-                    hovermode="x unified", height=400,
+                    hovermode="x unified", height=380,
                 )
                 st.plotly_chart(fig_evol, use_container_width=True)
 
-            # Properties with price drops
+            # Bajadas recientes
             st.markdown("#### 📉 Bajadas de Precio Recientes")
             drops_df = ph_df[ph_df["price_change"] < 0].copy()
             if not drops_df.empty:
                 drops_df = drops_df.sort_values("date", ascending=False).head(20)
-                drops_df["price_change_fmt"] = drops_df["price_change"].apply(lambda x: f"€{x:,.0f}")
+                drops_df["price_change_fmt"] = drops_df["price_change"].apply(
+                    lambda x: f"€{x:,.0f}"
+                )
                 drops_df["pct"] = drops_df.apply(
                     lambda r: f"{(r['price_change'] / (r['new_price'] - r['price_change'])) * 100:.1f}%"
                     if (r["new_price"] - r["price_change"]) != 0 else "N/A",
@@ -336,6 +366,6 @@ El **Score de Oportunidad (0-100)** combina tres señales:
             else:
                 st.info("No hay bajadas de precio recientes para estos inmuebles.")
         else:
-            st.info("No hay datos de historial de precios disponibles para estos inmuebles.")
+            st.info("No hay historial de precios disponible para los resultados actuales.")
     except Exception:
-        st.info("No hay datos de historial de precios disponibles.")
+        st.info("No hay historial de precios disponible.")
