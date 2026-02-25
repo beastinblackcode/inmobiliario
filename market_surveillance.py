@@ -581,7 +581,7 @@ def _render_charts(indicators: dict, macro: dict):
 
     # Chart 4: Segmentation by zone
     with tab4:
-        _chart_zone_segmentation()
+        _chart_zone_segmentation(indicators)
 
 
 def _chart_prices_vs_euribor(indicators: dict, macro: dict):
@@ -759,7 +759,7 @@ def _chart_sales_speed(indicators: dict):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _chart_zone_segmentation():
+def _chart_zone_segmentation(indicators: dict):
     """Render price and sales speed segmentation by district/barrio."""
 
     from market_indicators import get_price_by_zone, get_sales_speed_by_zone
