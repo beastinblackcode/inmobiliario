@@ -28,7 +28,6 @@ ALL_DISTRICTS = [
 def render_alerts_tab():
     init_alerts_table()
 
-    st.header("🔔 Alertas Personalizadas")
     st.markdown(
         "Define criterios de búsqueda y recibe en el email diario las nuevas propiedades "
         "que los cumplan. Las alertas también se comprueban aquí en tiempo real."

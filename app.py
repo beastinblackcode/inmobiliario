@@ -280,13 +280,10 @@ def main():
     # ------------------------------------------------------------------
     # Tabs
     # ------------------------------------------------------------------
-    (dashboard_tab, map_tab, prediction_tab, personal_tab,
-     watchlist_tab, price_drops_tab, trends_tab,
-     alerts_tab, admin_tab) = st.tabs(
-        ["📊 Dashboard", "🗺️ Mapa", "🔮 Predicción", "🔍 Mis Búsquedas",
-         "⭐ Mi Watchlist", "📉 Bajadas de Precio",
-         "📈 Tendencias", "🔔 Mis Alertas",
-         "⚙️ Administración"]
+    (dashboard_tab, map_tab, prediction_tab, mi_espacio_tab,
+     price_drops_tab, trends_tab, admin_tab) = st.tabs(
+        ["📊 Dashboard", "🗺️ Mapa", "🔮 Predicción", "🏠 Mi Espacio",
+         "📉 Bajadas de Precio", "📈 Tendencias", "⚙️ Administración"]
     )
 
     with dashboard_tab:
@@ -301,13 +298,19 @@ def main():
         from tabs.prediction_tab import render_prediction_tab
         render_prediction_tab(df)
 
-    with personal_tab:
-        from tabs.search_tab import render_search_tab
-        render_search_tab()
-
-    with watchlist_tab:
-        from tabs.watchlist_tab import render_watchlist_tab
-        render_watchlist_tab()
+    with mi_espacio_tab:
+        sub_busqueda, sub_alertas, sub_watchlist = st.tabs([
+            "🔍 Búsqueda", "🔔 Alertas", "📌 Watchlist"
+        ])
+        with sub_busqueda:
+            from tabs.search_tab import render_search_tab
+            render_search_tab()
+        with sub_alertas:
+            from tabs.alerts_tab import render_alerts_tab
+            render_alerts_tab()
+        with sub_watchlist:
+            from tabs.watchlist_tab import render_watchlist_tab
+            render_watchlist_tab()
 
     with price_drops_tab:
         from tabs.price_drops_tab import render_price_drops_tab
@@ -316,11 +319,6 @@ def main():
     with trends_tab:
         from tabs.market_trends_tab import render_market_trends_tab
         render_market_trends_tab()
-
-    with alerts_tab:
-        from tabs.alerts_tab import render_alerts_tab
-        render_alerts_tab()
-
 
     with admin_tab:
         from tabs.admin_tab import render_admin_tab
