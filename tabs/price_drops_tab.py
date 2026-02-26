@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from database import get_price_drop_stats, get_price_trend_by_district
+from database import get_price_drop_stats, get_price_trend_by_district, get_daily_price_drops
 
 
 def render_price_drops_tab():
@@ -54,6 +54,53 @@ def render_price_drops_tab():
         f"{ov['avg_days_to_drop']:.0f} días",
         help="Tiempo medio desde publicación hasta la primera reducción",
     )
+
+    st.markdown("---")
+
+    # ── Evolución diaria (movido desde Dashboard) ─────────────────────────────
+    st.subheader("📅 Evolución diaria de bajadas (últimos 30 días)")
+    drops_data = get_daily_price_drops(days=30)
+    if drops_data:
+        drops_df = pd.DataFrame(drops_data)
+        latest = drops_df.iloc[-1]
+        prev = drops_df.iloc[-2] if len(drops_df) > 1 else None
+
+        dm1, dm2, dm3 = st.columns(3)
+        with dm1:
+            delta_drops = int(latest['drop_count'] - prev['drop_count']) if prev is not None else 0
+            dm1.metric("Bajadas (último día)", f"{latest['drop_count']}", f"{delta_drops:+} vs ayer",
+                       help=f"Fecha: {latest['date']}")
+        with dm2:
+            delta_pct = latest['drop_pct'] - prev['drop_pct'] if prev is not None else 0
+            dm2.metric("% sobre activos", f"{latest['drop_pct']}%", f"{delta_pct:+.2f}%",
+                       help="% de inmuebles activos que bajaron de precio")
+        with dm3:
+            dm3.metric("Total activos (est.)", f"{latest['active_count']:,}",
+                       help="Estimación de inmuebles activos en esa fecha")
+
+        fig_drops = go.Figure()
+        fig_drops.add_trace(go.Bar(
+            x=drops_df['date'], y=drops_df['drop_count'],
+            name='Nº Bajadas', marker_color='#e74c3c', opacity=0.7,
+        ))
+        fig_drops.add_trace(go.Scatter(
+            x=drops_df['date'], y=drops_df['drop_pct'],
+            name='% del Total', yaxis='y2',
+            line=dict(color='#2c3e50', width=3), mode='lines+markers',
+        ))
+        fig_drops.update_layout(
+            xaxis=dict(title='Fecha'),
+            yaxis=dict(title='Número de bajadas', side='left'),
+            yaxis2=dict(title='% del total activo', side='right', overlaying='y',
+                        showgrid=False, tickformat='.1f%'),
+            legend=dict(x=0.01, y=0.99),
+            hovermode='x unified',
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_drops, use_container_width=True)
+    else:
+        st.info("No hay datos suficientes de historial de precios para generar el gráfico.")
 
     st.markdown("---")
 

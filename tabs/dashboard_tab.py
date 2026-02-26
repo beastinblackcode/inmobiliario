@@ -13,7 +13,6 @@ from datetime import datetime, timedelta
 from database import (
     get_sold_last_n_days,
     get_price_trends_by_zone,
-    get_daily_price_drops,
     get_connection,
     get_property_price_stats,
 )
@@ -71,65 +70,6 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
     # =========================================================================
     # Price Drops trend
     # =========================================================================
-    st.markdown("---")
-    st.subheader("📉 Tendencia de Bajadas de Precio")
-
-    drops_data = get_daily_price_drops(days=30)
-
-    if drops_data:
-        drops_df = pd.DataFrame(drops_data)
-        latest = drops_df.iloc[-1]
-        prev = drops_df.iloc[-2] if len(drops_df) > 1 else None
-
-        dm1, dm2, dm3 = st.columns(3)
-
-        with dm1:
-            delta_drops = int(latest['drop_count'] - prev['drop_count']) if prev is not None else 0
-            st.metric(
-                "Bajadas (Último Día)",
-                f"{latest['drop_count']}",
-                f"{delta_drops:+} vs ayer",
-                help=f"Fecha: {latest['date']}",
-            )
-
-        with dm2:
-            delta_pct = latest['drop_pct'] - prev['drop_pct'] if prev is not None else 0
-            st.metric(
-                "% sobre Activos",
-                f"{latest['drop_pct']}%",
-                f"{delta_pct:+.2f}%",
-                help="% de inmuebles activos que bajaron de precio",
-            )
-
-        with dm3:
-            st.metric(
-                "Total Activos (Est.)",
-                f"{latest['active_count']:,}",
-                help="Estimación de inmuebles activos en esa fecha",
-            )
-
-        fig_drops = go.Figure()
-        fig_drops.add_trace(go.Bar(
-            x=drops_df['date'], y=drops_df['drop_count'],
-            name='Nº Bajadas', marker_color='#e74c3c', opacity=0.7,
-        ))
-        fig_drops.add_trace(go.Scatter(
-            x=drops_df['date'], y=drops_df['drop_pct'],
-            name='% del Total', yaxis='y2',
-            line=dict(color='#2c3e50', width=3), mode='lines+markers',
-        ))
-        fig_drops.update_layout(
-            title='Evolución Diaria de Bajadas de Precio',
-            xaxis=dict(title='Fecha'),
-            yaxis=dict(title='Número de Bajadas', side='left'),
-            yaxis2=dict(title='% del Total Activo', side='right', overlaying='y',
-                        showgrid=False, tickformat='.1f%'),
-            legend=dict(x=0.01, y=0.99),
-            hovermode='x unified',
-        )
-        st.plotly_chart(fig_drops, use_container_width=True)
-    else:
-        st.info("No hay datos suficientes de historial de precios para generar el gráfico.")
 
     # =========================================================================
     # Ranking de Barrios (integrado desde ranking_tab)
