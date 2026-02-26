@@ -71,14 +71,6 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
     # Price Drops trend
     # =========================================================================
 
-    # =========================================================================
-    # Ranking de Barrios (integrado desde ranking_tab)
-    # =========================================================================
-    st.markdown("---")
-    with st.expander("🏆 Ranking de Barrios", expanded=False):
-        from tabs.ranking_tab import render_ranking_tab
-        render_ranking_tab()
-
     st.markdown("---")
 
     # =========================================================================
