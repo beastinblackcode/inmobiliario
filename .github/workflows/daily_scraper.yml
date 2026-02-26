@@ -10,7 +10,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 60          # Aborta si el scraper se cuelga
+    timeout-minutes: 180         # El scraper puede tardar 1-2h con 139 barrios
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
