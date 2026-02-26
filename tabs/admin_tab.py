@@ -266,10 +266,7 @@ def render_admin_tab(df: pd.DataFrame) -> None:
 
         if view_mode == "Tabla Pivote":
             st.dataframe(
-                pivot_df.style.background_gradient(
-                    cmap="YlGnBu",
-                    subset=[c for c in pivot_df.columns if c != "Total"],
-                ),
+                pivot_df,
                 use_container_width=True,
                 height=500,
             )

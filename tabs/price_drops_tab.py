@@ -143,13 +143,11 @@ def render_price_drops_tab():
             df_display = df_display.sort_values("% con bajada", ascending=False)
 
             st.dataframe(
-                df_display.style
-                .format({
+                df_display.style.format({
                     "% con bajada":   "{:.1f}%",
                     "Bajada media %": "{:.1f}%",
                     "Bajada máx %":   "{:.1f}%",
-                })
-                .background_gradient(subset=["% con bajada"], cmap="Reds"),
+                }),
                 use_container_width=True,
                 height=400,
             )
