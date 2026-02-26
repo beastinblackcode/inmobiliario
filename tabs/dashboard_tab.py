@@ -517,28 +517,30 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
 
     with price_tab2:
         st.markdown("### Evolución de Precio por Propiedad")
+        st.caption("Pega la URL de Idealista del piso para ver su historial de precios.")
 
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT DISTINCT l.listing_id, l.title, l.distrito, l.price
-                FROM listings l
-                JOIN price_history ph ON l.listing_id = ph.listing_id
-                WHERE l.status = 'active' AND ph.change_amount IS NOT NULL
-                ORDER BY l.title LIMIT 100
-            """)
-            properties_with_changes = cursor.fetchall()
+        input_url = st.text_input(
+            "URL del piso (Idealista)",
+            placeholder="https://www.idealista.com/inmueble/12345678/",
+            key="property_url_input",
+        )
 
-        if properties_with_changes:
-            property_options = {
-                f"{title[:50]}... ({distrito}) - €{price:,.0f}": listing_id
-                for listing_id, title, distrito, price in properties_with_changes
-            }
-            selected_label = st.selectbox(
-                "Selecciona una propiedad", options=list(property_options.keys()),
-                key="property_evolution_selector",
-            )
-            selected_listing_id = property_options[selected_label]
+        selected_listing_id = None
+        if input_url and input_url.strip():
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT listing_id, title, distrito, price FROM listings WHERE url = ? LIMIT 1",
+                    (input_url.strip(),),
+                )
+                row = cursor.fetchone()
+            if row:
+                selected_listing_id = row["listing_id"]
+                st.success(f"**{row['title'][:80]}** · {row['distrito']} · €{row['price']:,}")
+            else:
+                st.warning("No se encontró ningún piso con esa URL. Comprueba que sea exactamente la URL del anuncio.")
+
+        if selected_listing_id:
             evo_df = get_property_evolution_dataframe(selected_listing_id)
 
             if not evo_df.empty:
@@ -590,8 +592,8 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
                         "Cambio (%)": st.column_config.NumberColumn("Cambio (%)", format="%.1f%%"),
                     },
                 )
-        else:
-            st.info("📊 Aún no hay propiedades con cambios de precio registrados.")
+            else:
+                st.info("📊 Este piso aún no tiene cambios de precio registrados.")
 
     # =========================================================================
     # Data table
