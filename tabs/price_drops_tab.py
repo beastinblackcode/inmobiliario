@@ -57,45 +57,45 @@ def render_price_drops_tab():
 
     st.markdown("---")
 
-    # ── Row 2: recientes + histograma ────────────────────────────────────────
-    col_left, col_right = st.columns([1, 1])
+    # ── Bajadas recientes (ancho completo) ───────────────────────────────────
+    st.subheader("🕐 Bajadas recientes")
+    r7, r30 = ov["recent_7d"], ov["recent_30d"]
+    st.markdown(
+        f"**{r7}** propiedades bajaron precio en los últimos **7 días** · "
+        f"**{r30}** en los últimos **30 días**"
+    )
 
-    with col_left:
-        st.subheader("🕐 Bajadas recientes")
-        r7, r30 = ov["recent_7d"], ov["recent_30d"]
-        st.markdown(
-            f"**{r7}** propiedades bajaron precio en los últimos **7 días** · "
-            f"**{r30}** en los últimos **30 días**"
+    if recent:
+        df_rec = pd.DataFrame(recent)
+        df_rec["Bajada"] = df_rec["change_percent"].apply(lambda x: f"{x:.1f}%")
+        df_rec["Δ€"] = df_rec["change_amount"].apply(lambda x: f"{x:+,}€")
+        df_rec["Precio"] = df_rec["current_price"].apply(lambda x: f"{x:,}€")
+
+        df_show = df_rec[["title", "barrio", "Precio", "Δ€", "Bajada", "date_recorded", "url"]].copy()
+        df_show.columns = ["Título", "Barrio", "Precio", "Δ€", "% Bajada", "Fecha", "URL"]
+
+        df_show["Título"] = df_show.apply(
+            lambda r: f'<a href="{r["URL"]}" target="_blank">{r["Título"][:55]}…</a>'
+            if len(str(r["Título"])) > 55
+            else f'<a href="{r["URL"]}" target="_blank">{r["Título"]}</a>',
+            axis=1,
         )
+        df_show = df_show.drop(columns=["URL"])
 
-        if recent:
-            df_rec = pd.DataFrame(recent)
-            df_rec["Bajada"] = df_rec["change_percent"].apply(lambda x: f"{x:.1f}%")
-            df_rec["Δ€"] = df_rec["change_amount"].apply(lambda x: f"{x:+,}€")
-            df_rec["Precio"] = df_rec["current_price"].apply(lambda x: f"{x:,}€")
+        st.markdown(
+            df_show.to_html(escape=False, index=False),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("Sin bajadas en los últimos 7 días.")
 
-            df_show = df_rec[["title", "barrio", "Precio", "Δ€", "Bajada", "date_recorded", "url"]].copy()
-            df_show.columns = ["Título", "Barrio", "Precio", "Δ€", "% Bajada", "Fecha", "URL"]
+    st.markdown("---")
 
-            # Make title a clickable link
-            df_show["Título"] = df_show.apply(
-                lambda r: f'<a href="{r["URL"]}" target="_blank">{r["Título"][:45]}…</a>'
-                if len(str(r["Título"])) > 45
-                else f'<a href="{r["URL"]}" target="_blank">{r["Título"]}</a>',
-                axis=1,
-            )
-            df_show = df_show.drop(columns=["URL"])
-
-            st.markdown(
-                df_show.to_html(escape=False, index=False),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info("Sin bajadas en los últimos 7 días.")
-
-    with col_right:
-        st.subheader("📊 Distribución de bajadas")
-        if buckets:
+    # ── Distribución de bajadas (ancho completo) ──────────────────────────────
+    st.subheader("📊 Distribución de bajadas")
+    if buckets:
+        col_hist, col_spacer = st.columns([2, 1])
+        with col_hist:
             fig_hist = go.Figure(
                 go.Bar(
                     x=list(buckets.keys()),
