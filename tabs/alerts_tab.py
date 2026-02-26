@@ -33,11 +33,17 @@ def render_alerts_tab():
         "que los cumplan. Las alertas también se comprueban aquí en tiempo real."
     )
 
+    # ── Mensajes de estado (sin rerun) ────────────────────────────────────────
+    if st.session_state.get("_alert_saved"):
+        st.success(f"✅ Alerta «{st.session_state.pop('_alert_saved')}» creada correctamente.")
+    if st.session_state.get("_alert_deleted"):
+        st.success(st.session_state.pop("_alert_deleted"))
+
     alerts = get_alerts()
 
-    # ── Create new alert ──────────────────────────────────────────────────────
+    # ── Crear nueva alerta ────────────────────────────────────────────────────
     with st.expander("➕ Crear nueva alerta", expanded=len(alerts) == 0):
-        with st.form("new_alert_form"):
+        with st.form("new_alert_form", clear_on_submit=True):
             st.subheader("Nueva alerta")
             col1, col2 = st.columns(2)
             with col1:
@@ -87,12 +93,11 @@ def render_alerts_tab():
                         min_rooms=min_rooms if min_rooms > 0 else None,
                         seller_type=seller_type if seller_type != "Cualquiera" else None,
                     )
-                    st.success(f"✅ Alerta «{alert_name}» creada correctamente.")
-                    st.rerun()
+                    st.session_state["_alert_saved"] = alert_name.strip()
 
     st.markdown("---")
 
-    # ── Active alerts ──────────────────────────────────────────────────────────
+    # ── Alertas activas ───────────────────────────────────────────────────────
     alerts = get_alerts()  # Refresh after potential create
 
     if not alerts:
@@ -105,7 +110,6 @@ def render_alerts_tab():
         distritos_list = json.loads(alert.get("distritos") or "[]")
         distritos_str  = ", ".join(distritos_list) if distritos_list else "Todos"
 
-        # Build criteria summary
         criteria = []
         if alert.get("max_price"):
             criteria.append(f"💰 Máx. {alert['max_price']:,}€")
@@ -128,10 +132,8 @@ def render_alerts_tab():
             with col_del:
                 if st.button("🗑️ Eliminar", key=f"del_{alert['id']}"):
                     delete_alert(alert["id"])
-                    st.success("Alerta eliminada.")
-                    st.rerun()
+                    st.session_state["_alert_deleted"] = f"Alerta «{alert['name']}» eliminada."
 
-            # Show matches
             col_hours, _ = st.columns([1, 3])
             with col_hours:
                 hours = st.selectbox(
@@ -146,19 +148,16 @@ def render_alerts_tab():
             if matches:
                 st.success(f"**{len(matches)} propiedades** coinciden con esta alerta:")
                 df_m = pd.DataFrame(matches)
-                df_m["Precio"]   = df_m["price"].apply(lambda x: f"{x:,}€")
-                df_m["€/m²"]     = df_m["price_sqm"].apply(lambda x: f"{x:,.0f}" if x else "—")
-                df_m["Tamaño"]   = df_m["size_sqm"].apply(lambda x: f"{x}m²" if x else "—")
-                df_m["Hab."]     = df_m["rooms"].apply(lambda x: str(x) if x else "—")
-                df_m["Enlace"]   = df_m["url"].apply(
+                df_m["Precio"] = df_m["price"].apply(lambda x: f"{x:,}€")
+                df_m["€/m²"]   = df_m["price_sqm"].apply(lambda x: f"{x:,.0f}" if x else "—")
+                df_m["Tamaño"] = df_m["size_sqm"].apply(lambda x: f"{x}m²" if x else "—")
+                df_m["Hab."]   = df_m["rooms"].apply(lambda x: str(x) if x else "—")
+                df_m["Enlace"] = df_m["url"].apply(
                     lambda u: f'<a href="{u}" target="_blank">Ver</a>' if u else "—"
                 )
                 df_show = df_m[["title", "barrio", "Precio", "€/m²", "Tamaño", "Hab.", "seller_type", "Enlace"]].copy()
                 df_show.columns = ["Título", "Barrio", "Precio", "€/m²", "Tamaño", "Hab.", "Vendedor", "Enlace"]
                 df_show["Título"] = df_show["Título"].str[:50]
-                st.markdown(
-                    df_show.to_html(escape=False, index=False),
-                    unsafe_allow_html=True,
-                )
+                st.markdown(df_show.to_html(escape=False, index=False), unsafe_allow_html=True)
             else:
                 st.info(f"Sin nuevas propiedades en las últimas {hours}h que cumplan esta alerta.")
