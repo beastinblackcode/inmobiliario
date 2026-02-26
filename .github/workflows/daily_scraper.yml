@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
     # Permite lanzar manualmente desde la pestaña Actions de GitHub
 
+permissions:
+  contents: write                # Needed to commit drive_file_id.txt back to repo
+
 jobs:
   scrape:
     runs-on: ubuntu-latest

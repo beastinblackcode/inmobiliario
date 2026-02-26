@@ -1965,11 +1965,11 @@ def get_watchlist_price_drops(since_days: int = 1) -> List[Dict]:
                     l.size_sqm,
                     l.rooms,
                     l.status,
-                    ph.old_price,
-                    ph.new_price,
+                    ph.price - ph.change_amount AS old_price,
+                    ph.price                    AS new_price,
                     ph.change_amount,
                     ph.change_percent,
-                    ph.date_recorded    AS drop_date
+                    ph.date_recorded            AS drop_date
                 FROM watchlist w
                 JOIN listings l       ON l.listing_id = w.listing_id
                 JOIN price_history ph ON ph.listing_id = w.listing_id
