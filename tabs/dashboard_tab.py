@@ -242,148 +242,44 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
     # Advanced Analytics (sub-tabs)
     # =========================================================================
     st.markdown("---")
-    st.subheader("📊 Análisis Avanzado")
+    st.subheader("📊 Tendencias Temporales")
 
     from analytics import (
         get_velocity_metrics,
-        rank_opportunities,
-        identify_bargains,
         get_new_vs_sold_trends,
     )
 
-    analytics_tab1, analytics_tab2, analytics_tab3 = st.tabs([
-        "📈 Tendencias Temporales",
-        "🎯 Mejores Oportunidades",
-        "💎 Gangas (Precio/m²)",
-    ])
+    velocity = get_velocity_metrics(df)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Días en Mercado (Media)",   f"{velocity['avg_days_on_market']:.0f}",
+              help="Promedio de días que las propiedades están activas")
+    c2.metric("Días en Mercado (Mediana)", f"{velocity['median_days_on_market']:.0f}",
+              help="Mediana de días en mercado (menos afectada por outliers)")
+    c3.metric("Nuevos (7 días)",           f"{velocity['new_last_7_days']:,}",
+              help="Propiedades nuevas en los últimos 7 días")
+    c4.metric("Vendidos (7 días)",         f"{velocity['sold_last_7_days']:,}",
+              help="Propiedades vendidas en los últimos 7 días")
 
-    with analytics_tab1:
-        st.markdown("### Métricas de Velocidad del Mercado")
-        velocity = get_velocity_metrics(df)
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Días en Mercado (Media)", f"{velocity['avg_days_on_market']:.0f}",
-                  help="Promedio de días que las propiedades están activas")
-        c2.metric("Días en Mercado (Mediana)", f"{velocity['median_days_on_market']:.0f}",
-                  help="Mediana de días en mercado (menos afectada por outliers)")
-        c3.metric("Nuevos (7 días)", f"{velocity['new_last_7_days']:,}",
-                  help="Propiedades nuevas en los últimos 7 días")
-        c4.metric("Vendidos (7 días)", f"{velocity['sold_last_7_days']:,}",
-                  help="Propiedades vendidas en los últimos 7 días")
-
-        st.markdown("---")
-        st.markdown("### Nuevos vs Vendidos (Últimos 30 días)")
-        trends_data = get_new_vs_sold_trends(df, days=30)
-
-        if trends_data['dates']:
-            fig_trends = go.Figure()
-            fig_trends.add_trace(go.Scatter(
-                x=trends_data['dates'], y=trends_data['new'], name='Nuevos',
-                mode='lines+markers', line=dict(color='#2ecc71', width=2), marker=dict(size=6),
-            ))
-            fig_trends.add_trace(go.Scatter(
-                x=trends_data['dates'], y=trends_data['sold'], name='Vendidos',
-                mode='lines+markers', line=dict(color='#e74c3c', width=2), marker=dict(size=6),
-            ))
-            fig_trends.update_layout(
-                xaxis_title='Fecha', yaxis_title='Cantidad',
-                hovermode='x unified', height=400,
-            )
-            st.plotly_chart(fig_trends, use_container_width=True)
-        else:
-            st.info("No hay suficientes datos para mostrar tendencias temporales")
-
-    with analytics_tab2:
-        st.markdown("### Top 20 Mejores Oportunidades (Ratio Calidad-Precio)")
-        st.info("""
-        **Score de Calidad-Precio (0-100):**
-        - 📊 Precio/m² vs promedio del distrito (40%)
-        - 📐 Tamaño de la propiedad (20%)
-        - 👤 Tipo de vendedor (10%)
-        - ⏱️ Días en mercado (15%)
-        - 🌅 Orientación (15%)
-
-        **Mayor score = Mejor relación calidad-precio**
-        """)
-
-        df_ranked = rank_opportunities(df[df['status'] == 'active'])
-
-        if not df_ranked.empty:
-            for idx, row in df_ranked.head(20).iterrows():
-                score = row['quality_score']
-                if score >= 80:
-                    badge, label = "🟢", "Excelente"
-                elif score >= 70:
-                    badge, label = "🔵", "Muy Bueno"
-                elif score >= 60:
-                    badge, label = "🟡", "Bueno"
-                else:
-                    badge, label = "🟠", "Regular"
-
-                title_preview = row['title'][:70] + "..." if len(row['title']) > 70 else row['title']
-                with st.expander(f"{badge} **{score:.0f}/100** ({label}) - {title_preview}"):
-                    rc1, rc2, rc3 = st.columns(3)
-                    with rc1:
-                        st.metric("💰 Precio", f"€{row['price']:,}")
-                        st.metric("📐 Tamaño", f"{row['size_sqm']:.0f} m²" if pd.notna(row['size_sqm']) else "N/A")
-                        st.metric("🛏️ Habitaciones", int(row['rooms']) if pd.notna(row['rooms']) else "N/A")
-                    with rc2:
-                        st.metric("💵 €/m²", f"€{row['price_per_sqm']:,.0f}" if pd.notna(row['price_per_sqm']) else "N/A")
-                        st.metric("📊 vs Distrito", f"{row['vs_distrito_avg']:+.1f}%" if pd.notna(row['vs_distrito_avg']) else "N/A")
-                        st.metric("⏱️ Días en Mercado", f"{row['days_on_market']:.0f}" if pd.notna(row['days_on_market']) else "N/A")
-                    with rc3:
-                        st.metric("📍 Distrito", row['distrito'])
-                        st.metric("🏘️ Barrio", row['barrio'])
-                        st.metric("👤 Vendedor", row['seller_type'])
-                        st.metric("🌅 Orientación", row['orientation'] if pd.notna(row['orientation']) else "N/A")
-                    st.markdown(f"[🔗 Ver en Idealista]({row['url']})")
-        else:
-            st.warning("No hay propiedades activas para analizar")
-
-    with analytics_tab3:
-        st.markdown("### Gangas: Propiedades con Mejor Precio/m²")
-        st.info("Propiedades con precio/m² **15% o más por debajo** del promedio de su distrito.")
-
-        bargains = identify_bargains(df[df['status'] == 'active'], threshold=-15.0)
-
-        if not bargains.empty:
-            st.success(f"✨ Encontradas {len(bargains)} gangas potenciales")
-
-            bargains_display = bargains[[
-                'title', 'price', 'price_per_sqm', 'vs_distrito_avg',
-                'distrito', 'barrio', 'rooms', 'size_sqm', 'quality_score', 'url',
-            ]].copy()
-            bargains_display.columns = [
-                'Título', 'Precio', '€/m²', '% vs Distrito',
-                'Distrito', 'Barrio', 'Hab.', 'm²', 'Score', 'Link',
-            ]
-            bargains_display['Precio'] = bargains['price']
-            bargains_display['€/m²'] = bargains['price_per_sqm']
-            bargains_display['% vs Distrito'] = bargains['vs_distrito_avg']
-            bargains_display['Score'] = bargains['quality_score']
-            bargains_display['m²'] = bargains['size_sqm']
-            bargains_display['Link'] = bargains['url']
-
-            st.dataframe(
-                bargains_display, hide_index=True, use_container_width=True, height=400,
-                column_config={
-                    "Precio": st.column_config.NumberColumn("Precio", format="€%d", min_value=0),
-                    "€/m²": st.column_config.NumberColumn("€/m²", format="€%d"),
-                    "% vs Distrito": st.column_config.NumberColumn("% vs Distrito", format="%.1f%%"),
-                    "Score": st.column_config.ProgressColumn("Score", format="%d", min_value=0, max_value=100),
-                    "m²": st.column_config.NumberColumn("m²", format="%d m²"),
-                    "Link": st.column_config.LinkColumn("Idealista", display_text="🔗 Ver"),
-                },
-            )
-            csv = bargains.to_csv(index=False)
-            st.download_button(
-                label="📥 Descargar Gangas (CSV)", data=csv,
-                file_name=f"gangas_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-            )
-        else:
-            st.warning("No se encontraron gangas con el criterio actual (15% por debajo del promedio)")
-
+    st.markdown("#### Nuevos vs Vendidos (Últimos 30 días)")
+    trends_data = get_new_vs_sold_trends(df, days=30)
+    if trends_data['dates']:
+        fig_trends = go.Figure()
+        fig_trends.add_trace(go.Scatter(
+            x=trends_data['dates'], y=trends_data['new'], name='Nuevos',
+            mode='lines+markers', line=dict(color='#2ecc71', width=2), marker=dict(size=6),
+        ))
+        fig_trends.add_trace(go.Scatter(
+            x=trends_data['dates'], y=trends_data['sold'], name='Vendidos',
+            mode='lines+markers', line=dict(color='#e74c3c', width=2), marker=dict(size=6),
+        ))
+        fig_trends.update_layout(
+            xaxis_title='Fecha', yaxis_title='Cantidad',
+            hovermode='x unified', height=400,
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_trends, use_container_width=True)
+    else:
+        st.info("No hay suficientes datos para mostrar tendencias temporales.")
     # =========================================================================
     # Time-to-sale by district
     # =========================================================================
@@ -549,10 +445,9 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
 
     st.markdown("---")
 
-    price_tab1, price_tab2, price_tab3 = st.tabs([
+    price_tab1, price_tab2 = st.tabs([
         "📉 Bajadas Recientes",
         "📊 Evolución por Propiedad",
-        "🎯 Vendedores Desesperados",
     ])
 
     with price_tab1:
@@ -697,120 +592,6 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
                 )
         else:
             st.info("📊 Aún no hay propiedades con cambios de precio registrados.")
-
-    with price_tab3:
-        st.markdown("### Vendedores Desesperados (Múltiples Bajadas)")
-        col1, col2 = st.columns(2)
-        with col1:
-            min_drops_filter = st.slider("Mínimo de Bajadas", 2, 5, 2, 1, key="desperate_min_drops")
-        with col2:
-            min_total_drop = st.slider("Bajada Total Mínima (%)", 5.0, 30.0, 10.0, 5.0, key="desperate_min_total")
-
-        desperate_df = get_desperate_sellers_dataframe(
-            min_drops=min_drops_filter, min_total_drop_pct=min_total_drop
-        )
-
-        if not desperate_df.empty:
-            st.success(f"✅ Encontradas {len(desperate_df)} propiedades con múltiples bajadas")
-            st.markdown("#### Top Oportunidades (por Score de Urgencia)")
-
-            disp_df = desperate_df[[
-                'title', 'distrito', 'barrio', 'initial_price', 'current_price',
-                'total_drop', 'total_drop_pct', 'num_drops', 'urgency_score', 'rooms', 'size_sqm',
-            ]].head(20).copy()
-            disp_df.columns = [
-                'Título', 'Distrito', 'Barrio', 'Precio Inicial', 'Precio Actual',
-                'Bajada Total (€)', 'Bajada Total (%)', 'Nº Bajadas', 'Score Urgencia', 'Hab.', 'm²',
-            ]
-            st.dataframe(
-                disp_df, hide_index=True, use_container_width=True, height=500,
-                column_config={
-                    "Precio Inicial": st.column_config.NumberColumn("Precio Inicial", format="€%d", min_value=0),
-                    "Precio Actual": st.column_config.NumberColumn("Precio Actual", format="€%d", min_value=0),
-                    "Bajada Total (€)": st.column_config.NumberColumn("Bajada Total (€)", format="€%d"),
-                    "Bajada Total (%)": st.column_config.NumberColumn("Bajada Total (%)", format="%.1f%%"),
-                    "Score Urgencia": st.column_config.ProgressColumn("Score Urgencia", format="%d", min_value=0, max_value=100),
-                    "m²": st.column_config.NumberColumn("m²", format="%d m²"),
-                },
-            )
-            csv = desperate_df.to_csv(index=False)
-            st.download_button(
-                "📥 Descargar Vendedores Desesperados (CSV)", data=csv,
-                file_name=f"vendedores_desesperados_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime="text/csv",
-            )
-        else:
-            st.info(f"No se encontraron propiedades con ≥{min_drops_filter} bajadas y ≥{min_total_drop}% de bajada total.")
-
-    # =========================================================================
-    # Chollos by barrio
-    # =========================================================================
-    st.markdown("---")
-    st.markdown("#### 💎 Chollos por Barrio")
-    st.caption("Propiedades con precio/m² significativamente inferior a la media del barrio")
-
-    all_active = load_data(status="active", distritos=None, min_price=None, max_price=None, seller_type="All")
-    chollos_df = all_active[
-        (all_active['price'] > 0) & (all_active['size_sqm'] > 0) & (all_active['barrio'].notna())
-    ].copy()
-
-    if not chollos_df.empty and len(chollos_df) > 20:
-        chollos_df['price_per_sqm'] = chollos_df['price'] / chollos_df['size_sqm']
-        barrio_stats2 = chollos_df.groupby('barrio').agg(
-            {'price_per_sqm': ['mean', 'std', 'count']}
-        ).reset_index()
-        barrio_stats2.columns = ['barrio', 'mean_price_sqm', 'std_price_sqm', 'count']
-        barrio_stats2 = barrio_stats2[barrio_stats2['count'] >= 5]
-        chollos_df = chollos_df.merge(barrio_stats2[['barrio', 'mean_price_sqm', 'std_price_sqm']], on='barrio', how='left')
-        chollos_df['z_score'] = (chollos_df['price_per_sqm'] - chollos_df['mean_price_sqm']) / chollos_df['std_price_sqm']
-        chollos = chollos_df[chollos_df['z_score'] < -1.5].copy().sort_values('z_score')
-
-        if not chollos.empty:
-            st.success(f"🎯 Encontrados {len(chollos)} chollos potenciales")
-            top_chollos = chollos.head(20)
-
-            display_chollos = pd.DataFrame({
-                'Título': top_chollos['title'],
-                'Barrio': top_chollos['barrio'],
-                'Precio': top_chollos['price'],
-                'Precio/m²': top_chollos['price_per_sqm'],
-                'Media Barrio': top_chollos['mean_price_sqm'],
-                'Descuento': (top_chollos['mean_price_sqm'] - top_chollos['price_per_sqm']) / top_chollos['mean_price_sqm'],
-                'Habitaciones': top_chollos['rooms'].fillna(0).astype(int),
-                'm²': top_chollos['size_sqm'],
-                'URL': top_chollos['url'],
-            })
-            st.dataframe(
-                display_chollos, hide_index=True, use_container_width=True,
-                column_config={
-                    "Precio": st.column_config.NumberColumn("Precio", format="€%d", min_value=0),
-                    "Precio/m²": st.column_config.NumberColumn("Precio/m²", format="€%d"),
-                    "Media Barrio": st.column_config.NumberColumn("Media Barrio", format="€%d"),
-                    "Descuento": st.column_config.NumberColumn("Descuento", format="%.1f%%"),
-                    "m²": st.column_config.NumberColumn("m²", format="%d m²"),
-                    "URL": st.column_config.LinkColumn("Enlace", display_text="Ver oferta"),
-                },
-            )
-            chollos_by_barrio = chollos.groupby('barrio').size().reset_index(name='Chollos')
-            chollos_by_barrio = chollos_by_barrio.sort_values('Chollos', ascending=False).head(10)
-
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                st.dataframe(chollos_by_barrio, hide_index=True, use_container_width=True)
-            with cc2:
-                fig_ch = px.bar(
-                    chollos_by_barrio, x='Chollos', y='barrio', orientation='h',
-                    title='Top 10 Barrios con Más Chollos',
-                    labels={'Chollos': 'Número de Chollos', 'barrio': 'Barrio'},
-                )
-                fig_ch.update_layout(showlegend=False, height=400)
-                st.plotly_chart(fig_ch, use_container_width=True)
-
-            st.caption("💡 **Criterio**: Propiedades con precio/m² al menos 1.5 σ por debajo de la media del barrio")
-        else:
-            st.info("ℹ️ No se encontraron chollos significativos en este momento")
-    else:
-        st.info("ℹ️ No hay suficientes datos para detectar chollos (mínimo 20 propiedades activas)")
 
     # =========================================================================
     # Data table

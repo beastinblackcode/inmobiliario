@@ -281,9 +281,9 @@ def main():
     # Tabs
     # ------------------------------------------------------------------
     (dashboard_tab, map_tab, prediction_tab, mi_espacio_tab,
-     price_drops_tab, trends_tab, admin_tab) = st.tabs(
+     opportunities_tab, price_drops_tab, trends_tab, admin_tab) = st.tabs(
         ["📊 Dashboard", "🗺️ Mapa", "🔮 Predicción", "🏠 Mi Espacio",
-         "📉 Bajadas de Precio", "📈 Tendencias", "⚙️ Administración"]
+         "🎯 Oportunidades", "📉 Bajadas de Precio", "📈 Tendencias", "⚙️ Administración"]
     )
 
     with dashboard_tab:
@@ -311,6 +311,10 @@ def main():
         with sub_watchlist:
             from tabs.watchlist_tab import render_watchlist_tab
             render_watchlist_tab()
+
+    with opportunities_tab:
+        from tabs.opportunities_tab import render_opportunities_tab
+        render_opportunities_tab(df)
 
     with price_drops_tab:
         from tabs.price_drops_tab import render_price_drops_tab
