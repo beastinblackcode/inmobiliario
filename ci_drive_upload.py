@@ -62,7 +62,7 @@ def main():
         print(f"❌ GOOGLE_SA_CREDENTIALS is not valid JSON: {e}")
         sys.exit(1)
 
-    scopes = ["https://www.googleapis.com/auth/drive.file"]
+    scopes = ["https://www.googleapis.com/auth/drive"]
     creds  = Credentials.from_service_account_info(sa_info, scopes=scopes)
 
     service = build("drive", "v3", credentials=creds)
