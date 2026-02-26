@@ -67,7 +67,32 @@ def main():
 
     service = build("drive", "v3", credentials=creds)
 
-    # ── Upload (resumable, updates existing file) ─────────────────────────────
+    # ── Find or create the file ───────────────────────────────────────────────
+    # Search for real_estate.db in files accessible to the service account
+    try:
+        results = service.files().list(
+            q=f"name='{DB_PATH.name}' and trashed=false",
+            spaces="drive",
+            fields="files(id, name)",
+            pageSize=5,
+        ).execute()
+        found_files = results.get("files", [])
+    except Exception as exc:
+        print(f"⚠ Could not search Drive: {exc}")
+        found_files = []
+
+    # Resolve the actual file ID to use
+    if found_files:
+        actual_file_id = found_files[0]["id"]
+        print(f"  Found existing file: {actual_file_id}")
+        if actual_file_id != file_id:
+            print(f"  ⚠ Note: using found ID ({actual_file_id}) instead of secret ({file_id})")
+            print(f"  → Update your GOOGLE_DRIVE_FILE_ID secret to: {actual_file_id}")
+    else:
+        actual_file_id = None
+        print("  File not found in Drive — will create a new one.")
+
+    # ── Upload ────────────────────────────────────────────────────────────────
     media = MediaFileUpload(
         str(DB_PATH),
         mimetype="application/octet-stream",
@@ -75,15 +100,28 @@ def main():
     )
 
     try:
-        request  = service.files().update(fileId=file_id, media_body=media)
+        if actual_file_id:
+            request = service.files().update(fileId=actual_file_id, media_body=media)
+        else:
+            request = service.files().create(
+                body={"name": DB_PATH.name},
+                media_body=media,
+                fields="id",
+            )
+
         response = None
         while response is None:
             status, response = request.next_chunk()
             if status:
                 print(f"\r  ▶ {int(status.progress() * 100)}%", end="", flush=True)
 
+        result_id = actual_file_id or response.get("id")
         print(f"\r✅ Upload complete ({size_mb:.1f} MB)          ")
-        print(f"   https://drive.google.com/file/d/{file_id}/view")
+        print(f"   https://drive.google.com/file/d/{result_id}/view")
+
+        if not actual_file_id:
+            print(f"\n⚠ New file created. Update your secrets:")
+            print(f"   GOOGLE_DRIVE_FILE_ID = {result_id}")
 
     except Exception as exc:
         print(f"\n❌ Upload failed: {exc}")
