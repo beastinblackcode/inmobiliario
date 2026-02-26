@@ -132,46 +132,12 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
         st.info("No hay datos suficientes de historial de precios para generar el gráfico.")
 
     # =========================================================================
-    # Top barrios by price/m²
+    # Ranking de Barrios (integrado desde ranking_tab)
     # =========================================================================
     st.markdown("---")
-    st.subheader("🏘️ Top Barrios por Precio/m²")
-
-    barrio_df = df[
-        (df['barrio'].notna()) &
-        (df['distrito'].notna()) &
-        (df['price_per_sqm'].notna()) &
-        (df['price_per_sqm'] > 0)
-    ].copy()
-
-    if not barrio_df.empty:
-        barrio_stats = barrio_df.groupby(['distrito', 'barrio']).agg(
-            {'price_per_sqm': ['mean', 'median'], 'listing_id': 'count'}
-        ).reset_index()
-        barrio_stats.columns = ['Distrito', 'Barrio', 'Precio Medio/m²', 'Precio Mediano/m²', 'Cantidad']
-        barrio_stats = barrio_stats[barrio_stats['Cantidad'] >= 3]
-        barrio_stats = barrio_stats.sort_values('Precio Mediano/m²', ascending=False)
-
-        col1, col2 = st.columns(2)
-
-        fmt = {
-            "Precio Medio/m²": st.column_config.NumberColumn("Precio Medio/m²", format="€%d"),
-            "Precio Mediano/m²": st.column_config.NumberColumn("Precio Mediano/m²", format="€%d"),
-        }
-
-        with col1:
-            st.markdown("**🔝 Top 10 Más Caros (por Mediana/m²)**")
-            st.dataframe(
-                barrio_stats.head(10)[['Distrito', 'Barrio', 'Precio Medio/m²', 'Precio Mediano/m²', 'Cantidad']],
-                hide_index=True, use_container_width=True, column_config=fmt,
-            )
-
-        with col2:
-            st.markdown("**💰 Top 10 Más Baratos (por Mediana/m²)**")
-            st.dataframe(
-                barrio_stats.tail(10)[['Distrito', 'Barrio', 'Precio Medio/m²', 'Precio Mediano/m²', 'Cantidad']],
-                hide_index=True, use_container_width=True, column_config=fmt,
-            )
+    with st.expander("🏆 Ranking de Barrios", expanded=False):
+        from tabs.ranking_tab import render_ranking_tab
+        render_ranking_tab()
 
     st.markdown("---")
 
