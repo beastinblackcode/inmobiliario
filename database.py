@@ -2400,6 +2400,189 @@ def get_price_drop_stats() -> Dict:
         }
 
 
+def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
+    """
+    Weekly average €/m² per district, using first_seen_date as the time axis.
+    Returns a flat list of {week, week_label, distrito, avg_sqm, n_listings}.
+    """
+    try:
+        with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    strftime('%Y-%W', first_seen_date)            AS week,
+                    date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
+                    distrito,
+                    ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
+                    COUNT(*) AS n_listings
+                FROM listings
+                WHERE size_sqm > 20
+                  AND price > 50000
+                  AND first_seen_date IS NOT NULL
+                  AND first_seen_date >= date('now', ? || ' days')
+                GROUP BY week, distrito
+                HAVING n_listings >= 3
+                ORDER BY week, distrito
+            """, (f"-{weeks * 7}",))
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"Error getting price trend: {exc}")
+        return []
+
+
+def get_market_summary_trend() -> List[Dict]:
+    """
+    Weekly overall market stats: avg price, avg €/m², new listings, sold/removed.
+    """
+    try:
+        with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT
+                    strftime('%Y-%W', first_seen_date)            AS week,
+                    date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
+                    ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
+                    ROUND(AVG(price), 0)                          AS avg_price,
+                    COUNT(*)                                       AS n_listings
+                FROM listings
+                WHERE size_sqm > 20
+                  AND price > 50000
+                  AND first_seen_date IS NOT NULL
+                GROUP BY week
+                ORDER BY week
+            """)
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"Error getting market summary trend: {exc}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Custom Alerts
+# ---------------------------------------------------------------------------
+
+def init_alerts_table() -> None:
+    """Create custom_alerts table if it doesn't exist."""
+    with get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS custom_alerts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                distritos   TEXT,          -- JSON list, empty = all
+                barrios     TEXT,          -- JSON list, empty = all
+                max_price   INTEGER,
+                min_size    INTEGER,
+                max_sqm_price INTEGER,
+                min_rooms   INTEGER,
+                seller_type TEXT,          -- 'Particular', 'Agencia', or NULL = all
+                active      INTEGER DEFAULT 1,
+                created_at  TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.commit()
+
+
+def get_alerts() -> List[Dict]:
+    """Return all active custom alerts."""
+    try:
+        with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM custom_alerts WHERE active = 1 ORDER BY created_at DESC")
+            return [dict(r) for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def add_alert(name: str, distritos: list = None, barrios: list = None,
+              max_price: int = None, min_size: int = None,
+              max_sqm_price: int = None, min_rooms: int = None,
+              seller_type: str = None) -> int:
+    """Insert a new alert. Returns the new alert ID."""
+    import json
+    with get_connection() as conn:
+        cur = conn.execute("""
+            INSERT INTO custom_alerts
+              (name, distritos, barrios, max_price, min_size, max_sqm_price, min_rooms, seller_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            name,
+            json.dumps(distritos or []),
+            json.dumps(barrios or []),
+            max_price,
+            min_size,
+            max_sqm_price,
+            min_rooms,
+            seller_type,
+        ))
+        conn.commit()
+        return cur.lastrowid
+
+
+def delete_alert(alert_id: int) -> None:
+    """Soft-delete an alert."""
+    with get_connection() as conn:
+        conn.execute("UPDATE custom_alerts SET active = 0 WHERE id = ?", (alert_id,))
+        conn.commit()
+
+
+def get_alert_matches(alert: Dict, hours: int = 24) -> List[Dict]:
+    """
+    Return listings added in the last N hours that match the given alert criteria.
+    """
+    import json
+    try:
+        distritos = json.loads(alert.get("distritos") or "[]")
+        barrios   = json.loads(alert.get("barrios")   or "[]")
+
+        conditions = ["first_seen_date >= datetime('now', ? || ' hours')", "status = 'active'"]
+        params: List = [f"-{hours}"]
+
+        if distritos:
+            placeholders = ",".join("?" * len(distritos))
+            conditions.append(f"distrito IN ({placeholders})")
+            params.extend(distritos)
+        if barrios:
+            placeholders = ",".join("?" * len(barrios))
+            conditions.append(f"barrio IN ({placeholders})")
+            params.extend(barrios)
+        if alert.get("max_price"):
+            conditions.append("price <= ?")
+            params.append(alert["max_price"])
+        if alert.get("min_size"):
+            conditions.append("size_sqm >= ?")
+            params.append(alert["min_size"])
+        if alert.get("max_sqm_price"):
+            conditions.append("CAST(price AS FLOAT) / NULLIF(size_sqm, 0) <= ?")
+            params.append(alert["max_sqm_price"])
+        if alert.get("min_rooms"):
+            conditions.append("rooms >= ?")
+            params.append(alert["min_rooms"])
+        if alert.get("seller_type"):
+            conditions.append("seller_type = ?")
+            params.append(alert["seller_type"])
+
+        where = " AND ".join(conditions)
+        with get_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(f"""
+                SELECT listing_id, title, price, size_sqm, rooms,
+                       barrio, distrito, seller_type, url,
+                       ROUND(CAST(price AS FLOAT) / NULLIF(size_sqm, 0), 0) AS price_sqm
+                FROM listings
+                WHERE {where}
+                ORDER BY price ASC
+                LIMIT 20
+            """, params)
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as exc:
+        print(f"Error checking alert matches: {exc}")
+        return []
+
+
 if __name__ == "__main__":
     # Initialize database when run directly
     init_database()

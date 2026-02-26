@@ -206,6 +206,7 @@ def build_html_report(
     alerts: List[Dict],
     new_opportunities: List[Dict] = None,
     watchlist_drops: List[Dict] = None,
+    custom_alert_hits: List[Dict] = None,
 ) -> str:
     today     = datetime.now().strftime("%d/%m/%Y")
     score_val = score.get("score", 0)
@@ -313,6 +314,53 @@ def build_html_report(
     else:
         watchlist_html = ""
 
+    # ── Custom alerts section ─────────────────────────────────────────────────
+    hits = custom_alert_hits or []
+    if hits:
+        alert_blocks = ""
+        for hit in hits:
+            al      = hit["alert"]
+            matches = hit["matches"][:5]
+            rows_html = ""
+            for m in matches:
+                sqm   = f"€{m['price_sqm']:,.0f}/m²" if m.get("price_sqm") else "—"
+                size  = f"{m['size_sqm']}m²" if m.get("size_sqm") else "—"
+                url   = m.get("url", "#")
+                title = (m.get("title") or "—")[:50]
+                rows_html += f"""
+                <tr style='border-bottom:1px solid #e8f5e9;'>
+                  <td style='padding:8px 12px;font-size:13px;'>
+                    <a href='{url}' style='color:#2e7d32;text-decoration:none;'>{title}</a><br>
+                    <small style='color:#888;'>{m.get('barrio','—')} · {size} · {al.get('seller_type') or ''}</small>
+                  </td>
+                  <td style='padding:8px 12px;text-align:right;font-size:13px;font-weight:bold;'>€{m['price']:,}</td>
+                  <td style='padding:8px 12px;text-align:right;font-size:13px;color:#555;'>{sqm}</td>
+                </tr>"""
+            alert_blocks += f"""
+            <div style='margin-bottom:16px;'>
+              <p style='margin:0 0 8px;font-weight:700;font-size:14px;color:#1b5e20;'>🔔 {al['name']}</p>
+              <table style='width:100%;border-collapse:collapse;'>
+                <thead>
+                  <tr style='background:#e8f5e9;'>
+                    <th style='padding:8px 12px;text-align:left;font-size:11px;color:#555;'>Propiedad</th>
+                    <th style='padding:8px 12px;text-align:right;font-size:11px;color:#555;'>Precio</th>
+                    <th style='padding:8px 12px;text-align:right;font-size:11px;color:#555;'>€/m²</th>
+                  </tr>
+                </thead>
+                <tbody>{rows_html}</tbody>
+              </table>
+              <p style='margin:4px 0 0;font-size:11px;color:#aaa;'>{len(hit['matches'])} coincidencias en las últimas 24h</p>
+            </div>"""
+
+        custom_alerts_html = f"""
+        <div style='background:#f1f8e9;border-left:4px solid #2e7d32;border-radius:6px;padding:16px 20px;margin:24px 0 0;'>
+          <p style='margin:0 0 4px;font-weight:700;font-size:15px;color:#1b5e20;'>🔔 Tus Alertas Personalizadas</p>
+          <p style='margin:0 0 12px;color:#388e3c;font-size:12px;'>Nuevas propiedades en las últimas 24h que coinciden con tus criterios</p>
+        </div>
+        {alert_blocks}"""
+    else:
+        custom_alerts_html = ""
+
     # ── Chollos section ──────────────────────────────────────────────────────
     chollos_rows = "".join(_chol_row(i + 1, c) for i, c in enumerate(chollos[:10]))
     chollos_html = f"""
@@ -394,6 +442,7 @@ def build_html_report(
 
   <!-- WATCHLIST DROPS -->
   <tr><td style='padding:0 32px;'>{watchlist_html}</td></tr>
+  <tr><td style='padding:0 32px;'>{custom_alerts_html}</td></tr>
 
   <!-- KPIs -->
   <tr><td style='padding:8px 32px 0;'>
@@ -493,6 +542,9 @@ def send_daily_report() -> bool:
             get_rental_yields,
             get_new_opportunity_listings,
             get_watchlist_price_drops,
+            get_alerts,
+            get_alert_matches,
+            init_alerts_table,
         )
 
         # Gather data
@@ -528,10 +580,20 @@ def send_daily_report() -> bool:
         new_opps         = get_new_opportunity_listings(hours=24, min_score=70)
         wl_drops         = get_watchlist_price_drops(since_days=1)
 
+        # Custom alerts: gather matches for each active alert
+        init_alerts_table()
+        custom_alerts      = get_alerts()
+        custom_alert_hits  = []
+        for alert in custom_alerts:
+            matches = get_alert_matches(alert, hours=24)
+            if matches:
+                custom_alert_hits.append({"alert": alert, "matches": matches})
+
         # Build & send
         html    = build_html_report(score, indicators, macro, chollos, yields, alerts,
                                     new_opportunities=new_opps,
-                                    watchlist_drops=wl_drops)
+                                    watchlist_drops=wl_drops,
+                                    custom_alert_hits=custom_alert_hits)
         today   = datetime.now().strftime("%d/%m/%Y")
         subject = (
             f"📊 Mercado Madrid {today} — Score {score.get('score', '?')}/100 "
