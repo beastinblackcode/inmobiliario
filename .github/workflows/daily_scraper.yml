@@ -56,9 +56,7 @@ jobs:
       # ── 6. Email diario (opcional) ───────────────────────────────────────────
       - name: Send daily email report
         env:
-          EMAIL_PASSWORD:    ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENTS:  ${{ secrets.EMAIL_RECIPIENTS }}
-          EMAIL_SENDER:      ${{ secrets.EMAIL_SENDER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python email_report.py
         continue-on-error: true    # No bloquear el pipeline si el email falla
 
