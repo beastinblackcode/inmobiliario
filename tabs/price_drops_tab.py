@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from database import get_price_drop_stats
+from database import get_price_drop_stats, get_price_trend_by_district
 
 
 def render_price_drops_tab():
@@ -225,3 +225,34 @@ def render_price_drops_tab():
             paper_bgcolor="rgba(0,0,0,0)",
         )
         st.plotly_chart(fig_sc, use_container_width=True)
+
+    # ── Heatmap €/m² por distrito y semana ───────────────────────────────────
+    st.markdown("---")
+    st.subheader("🗓️ Evolución semanal €/m² por distrito")
+    st.caption("Contexto de tendencia de precios por zona para interpretar mejor las bajadas.")
+
+    trend_data = get_price_trend_by_district()
+    if trend_data:
+        df_trend = pd.DataFrame(trend_data)
+        pivot = df_trend.pivot_table(
+            index="distrito", columns="week_start", values="avg_sqm", aggfunc="mean"
+        )
+        if not pivot.empty:
+            fig_heat = go.Figure(go.Heatmap(
+                z=pivot.values,
+                x=[str(c)[:10] for c in pivot.columns],
+                y=list(pivot.index),
+                colorscale="RdYlGn_r",
+                hoverongaps=False,
+                hovertemplate="<b>%{y}</b><br>Semana: %{x}<br>€/m²: %{z:,.0f}<extra></extra>",
+                colorbar=dict(title="€/m²"),
+            ))
+            fig_heat.update_layout(
+                height=500,
+                margin=dict(t=20, b=40),
+                xaxis_title="Semana",
+                yaxis_title="Distrito",
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)

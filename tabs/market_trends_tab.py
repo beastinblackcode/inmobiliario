@@ -49,20 +49,15 @@ def render_market_trends_tab():
         last_price = df_market.iloc[-1]["avg_price"] if len(df_market) else 0
         n_weeks    = len(df_market)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("€/m² actual (media Madrid)", f"€{last_sqm:,.0f}")
-    c2.metric(
-        f"Variación ({n_weeks} semanas)",
-        f"{change_pct:+.1f}%",
-        delta=f"{'↑ sube' if change_pct > 0 else '↓ baja'}",
+    c1, c2 = st.columns(2)
+    c1.metric(
+        "€/m² actual (media Madrid)",
+        f"€{last_sqm:,.0f}",
+        f"{change_pct:+.1f}% en {n_weeks} semanas",
         delta_color="inverse",
     )
-    c3.metric("Precio medio actual", f"€{last_price:,.0f}")
-    c4.metric(
-        f"Variación precio ({n_weeks} sem.)",
-        f"{price_chg:+.1f}%",
-        delta_color="inverse",
-    )
+    direction = "↑ subiendo" if change_pct > 1 else ("↓ bajando" if change_pct < -1 else "→ estable")
+    c2.metric("Tendencia del mercado", direction, f"desde €{df_market.iloc[0]['avg_sqm']:,.0f}/m²")
 
     st.markdown("---")
 
@@ -180,22 +175,3 @@ def render_market_trends_tab():
         df_sum = pd.DataFrame(summary_rows).drop(columns=["slope"])
         st.dataframe(df_sum, use_container_width=True, hide_index=True)
 
-    # ── Heatmap: distrito vs semana ────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("🔥 Mapa de calor — €/m² por distrito y semana")
-
-    pivot = df_district.pivot_table(
-        index="distrito", columns="week_start", values="avg_sqm", aggfunc="mean"
-    )
-    if not pivot.empty:
-        fig_heat = px.imshow(
-            pivot,
-            color_continuous_scale="RdYlGn_r",
-            labels=dict(x="Semana", y="Distrito", color="€/m²"),
-            aspect="auto",
-        )
-        fig_heat.update_layout(
-            height=500,
-            margin=dict(t=20, b=40),
-        )
-        st.plotly_chart(fig_heat, use_container_width=True)
