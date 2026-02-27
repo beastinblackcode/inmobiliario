@@ -27,9 +27,12 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
     # ── Top 20 Mejores Oportunidades ──────────────────────────────────────────
     st.subheader("🏆 Top 20 Mejores Oportunidades (Score Calidad-Precio)")
     st.info(
-        "**Score de Calidad-Precio (0-100):** "
-        "Precio/m² vs promedio del distrito (40%) · "
-        "Tamaño (20%) · Vendedor (10%) · Días en mercado (15%) · Orientación (15%)"
+        "**Score de Oportunidad (0-100):** "
+        "€/m² vs media del barrio (35%) · "
+        "€/m² vs media del distrito (15%) · "
+        "Historial de bajadas de precio (25%) · "
+        "Días en mercado (15%) · "
+        "Vendedor particular (10%)"
     )
 
     df_ranked = rank_opportunities(active_df)

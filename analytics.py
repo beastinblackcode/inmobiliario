@@ -163,6 +163,20 @@ def get_velocity_metrics(df: pd.DataFrame) -> Dict:
     }
 
 
+def calculate_barrio_stats(df: pd.DataFrame) -> Dict:
+    """Calculate avg price/m² by barrio (min 5 listings for reliability)."""
+    if df.empty:
+        return {}
+    stats = {}
+    for barrio in df['barrio'].unique():
+        if pd.isna(barrio):
+            continue
+        barrio_df = df[(df['barrio'] == barrio) & df['price_per_sqm'].notna()]
+        if len(barrio_df) >= 5:
+            stats[barrio] = {'avg_price_sqm': barrio_df['price_per_sqm'].mean()}
+    return stats
+
+
 def calculate_distrito_stats(df: pd.DataFrame) -> Dict:
     """
     Calculate statistics by distrito.
@@ -195,136 +209,198 @@ def calculate_distrito_stats(df: pd.DataFrame) -> Dict:
     return stats
 
 
-def calculate_quality_score(row, distrito_stats: Dict) -> float:
+def calculate_quality_score(row, distrito_stats: Dict, barrio_stats: Dict) -> float:
     """
-    Calculate quality-price score (0-100).
-    
-    Factors:
-    - Price/m² vs distrito average (40%)
-    - Size (20%)
-    - Seller type (10%)
-    - Days on market (15%)
-    - Orientation (15%)
-    
-    Returns:
-        Score from 0-100 (higher is better value)
+    Calculate opportunity score (0-100). Higher = better deal.
+
+    Weights:
+    - €/m² vs barrio average   35 pts  (falls back to distrito if barrio unavailable)
+    - €/m² vs distrito average 15 pts
+    - Price drop history        25 pts  (num_drops + total magnitude)
+    - Days on market            15 pts  (negotiation pressure)
+    - Seller type (particular)  10 pts
     """
-    score = 50.0  # Base score
-    
-    # Price/m² comparison (lower is better - 40 points max)
-    if pd.notna(row.get('price_per_sqm')) and row.get('distrito') in distrito_stats:
-        avg_price_sqm = distrito_stats[row['distrito']]['avg_price_sqm']
-        
-        if avg_price_sqm > 0:
-            price_ratio = row['price_per_sqm'] / avg_price_sqm
-            
-            if price_ratio < 0.7:  # 30% below average - excellent
-                score += 20
-            elif price_ratio < 0.8:  # 20% below average
-                score += 15
-            elif price_ratio < 0.9:  # 10% below average
-                score += 10
-            elif price_ratio < 1.0:  # Below average
-                score += 5
-            elif price_ratio > 1.3:  # 30% above average
+    score = 0.0
+
+    sqm = row.get('price_per_sqm')
+
+    # ── 1. €/m² vs BARRIO (35 pts) ───────────────────────────────────────────
+    barrio = row.get('barrio')
+    if pd.notna(sqm) and barrio in barrio_stats:
+        avg = barrio_stats[barrio]['avg_price_sqm']
+        if avg > 0:
+            ratio = sqm / avg
+            if ratio < 0.70:
+                score += 35
+            elif ratio < 0.80:
+                score += 28
+            elif ratio < 0.90:
+                score += 18
+            elif ratio < 1.00:
+                score += 8
+            elif ratio > 1.30:
                 score -= 20
-            elif price_ratio > 1.2:  # 20% above average
-                score -= 15
-            elif price_ratio > 1.1:  # 10% above average
+            elif ratio > 1.20:
+                score -= 12
+            elif ratio > 1.10:
+                score -= 5
+    elif pd.notna(sqm) and row.get('distrito') in distrito_stats:
+        # Fallback: use distrito stats scaled to barrio weight
+        avg = distrito_stats[row['distrito']]['avg_price_sqm']
+        if avg > 0:
+            ratio = sqm / avg
+            if ratio < 0.70:
+                score += 35
+            elif ratio < 0.80:
+                score += 28
+            elif ratio < 0.90:
+                score += 18
+            elif ratio < 1.00:
+                score += 8
+            elif ratio > 1.30:
+                score -= 20
+            elif ratio > 1.20:
+                score -= 12
+            elif ratio > 1.10:
+                score -= 5
+
+    # ── 2. €/m² vs DISTRITO (15 pts) ─────────────────────────────────────────
+    if pd.notna(sqm) and row.get('distrito') in distrito_stats:
+        avg = distrito_stats[row['distrito']]['avg_price_sqm']
+        if avg > 0:
+            ratio = sqm / avg
+            if ratio < 0.70:
+                score += 15
+            elif ratio < 0.80:
+                score += 12
+            elif ratio < 0.90:
+                score += 8
+            elif ratio < 1.00:
+                score += 3
+            elif ratio > 1.30:
                 score -= 10
-    
-    # Size bonus (larger is better - 20 points max)
-    if pd.notna(row.get('size_sqm')):
-        if row['size_sqm'] > 120:
-            score += 10
-        elif row['size_sqm'] > 100:
-            score += 8
-        elif row['size_sqm'] > 80:
-            score += 5
-        elif row['size_sqm'] < 40:
-            score -= 5
-    
-    # Seller type (Particular often better deals - 10 points max)
+            elif ratio > 1.20:
+                score -= 6
+            elif ratio > 1.10:
+                score -= 3
+
+    # ── 3. Historial de bajadas (25 pts) ──────────────────────────────────────
+    num_drops = row.get('num_drops', 0) or 0
+    total_drop_pct = abs(row.get('total_drop_pct', 0) or 0)
+
+    if num_drops >= 3:
+        score += 20
+    elif num_drops == 2:
+        score += 13
+    elif num_drops == 1:
+        score += 6
+
+    # Bonus por magnitud acumulada
+    if total_drop_pct >= 15:
+        score += 5
+    elif total_drop_pct >= 8:
+        score += 3
+    elif total_drop_pct >= 4:
+        score += 1
+
+    # ── 4. Días en mercado (15 pts) ───────────────────────────────────────────
+    dom = row.get('days_on_market', 0) or 0
+    if dom > 120:
+        score += 15
+    elif dom > 90:
+        score += 12
+    elif dom > 60:
+        score += 8
+    elif dom > 30:
+        score += 4
+
+    # ── 5. Tipo de vendedor (10 pts) ──────────────────────────────────────────
     if row.get('seller_type') == 'Particular':
         score += 10
-    
-    # Days on market (longer = more negotiable - 15 points max)
-    if pd.notna(row.get('days_on_market')):
-        if row['days_on_market'] > 90:
-            score += 15
-        elif row['days_on_market'] > 60:
-            score += 10
-        elif row['days_on_market'] > 30:
-            score += 5
-    
-    # Orientation (Exterior is better - 15 points max)
-    if row.get('orientation') == 'Exterior':
-        score += 15
-    elif row.get('orientation') == 'Interior':
-        score += 5
-    
-    # Rooms (more rooms = more value - 5 points max)
-    if pd.notna(row.get('rooms')):
-        if row['rooms'] >= 3:
-            score += 5
-        elif row['rooms'] >= 2:
-            score += 3
-    
+
     return min(100.0, max(0.0, score))
 
 
 def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Rank properties by quality-price ratio.
-    
-    Returns:
-        DataFrame sorted by quality score (descending)
+    Rank properties by opportunity score (0-100).
+
+    Score weights:
+    - €/m² vs barrio avg   35%
+    - €/m² vs distrito avg 15%
+    - Price drop history   25%
+    - Days on market       15%
+    - Seller type          10%
     """
     if df.empty:
         return df
-    
+
     df_copy = df.copy()
-    
-    # Filter out unrealistic property sizes (likely data errors)
+
+    # Filter out unrealistic sizes
     df_copy = df_copy[df_copy['size_sqm'] >= 10]
-    
-    # Calculate derived metrics
+
     df_copy['days_on_market'] = df_copy.apply(calculate_days_on_market, axis=1)
-    
+
     if 'price_per_sqm' not in df_copy.columns:
         df_copy['price_per_sqm'] = df_copy.apply(
-            lambda row: row['price'] / row['size_sqm'] if pd.notna(row.get('size_sqm')) and row.get('size_sqm') > 0 else None,
-            axis=1
+            lambda row: row['price'] / row['size_sqm']
+            if pd.notna(row.get('size_sqm')) and row.get('size_sqm') > 0 else None,
+            axis=1,
         )
-    
-    # Filter out extreme price outliers (2,000 - 50,000 €/m²)
+
     df_copy = df_copy[
         df_copy['price_per_sqm'].notna() &
         (df_copy['price_per_sqm'] >= 2000) &
         (df_copy['price_per_sqm'] <= 50000)
     ]
-    
+
     if df_copy.empty:
         return df_copy
-    
-    
-    # Calculate distrito stats
+
+    # ── Enrich with price-drop history ───────────────────────────────────────
+    try:
+        from database import get_connection
+        with get_connection() as conn:
+            drop_df = pd.read_sql_query(
+                """
+                SELECT
+                    listing_id,
+                    COUNT(*) AS num_drops,
+                    SUM(ABS(change_percent)) AS total_drop_pct
+                FROM price_history
+                WHERE change_amount < 0
+                GROUP BY listing_id
+                """,
+                conn,
+            )
+        df_copy = df_copy.merge(drop_df, on='listing_id', how='left')
+        df_copy['num_drops'] = df_copy['num_drops'].fillna(0).astype(int)
+        df_copy['total_drop_pct'] = df_copy['total_drop_pct'].fillna(0.0)
+    except Exception:
+        df_copy['num_drops'] = 0
+        df_copy['total_drop_pct'] = 0.0
+
+    # ── Reference stats ───────────────────────────────────────────────────────
     distrito_stats = calculate_distrito_stats(df_copy)
-    
-    # Calculate quality score
+    barrio_stats   = calculate_barrio_stats(df_copy)
+
+    # ── Score ─────────────────────────────────────────────────────────────────
     df_copy['quality_score'] = df_copy.apply(
-        lambda row: calculate_quality_score(row, distrito_stats),
-        axis=1
+        lambda row: calculate_quality_score(row, distrito_stats, barrio_stats),
+        axis=1,
     )
-    
-    # Calculate vs distrito average
+
+    # ── vs distrito % (for display) ───────────────────────────────────────────
     df_copy['vs_distrito_avg'] = df_copy.apply(
         lambda row: ((row['price_per_sqm'] / distrito_stats[row['distrito']]['avg_price_sqm'] - 1) * 100)
-        if row['distrito'] in distrito_stats and pd.notna(row.get('price_per_sqm')) and distrito_stats[row['distrito']]['avg_price_sqm'] > 0
+        if row.get('distrito') in distrito_stats
+        and pd.notna(row.get('price_per_sqm'))
+        and distrito_stats[row['distrito']]['avg_price_sqm'] > 0
         else 0,
-        axis=1
+        axis=1,
     )
-    
+
     return df_copy.sort_values('quality_score', ascending=False)
 
 
