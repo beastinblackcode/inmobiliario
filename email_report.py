@@ -202,7 +202,6 @@ def build_html_report(
     indicators: Dict,
     macro: Dict,
     chollos: List[Dict],
-    yields: List[Dict],
     alerts: List[Dict],
     new_opportunities: List[Dict] = None,
     watchlist_drops: List[Dict] = None,
@@ -385,27 +384,6 @@ def build_html_report(
           Sin chollos destacados hoy (se necesitan ≥2 bajadas de precio por propiedad).
         </p>"""
 
-    # ── Yields section ───────────────────────────────────────────────────────
-    yield_rows = "".join(_yield_row(i + 1, r) for i, r in enumerate(yields[:10]))
-    yields_html = f"""
-        <h2 style='color:#1b7f3a;font-size:17px;margin:32px 0 12px;'>
-          🏘️ Top 10 Barrios por Rentabilidad Bruta
-        </h2>
-        <table style='width:100%;border-collapse:collapse;font-family:Arial,sans-serif;'>
-          <thead>
-            <tr style='background:#f5f5f5;'>
-              <th style='padding:8px 12px;text-align:left;font-size:12px;color:#888;'>Barrio</th>
-              <th style='padding:8px 12px;text-align:left;font-size:12px;color:#888;'>Distrito</th>
-              <th style='padding:8px 12px;text-align:right;font-size:12px;color:#888;'>Rentabilidad</th>
-              <th style='padding:8px 12px;text-align:right;font-size:12px;color:#888;'>Alquiler med.</th>
-              <th style='padding:8px 12px;text-align:right;font-size:12px;color:#888;'>Venta med.</th>
-            </tr>
-          </thead>
-          <tbody>{yield_rows}</tbody>
-        </table>""" if yields else """
-        <p style='color:#aaa;font-style:italic;font-size:13px;'>
-          Sin datos de rentabilidad todavía — se poblarán tras el primer scrape completo.
-        </p>"""
 
     # ── Full HTML ────────────────────────────────────────────────────────────
     return f"""<!DOCTYPE html>
@@ -455,8 +433,6 @@ def build_html_report(
   <!-- CHOLLOS -->
   <tr><td style='padding:0 32px;'>{chollos_html}</td></tr>
 
-  <!-- YIELDS -->
-  <tr><td style='padding:0 32px;'>{yields_html}</td></tr>
 
   <!-- FOOTER -->
   <tr><td style='background:#f9f9f9;padding:20px 32px;text-align:center;border-top:1px solid #eee;margin-top:32px;'>
@@ -539,7 +515,6 @@ def send_daily_report() -> bool:
         from macro_data import get_all_macro_data, get_euribor_data, get_paro_data
         from database import (
             get_properties_with_multiple_drops,
-            get_rental_yields,
             get_new_opportunity_listings,
             get_watchlist_price_drops,
             get_alerts,
@@ -576,7 +551,6 @@ def send_daily_report() -> bool:
         )
 
         chollos          = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
-        yields           = get_rental_yields(min_listings=3)
         new_opps         = get_new_opportunity_listings(hours=24, min_score=70)
         wl_drops         = get_watchlist_price_drops(since_days=1)
 
@@ -590,7 +564,7 @@ def send_daily_report() -> bool:
                 custom_alert_hits.append({"alert": alert, "matches": matches})
 
         # Build & send
-        html    = build_html_report(score, indicators, macro, chollos, yields, alerts,
+        html    = build_html_report(score, indicators, macro, chollos, alerts,
                                     new_opportunities=new_opps,
                                     watchlist_drops=wl_drops,
                                     custom_alert_hits=custom_alert_hits)
@@ -623,8 +597,7 @@ if __name__ == "__main__":
             from macro_data import get_all_macro_data, get_euribor_data, get_paro_data
             from database import (
                 get_properties_with_multiple_drops,
-                get_rental_yields,
-                get_new_opportunity_listings,
+                    get_new_opportunity_listings,
                 get_watchlist_price_drops,
             )
 
@@ -653,10 +626,9 @@ if __name__ == "__main__":
                 macro         = macro,
             )
             chollos  = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
-            yields   = get_rental_yields(min_listings=3)
             new_opps = get_new_opportunity_listings(hours=24, min_score=70)
             wl_drops = get_watchlist_price_drops(since_days=1)
-            html     = build_html_report(score, indicators, macro, chollos, yields, alerts,
+            html     = build_html_report(score, indicators, macro, chollos, alerts,
                                          new_opportunities=new_opps,
                                          watchlist_drops=wl_drops)
 
