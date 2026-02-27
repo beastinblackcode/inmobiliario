@@ -75,7 +75,7 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
     st.subheader("💎 Gangas por Distrito")
     st.info("Propiedades con precio/m² **15% o más por debajo** del promedio de su distrito.")
 
-    bargains = identify_bargains(active_df, threshold=-15.0)
+    bargains = identify_bargains(active_df[active_df["price"] < 500_000], threshold=-15.0)
 
     if not bargains.empty:
         st.success(f"✨ {len(bargains)} gangas potenciales encontradas")
@@ -130,6 +130,8 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
     desperate_df = get_desperate_sellers_dataframe(
         min_drops=min_drops_filter, min_total_drop_pct=min_total_drop
     )
+    if not desperate_df.empty:
+        desperate_df = desperate_df[desperate_df["current_price"] < 500_000]
 
     if not desperate_df.empty:
         st.success(f"✅ {len(desperate_df)} propiedades con múltiples bajadas")
