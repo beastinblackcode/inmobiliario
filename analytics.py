@@ -633,3 +633,88 @@ def get_price_history_summary() -> Dict:
             'avg_drop_percent': round(avg_drop, 2),
             'avg_increase_percent': round(avg_increase, 2)
         }
+
+
+def explain_score(row: dict, distrito_stats: Dict, barrio_stats: Dict) -> List[Dict]:
+    """
+    Return a breakdown of score factors for a single property row.
+    Each factor: {label, points, max_points, description}
+    """
+    breakdown = []
+    sqm = row.get('price_per_sqm')
+
+    # ── 1. €/m² vs barrio ────────────────────────────────────────────────────
+    barrio = row.get('barrio')
+    pts = 0
+    ref = "sin datos de barrio"
+    if pd.notna(sqm) and barrio in barrio_stats:
+        avg = barrio_stats[barrio]['avg_price_sqm']
+        ratio = sqm / avg if avg > 0 else 1
+        ref = f"media barrio: €{avg:,.0f}/m²"
+        if ratio < 0.70:   pts = 35
+        elif ratio < 0.80: pts = 28
+        elif ratio < 0.90: pts = 18
+        elif ratio < 1.00: pts = 8
+        elif ratio > 1.30: pts = -20
+        elif ratio > 1.20: pts = -12
+        elif ratio > 1.10: pts = -5
+        desc = f"{(ratio-1)*100:+.1f}% vs {ref}"
+    elif pd.notna(sqm) and row.get('distrito') in distrito_stats:
+        avg = distrito_stats[row['distrito']]['avg_price_sqm']
+        ratio = sqm / avg if avg > 0 else 1
+        ref = f"media distrito (fallback): €{avg:,.0f}/m²"
+        if ratio < 0.70:   pts = 35
+        elif ratio < 0.80: pts = 28
+        elif ratio < 0.90: pts = 18
+        elif ratio < 1.00: pts = 8
+        elif ratio > 1.30: pts = -20
+        elif ratio > 1.20: pts = -12
+        elif ratio > 1.10: pts = -5
+        desc = f"{(ratio-1)*100:+.1f}% vs {ref}"
+    else:
+        desc = "sin referencia de barrio/distrito"
+    breakdown.append({"label": "€/m² vs barrio", "points": pts, "max_points": 35, "description": desc})
+
+    # ── 2. €/m² vs distrito ──────────────────────────────────────────────────
+    pts = 0
+    if pd.notna(sqm) and row.get('distrito') in distrito_stats:
+        avg = distrito_stats[row['distrito']]['avg_price_sqm']
+        ratio = sqm / avg if avg > 0 else 1
+        if ratio < 0.70:   pts = 15
+        elif ratio < 0.80: pts = 12
+        elif ratio < 0.90: pts = 8
+        elif ratio < 1.00: pts = 3
+        elif ratio > 1.30: pts = -10
+        elif ratio > 1.20: pts = -6
+        elif ratio > 1.10: pts = -3
+        desc = f"{(ratio-1)*100:+.1f}% vs media distrito €{avg:,.0f}/m²"
+    else:
+        desc = "sin datos de distrito"
+    breakdown.append({"label": "€/m² vs distrito", "points": pts, "max_points": 15, "description": desc})
+
+    # ── 3. Historial de bajadas ───────────────────────────────────────────────
+    num_drops = int(row.get('num_drops', 0) or 0)
+    total_drop_pct = abs(float(row.get('total_drop_pct', 0) or 0))
+    pts_drops = 20 if num_drops >= 3 else (13 if num_drops == 2 else (6 if num_drops == 1 else 0))
+    pts_mag   = 5 if total_drop_pct >= 15 else (3 if total_drop_pct >= 8 else (1 if total_drop_pct >= 4 else 0))
+    pts = pts_drops + pts_mag
+    desc = f"{num_drops} bajada{'s' if num_drops != 1 else ''}, {total_drop_pct:.1f}% acumulado"
+    breakdown.append({"label": "Historial bajadas", "points": pts, "max_points": 25, "description": desc})
+
+    # ── 4. Días en mercado ────────────────────────────────────────────────────
+    dom = int(row.get('days_on_market', 0) or 0)
+    if dom > 120:   pts = 15
+    elif dom > 90:  pts = 12
+    elif dom > 60:  pts = 8
+    elif dom > 30:  pts = 4
+    else:           pts = 0
+    breakdown.append({"label": "Días en mercado", "points": pts, "max_points": 15,
+                      "description": f"{dom} días publicado"})
+
+    # ── 5. Tipo de vendedor ───────────────────────────────────────────────────
+    seller = row.get('seller_type', '')
+    pts = 10 if seller == 'Particular' else 0
+    breakdown.append({"label": "Vendedor", "points": pts, "max_points": 10,
+                      "description": seller or "desconocido"})
+
+    return breakdown
