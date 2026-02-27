@@ -35,7 +35,7 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
         "Vendedor particular (10%)"
     )
 
-    df_ranked = rank_opportunities(active_df)
+    df_ranked = rank_opportunities(active_df[active_df["price"] < 500_000])
 
     if not df_ranked.empty:
         for _, row in df_ranked.head(20).iterrows():
