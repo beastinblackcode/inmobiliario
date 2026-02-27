@@ -425,44 +425,46 @@ def identify_bargains(df: pd.DataFrame, threshold: float = -15.0) -> pd.DataFram
 
 def get_new_vs_sold_trends(df: pd.DataFrame, days: int = 30) -> Dict:
     """
-    Get new vs sold trends for last N days.
-    
-    Returns:
-        Dictionary with daily counts
+    Get new vs sold/removed trends for last N days.
+    - New: properties first seen on each date (from active df)
+    - Sold/removed: properties whose last_seen_date falls on each date
+      with status sold_removed (queried directly from DB to avoid active-only filter)
     """
     if df.empty:
         return {'dates': [], 'new': [], 'sold': []}
-    
-    df_copy = df.copy()
-    df_copy['first_seen_dt'] = pd.to_datetime(df_copy['first_seen_date'])
-    df_copy['last_seen_dt'] = pd.to_datetime(df_copy['last_seen_date'])
-    
-    # Last N days
+
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
-    
-    # Count new and sold by day
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')
-    
-    new_counts = []
-    sold_counts = []
-    
-    for date in date_range:
-        new_count = len(df_copy[df_copy['first_seen_dt'].dt.date == date.date()])
-        # Filter out initial historical data - only count real sales during tracking period
-        sold_count = len(df_copy[
-            (df_copy['status'] == 'sold_removed') & 
-            (df_copy['first_seen_date'] > '2026-01-14') &
-            (df_copy['last_seen_dt'].dt.date == date.date())
-        ])
-        
-        new_counts.append(new_count)
-        sold_counts.append(sold_count)
-    
+
+    # New listings: from the active df passed in
+    df_copy = df.copy()
+    df_copy['first_seen_dt'] = pd.to_datetime(df_copy['first_seen_date'])
+    new_by_date = df_copy.groupby(df_copy['first_seen_dt'].dt.date).size()
+
+    # Sold/removed: must query DB directly (active-only df misses these)
+    try:
+        from database import get_connection
+        with get_connection() as conn:
+            sold_df = pd.read_sql_query(
+                """SELECT last_seen_date FROM listings
+                   WHERE status = 'sold_removed'
+                     AND last_seen_date >= ?""",
+                conn,
+                params=(start_date.strftime('%Y-%m-%d'),),
+            )
+        sold_df['last_seen_dt'] = pd.to_datetime(sold_df['last_seen_date']).dt.date
+        sold_by_date = sold_df.groupby('last_seen_dt').size()
+    except Exception:
+        sold_by_date = pd.Series(dtype=int)
+
+    new_counts  = [int(new_by_date.get(d.date(), 0))  for d in date_range]
+    sold_counts = [int(sold_by_date.get(d.date(), 0)) for d in date_range]
+
     return {
         'dates': [d.strftime('%Y-%m-%d') for d in date_range],
-        'new': new_counts,
-        'sold': sold_counts
+        'new':   new_counts,
+        'sold':  sold_counts,
     }
 
 
