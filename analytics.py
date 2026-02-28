@@ -720,3 +720,176 @@ def explain_score(row: dict, distrito_stats: Dict, barrio_stats: Dict) -> List[D
                       "description": seller or "desconocido"})
 
     return breakdown
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FAIR-PRICE ESTIMATOR  (Comparables + Characteristic Adjustments)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _floor_adjustment(floor_str: str | None) -> tuple[float, str]:
+    """Return (pct_adjustment, label) for a floor string."""
+    if not floor_str:
+        return 0.0, "Planta desconocida (sin ajuste)"
+    f = floor_str.lower().strip()
+    if any(x in f for x in ["ático", "atico", "átic"]):
+        return +0.12, f"Ático (+12%)"
+    if any(x in f for x in ["bajo", "entreplanta", "entresuelo", "semi"]):
+        return -0.10, f"{floor_str} (-10%)"
+    # Try to extract number
+    import re
+    m = re.search(r"(\d+)", f)
+    if m:
+        n = int(m.group(1))
+        if n <= 2:
+            return -0.03, f"Planta {n}ª (-3%)"
+        if n >= 6:
+            return +0.05, f"Planta {n}ª (+5%)"
+    return 0.0, f"{floor_str} (sin ajuste)"
+
+
+def _orientation_adjustment(orientation: str | None) -> tuple[float, str]:
+    if not orientation:
+        return 0.0, "Orientación desconocida (sin ajuste)"
+    o = orientation.lower()
+    if "exterior" in o:
+        return +0.08, "Exterior (+8%)"
+    if "interior" in o:
+        return -0.06, "Interior (-6%)"
+    return 0.0, f"{orientation} (sin ajuste)"
+
+
+def _size_adjustment(size_sqm: float | None) -> tuple[float, str]:
+    """Small properties have a slight €/m² premium; large ones a slight discount."""
+    if not size_sqm:
+        return 0.0, "Tamaño desconocido (sin ajuste)"
+    if size_sqm < 50:
+        return +0.05, f"{size_sqm:.0f} m² — piso pequeño (+5%)"
+    if size_sqm > 120:
+        return -0.04, f"{size_sqm:.0f} m² — piso grande (-4%)"
+    if size_sqm > 80:
+        return -0.02, f"{size_sqm:.0f} m² (-2%)"
+    return 0.0, f"{size_sqm:.0f} m² (sin ajuste)"
+
+
+def estimate_fair_price(listing: dict, all_active_df: pd.DataFrame) -> dict:
+    """
+    Estimate the fair market price for a property using:
+      A) Comparable properties in same barrio/distrito (weighted by size similarity)
+      C) Characteristic adjustments: floor, orientation, size
+
+    Returns dict with keys:
+      estimated_price, confidence, num_comps, base_sqm,
+      adjustments (list of {label, pct}), comp_listings (list of dicts),
+      listed_price, gap_pct
+    """
+    size   = listing.get("size_sqm")
+    rooms  = listing.get("rooms")
+    barrio = listing.get("barrio")
+    dist   = listing.get("distrito")
+    lid    = listing.get("listing_id")
+    price  = listing.get("price", 0)
+
+    if not size or size <= 0:
+        return {"error": "El piso no tiene superficie registrada."}
+
+    df = all_active_df.copy()
+    if "price_per_sqm" not in df.columns:
+        df["price_per_sqm"] = df["price"] / df["size_sqm"]
+
+    df = df[
+        df["price_per_sqm"].notna() &
+        (df["price_per_sqm"] >= 1500) &
+        (df["price_per_sqm"] <= 60000) &
+        (df["listing_id"] != lid)
+    ]
+
+    # ── Find comparables ─────────────────────────────────────────────────────
+    # Try barrio first, then fall back to distrito
+    size_lo, size_hi = size * 0.70, size * 1.30
+    rooms_filter = (
+        (df["rooms"] >= (rooms - 1)) & (df["rooms"] <= (rooms + 1))
+        if rooms else True
+    )
+
+    comps = df[
+        (df["barrio"] == barrio) &
+        (df["size_sqm"] >= size_lo) & (df["size_sqm"] <= size_hi) &
+        rooms_filter
+    ]
+    scope = "barrio"
+
+    if len(comps) < 5:
+        comps = df[
+            (df["distrito"] == dist) &
+            (df["size_sqm"] >= size_lo) & (df["size_sqm"] <= size_hi) &
+            rooms_filter
+        ]
+        scope = "distrito"
+
+    if len(comps) < 3:
+        comps = df[
+            (df["distrito"] == dist) &
+            (df["size_sqm"] >= size * 0.55) & (df["size_sqm"] <= size * 1.45)
+        ]
+        scope = "distrito (rango ampliado)"
+
+    num_comps = len(comps)
+
+    if num_comps == 0:
+        return {"error": "No hay suficientes comparables en la base de datos."}
+
+    # Weighted average €/m² — weight by inverse size distance
+    comps = comps.copy()
+    comps["size_dist"] = (comps["size_sqm"] - size).abs() + 1
+    comps["weight"]    = 1 / comps["size_dist"]
+    base_sqm = float(
+        (comps["price_per_sqm"] * comps["weight"]).sum() / comps["weight"].sum()
+    )
+
+    # Confidence
+    if num_comps >= 15 and scope == "barrio":
+        confidence = "alta"
+    elif num_comps >= 6:
+        confidence = "media"
+    else:
+        confidence = "baja"
+
+    # ── Characteristic adjustments ───────────────────────────────────────────
+    adjustments = []
+
+    floor_pct, floor_label = _floor_adjustment(listing.get("floor"))
+    orient_pct, orient_label = _orientation_adjustment(listing.get("orientation"))
+    size_pct, size_label = _size_adjustment(size)
+
+    if floor_pct != 0:
+        adjustments.append({"label": f"Planta: {floor_label}", "pct": floor_pct})
+    if orient_pct != 0:
+        adjustments.append({"label": f"Orientación: {orient_label}", "pct": orient_pct})
+    if size_pct != 0:
+        adjustments.append({"label": f"Tamaño: {size_label}", "pct": size_pct})
+
+    total_adj = sum(a["pct"] for a in adjustments)
+    adjusted_sqm = base_sqm * (1 + total_adj)
+    estimated_price = int(adjusted_sqm * size)
+    gap_pct = ((price - estimated_price) / estimated_price * 100) if estimated_price > 0 else 0
+
+    # Top comps for display
+    comp_listings = (
+        comps.sort_values("weight", ascending=False)
+        .head(10)[["title", "price", "price_per_sqm", "size_sqm", "rooms", "barrio", "url"]]
+        .to_dict("records")
+    )
+
+    return {
+        "estimated_price": estimated_price,
+        "adjusted_sqm":    round(adjusted_sqm),
+        "base_sqm":        round(base_sqm),
+        "num_comps":       num_comps,
+        "scope":           scope,
+        "confidence":      confidence,
+        "adjustments":     adjustments,
+        "total_adj_pct":   total_adj * 100,
+        "listed_price":    price,
+        "gap_pct":         round(gap_pct, 1),
+        "comp_listings":   comp_listings,
+    }

@@ -15,6 +15,7 @@ from analytics import (
     calculate_barrio_stats,
     calculate_days_on_market,
     explain_score,
+    estimate_fair_price,
 )
 from data_utils import load_data
 
@@ -253,6 +254,77 @@ def render_detail_tab() -> None:
             )
     else:
         st.info("Este piso aún no tiene cambios de precio registrados.")
+
+    st.markdown("---")
+
+    # ── Valoración estimada ───────────────────────────────────────────────────
+    st.subheader("💡 Valoración Estimada")
+
+    try:
+        valuation = estimate_fair_price(listing, all_active)
+
+        if "error" in valuation:
+            st.warning(valuation["error"])
+        else:
+            est   = valuation["estimated_price"]
+            gap   = valuation["gap_pct"]
+            conf  = valuation["confidence"]
+            scope = valuation["scope"]
+            nc    = valuation["num_comps"]
+
+            conf_color = {"alta": "#2ecc71", "media": "#f39c12", "baja": "#e74c3c"}[conf]
+            conf_icon  = {"alta": "🟢", "media": "🟡", "baja": "🔴"}[conf]
+
+            # Main metrics row
+            v1, v2, v3, v4 = st.columns(4)
+            v1.metric("Precio listado",    f"€{listing['price']:,}")
+            v2.metric("Precio estimado",   f"€{est:,}")
+            delta_label = f"{gap:+.1f}% {'sobre' if gap > 0 else 'bajo'} valor"
+            delta_color = "inverse" if gap > 0 else "normal"
+            v3.metric("Diferencia", f"€{abs(listing['price'] - est):,}", delta_label, delta_color=delta_color)
+            v4.metric("Confianza", f"{conf_icon} {conf.capitalize()}",
+                      f"Basado en {nc} comparables del {scope}")
+
+            # Gap verdict
+            if gap > 10:
+                st.error(f"⚠️ Este piso está **{gap:.1f}% por encima** del precio estimado. Margen de negociación elevado.")
+            elif gap > 5:
+                st.warning(f"📊 Precio ligeramente alto ({gap:.1f}% sobre el estimado). Hay margen de negociación.")
+            elif gap < -10:
+                st.success(f"🎯 ¡Oportunidad! El precio está **{abs(gap):.1f}% por debajo** del valor estimado.")
+            elif gap < -5:
+                st.success(f"✅ Buen precio ({abs(gap):.1f}% bajo el estimado).")
+            else:
+                st.info(f"⚖️ Precio en línea con el mercado (diferencia de {abs(gap):.1f}%).")
+
+            # Adjustments breakdown
+            if valuation["adjustments"]:
+                with st.expander("🔧 Detalle de ajustes aplicados"):
+                    st.markdown(
+                        f"**Base:** €{valuation['base_sqm']:,}/m² "
+                        f"(media ponderada de {nc} comparables del {scope})"
+                    )
+                    for adj in valuation["adjustments"]:
+                        sign = "+" if adj["pct"] > 0 else ""
+                        st.markdown(f"- {adj['label']} → **{sign}{adj['pct']*100:.0f}%**")
+                    st.markdown(
+                        f"**€/m² ajustado:** €{valuation['adjusted_sqm']:,}/m² · "
+                        f"**Precio estimado:** €{valuation['adjusted_sqm']:,} × "
+                        f"{listing['size_sqm']:.0f} m² = **€{est:,}**"
+                    )
+
+            # Comparable properties used
+            if valuation["comp_listings"]:
+                with st.expander(f"📋 Ver los {min(nc, 10)} comparables utilizados"):
+                    for c in valuation["comp_listings"]:
+                        sqm_c = c.get("price_per_sqm", 0)
+                        st.markdown(
+                            f"- **{c['title'][:60]}** · {c['barrio']} · "
+                            f"€{c['price']:,} · {c['size_sqm']:.0f}m² · "
+                            f"€{sqm_c:,.0f}/m² · [Ver]({c['url']})"
+                        )
+    except Exception as e:
+        st.warning(f"No se pudo calcular la valoración: {e}")
 
     st.markdown("---")
 
