@@ -9,7 +9,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 
-from database import get_price_trend_by_district, get_market_summary_trend
+from database import (
+    get_price_trend_by_district,
+    get_market_summary_trend,
+    get_notarial_gap_by_district,
+    get_notarial_prices,
+)
 
 
 def _trend_arrow(pct: float) -> str:
@@ -175,3 +180,144 @@ def render_market_trends_tab():
         df_sum = pd.DataFrame(summary_rows).drop(columns=["slope"])
         st.dataframe(df_sum, use_container_width=True, hide_index=True)
 
+    st.markdown("---")
+
+    # ── Notarial: precio real vs precio Idealista ─────────────────────────────
+    st.subheader("🏛️ Precio de oferta (Idealista) vs Precio real (Notarial)")
+    st.caption(
+        "El Colegio de Registradores publica el precio escriturado real de cada "
+        "transacción. Comparamos el €/m² medio actual de Idealista con el último "
+        "año disponible en el registro notarial. Un gap positivo indica que la "
+        "oferta pide más de lo que realmente se paga."
+    )
+
+    gap_data = get_notarial_gap_by_district()
+
+    if not gap_data:
+        st.info("No hay datos notariales disponibles todavía.")
+    else:
+        df_gap = pd.DataFrame(gap_data)
+
+        # ── KPIs globales ─────────────────────────────────────────────────────
+        avg_gap    = df_gap["gap_pct"].mean()
+        max_gap    = df_gap.loc[df_gap["gap_pct"].idxmax()]
+        min_gap    = df_gap.loc[df_gap["gap_pct"].idxmin()]
+        notarial_yr = int(df_gap["notarial_year"].max())
+
+        g1, g2, g3 = st.columns(3)
+        g1.metric(
+            "Gap medio Madrid",
+            f"{avg_gap:+.1f}%",
+            f"Idealista vs Notarial {notarial_yr}",
+            delta_color="inverse",
+        )
+        g2.metric(
+            f"Mayor sobreprecio — {max_gap['distrito']}",
+            f"{max_gap['gap_pct']:+.1f}%",
+            f"€{max_gap['idealista_price']:,}/m² vs €{max_gap['notarial_price']:,}/m²",
+            delta_color="inverse",
+        )
+        g3.metric(
+            f"Menor gap — {min_gap['distrito']}",
+            f"{min_gap['gap_pct']:+.1f}%",
+            f"€{min_gap['idealista_price']:,}/m² vs €{min_gap['notarial_price']:,}/m²",
+            delta_color="inverse",
+        )
+
+        # ── Bar chart gap por distrito ─────────────────────────────────────────
+        fig_gap = px.bar(
+            df_gap.sort_values("gap_pct", ascending=True),
+            x="gap_pct",
+            y="distrito",
+            orientation="h",
+            color="gap_pct",
+            color_continuous_scale="RdYlGn_r",
+            text=df_gap.sort_values("gap_pct", ascending=True)["gap_pct"].apply(
+                lambda v: f"{v:+.1f}%"
+            ),
+            labels={
+                "gap_pct": "Gap (%)",
+                "distrito": "",
+            },
+            title=f"Sobreprecio de oferta vs escriturado notarial {notarial_yr} (% gap por distrito)",
+            custom_data=["notarial_price", "idealista_price"],
+        )
+        fig_gap.update_traces(
+            textposition="outside",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Gap: %{x:+.1f}%<br>"
+                "Idealista: €%{customdata[1]:,}/m²<br>"
+                f"Notarial {notarial_yr}: €%{{customdata[0]:,}}/m²"
+                "<extra></extra>"
+            ),
+        )
+        fig_gap.update_layout(
+            height=560,
+            coloraxis_showscale=False,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis_title="Gap % (positivo = oferta más cara que precio real)",
+            margin=dict(l=10, r=80, t=50, b=40),
+        )
+        st.plotly_chart(fig_gap, use_container_width=True)
+
+        # ── Tabla detalle ─────────────────────────────────────────────────────
+        with st.expander("📋 Ver tabla completa de precios"):
+            df_disp = df_gap[["distrito", "idealista_price", "notarial_price", "gap_pct", "notarial_year"]].copy()
+            df_disp.columns = ["Distrito", "Idealista (€/m²)", f"Notarial (€/m²)", "Gap (%)", "Año notarial"]
+            st.dataframe(
+                df_disp.style.format({
+                    "Idealista (€/m²)": "€{:,.0f}",
+                    "Notarial (€/m²)":  "€{:,.0f}",
+                    "Gap (%)":          "{:+.1f}%",
+                }),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+    st.markdown("---")
+
+    # ── Evolución histórica notarial por distrito ─────────────────────────────
+    st.subheader("📜 Evolución histórica del precio real (Notarial) por distrito")
+    st.caption(
+        f"Precios escriturados reales desde 2014. Fuente: Portal del Notariado / "
+        "Colegio de Registradores de Madrid."
+    )
+
+    all_notarial = get_notarial_prices()
+    if not all_notarial:
+        st.info("Sin datos notariales históricos disponibles.")
+    else:
+        df_not = pd.DataFrame(all_notarial)
+        all_dist_not = sorted(df_not["distrito"].unique())
+        default_not  = [d for d in ["Centro", "Chamberí", "Salamanca", "Carabanchel"] if d in all_dist_not]
+
+        sel_not = st.multiselect(
+            "Distritos a comparar (notarial histórico)",
+            options=all_dist_not,
+            default=default_not,
+            key="mt_notarial_distritos",
+        )
+
+        if sel_not:
+            df_not_sel = df_not[df_not["distrito"].isin(sel_not)]
+            fig_not = px.line(
+                df_not_sel,
+                x="periodo",
+                y="precio_m2",
+                color="distrito",
+                markers=True,
+                labels={"periodo": "Año", "precio_m2": "€/m² (escriturado)", "distrito": "Distrito"},
+                title="Precio real escriturado por distrito (€/m²)",
+            )
+            fig_not.update_layout(
+                height=400,
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", y=-0.25),
+                xaxis=dict(dtick=1),
+            )
+            st.plotly_chart(fig_not, use_container_width=True)
+        else:
+            st.info("Selecciona al menos un distrito.")

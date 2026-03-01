@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 
-from database import get_connection, get_property_price_stats
+from database import get_connection, get_property_price_stats, get_notarial_prices
 from analytics import (
     calculate_distrito_stats,
     calculate_barrio_stats,
@@ -325,6 +325,93 @@ def render_detail_tab() -> None:
                         )
     except Exception as e:
         st.warning(f"No se pudo calcular la valoración: {e}")
+
+    # ── Referencia notarial ───────────────────────────────────────────────────
+    notarial_data = get_notarial_prices(distrito=listing.get("distrito"))
+    if notarial_data and listing.get("size_sqm"):
+        # Most recent year
+        latest = max(notarial_data, key=lambda r: r["periodo"])
+        notarial_sqm   = latest["precio_m2"]
+        notarial_total = round(notarial_sqm * listing["size_sqm"])
+        notarial_gap   = 100 * (listing["price"] - notarial_total) / notarial_total if notarial_total else None
+
+        st.markdown("---")
+        st.subheader("🏛️ Referencia Notarial")
+        st.caption(
+            f"Precio escriturado real en {listing['distrito']} en {latest['periodo']} "
+            f"según el Portal del Notariado."
+        )
+
+        nr1, nr2, nr3 = st.columns(3)
+        nr1.metric(
+            f"€/m² notarial ({latest['periodo']})",
+            f"€{notarial_sqm:,.0f}",
+        )
+        nr2.metric(
+            "Precio estimado (notarial)",
+            f"€{notarial_total:,}",
+            help=f"€{notarial_sqm:,.0f}/m² × {listing['size_sqm']:.0f} m²",
+        )
+        if notarial_gap is not None:
+            delta_color = "inverse" if notarial_gap > 0 else "normal"
+            nr3.metric(
+                "Diferencia vs precio listado",
+                f"€{abs(listing['price'] - notarial_total):,}",
+                f"{notarial_gap:+.1f}% vs notarial",
+                delta_color=delta_color,
+            )
+
+        if notarial_gap is not None:
+            if notarial_gap > 20:
+                st.error(
+                    f"⚠️ El precio listado está **{notarial_gap:.1f}% por encima** del precio "
+                    f"escriturado real del distrito en {latest['periodo']}. Margen de negociación elevado."
+                )
+            elif notarial_gap > 5:
+                st.warning(
+                    f"📊 El precio listado supera en {notarial_gap:.1f}% el precio escriturado del distrito."
+                )
+            elif notarial_gap < -10:
+                st.success(
+                    f"🎯 El precio listado está {abs(notarial_gap):.1f}% **por debajo** del precio "
+                    f"escriturado del distrito — potencial oportunidad."
+                )
+            else:
+                st.info(
+                    f"⚖️ Precio en línea con el precio escriturado notarial "
+                    f"(diferencia de {notarial_gap:+.1f}%)."
+                )
+
+        # Show historical notarial series for context
+        if len(notarial_data) > 1:
+            import pandas as pd
+            import plotly.graph_objects as go
+            df_not = pd.DataFrame(notarial_data)
+            fig_not = go.Figure()
+            fig_not.add_trace(go.Scatter(
+                x=df_not["periodo"], y=df_not["precio_m2"],
+                mode="lines+markers", name="€/m² notarial",
+                line=dict(color="#9b59b6", width=2), marker=dict(size=7),
+                hovertemplate="<b>%{x}</b><br>€/m²: %{y:,.0f}<extra></extra>",
+            ))
+            # Current listing price/m² as reference line
+            if listing.get("size_sqm"):
+                fig_not.add_hline(
+                    y=listing["price"] / listing["size_sqm"],
+                    line_dash="dot", line_color="#e74c3c",
+                    annotation_text=f"Este piso: €{listing['price']/listing['size_sqm']:,.0f}/m²",
+                    annotation_position="top right",
+                )
+            fig_not.update_layout(
+                height=280,
+                xaxis=dict(title="Año", dtick=1),
+                yaxis_title="€/m²",
+                margin=dict(t=20, b=30, l=10, r=10),
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                showlegend=False,
+            )
+            st.plotly_chart(fig_not, use_container_width=True)
 
     st.markdown("---")
 

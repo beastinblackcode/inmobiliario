@@ -207,7 +207,27 @@ def init_database():
             ON watchlist(listing_id)
         """)
 
+        # ── Notarial prices table ────────────────────────────────────────────
+        # Real transaction prices (escrituradas) from the Notarial portal.
+        # precio_m2 stored in actual €/m² (CSV values × 1000).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notarial_prices (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                distrito    TEXT    NOT NULL,
+                periodo     INTEGER NOT NULL,
+                precio_m2   REAL    NOT NULL,
+                UNIQUE(distrito, periodo)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_notarial_distrito
+            ON notarial_prices(distrito)
+        """)
+
         print("✓ Database initialized successfully")
+
+    # Import notarial CSV if table is empty
+    _auto_import_notarial()
 
 
 
@@ -2580,6 +2600,138 @@ def get_alert_matches(alert: Dict, hours: int = 24) -> List[Dict]:
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
         print(f"Error checking alert matches: {exc}")
+        return []
+
+
+def _auto_import_notarial() -> None:
+    """Import notarial CSV on first run if the table is empty."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM notarial_prices")
+            if cursor.fetchone()[0] > 0:
+                return  # Already imported
+        # Find the CSV (same directory as this file)
+        csv_path = Path(__file__).parent / "notarial_madrid_historico.csv"
+        if csv_path.exists():
+            import_notarial_csv(str(csv_path))
+    except Exception as e:
+        print(f"Warning: could not auto-import notarial CSV: {e}")
+
+
+def import_notarial_csv(csv_path: str) -> int:
+    """
+    Import notarial transaction prices from CSV into the database.
+    CSV values are in k€/m² → stored as actual €/m² (× 1000).
+    Returns number of rows inserted/updated.
+    """
+    import csv
+    rows_upserted = 0
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    distrito  = row["distrito"].strip()
+                    periodo   = int(row["periodo"])
+                    precio_m2 = float(row["precio_m2"]) * 1000  # k€/m² → €/m²
+                    cursor.execute("""
+                        INSERT INTO notarial_prices (distrito, periodo, precio_m2)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(distrito, periodo) DO UPDATE
+                        SET precio_m2 = excluded.precio_m2
+                    """, (distrito, periodo, round(precio_m2, 1)))
+                    rows_upserted += 1
+                except (ValueError, KeyError):
+                    continue
+    print(f"✓ Notarial CSV imported: {rows_upserted} rows")
+    return rows_upserted
+
+
+def get_notarial_prices(distrito: Optional[str] = None) -> List[Dict]:
+    """
+    Return notarial real transaction prices.
+    If distrito is given, returns only that district's yearly series.
+    Otherwise returns all rows ordered by distrito, periodo.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if distrito:
+                cursor.execute("""
+                    SELECT distrito, periodo, precio_m2
+                    FROM notarial_prices
+                    WHERE distrito = ?
+                    ORDER BY periodo
+                """, (distrito,))
+            else:
+                cursor.execute("""
+                    SELECT distrito, periodo, precio_m2
+                    FROM notarial_prices
+                    ORDER BY distrito, periodo
+                """)
+            return [dict(r) for r in cursor.fetchall()]
+    except Exception as e:
+        print(f"Error in get_notarial_prices: {e}")
+        return []
+
+
+def get_notarial_gap_by_district() -> List[Dict]:
+    """
+    Compare latest notarial price (most recent year) vs current Idealista
+    asking €/m² per district.
+
+    Returns list of dicts with:
+        distrito, notarial_year, notarial_price, idealista_price, gap_pct
+    gap_pct > 0 means Idealista asks MORE than notarial (overvalued vs reality).
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Latest notarial price per district
+            cursor.execute("""
+                SELECT n.distrito, n.periodo AS notarial_year, n.precio_m2 AS notarial_price
+                FROM notarial_prices n
+                INNER JOIN (
+                    SELECT distrito, MAX(periodo) AS max_yr
+                    FROM notarial_prices
+                    GROUP BY distrito
+                ) latest ON n.distrito = latest.distrito AND n.periodo = latest.max_yr
+            """)
+            notarial_rows = {r["distrito"]: dict(r) for r in cursor.fetchall()}
+
+            # Current Idealista median €/m² per district (active listings)
+            # Exclude obvious data-quality outliers (size < 20 m² or price/m² > €25k)
+            cursor.execute("""
+                SELECT distrito,
+                       AVG(CAST(price AS FLOAT) / size_sqm) AS idealista_price
+                FROM listings
+                WHERE status = 'active'
+                  AND price > 0
+                  AND size_sqm >= 20
+                  AND (CAST(price AS FLOAT) / size_sqm) BETWEEN 500 AND 25000
+                GROUP BY distrito
+                HAVING COUNT(*) >= 5
+            """)
+            idealista_rows = {r["distrito"]: r["idealista_price"] for r in cursor.fetchall()}
+
+        results = []
+        for dist, nd in notarial_rows.items():
+            id_price = idealista_rows.get(dist)
+            if id_price and nd["notarial_price"] > 0:
+                gap_pct = 100 * (id_price - nd["notarial_price"]) / nd["notarial_price"]
+                results.append({
+                    "distrito":        dist,
+                    "notarial_year":   nd["notarial_year"],
+                    "notarial_price":  round(nd["notarial_price"]),
+                    "idealista_price": round(id_price),
+                    "gap_pct":         round(gap_pct, 1),
+                })
+        return sorted(results, key=lambda x: x["gap_pct"], reverse=True)
+    except Exception as e:
+        print(f"Error in get_notarial_gap_by_district: {e}")
         return []
 
 
