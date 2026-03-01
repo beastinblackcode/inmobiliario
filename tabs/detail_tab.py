@@ -391,8 +391,6 @@ def render_detail_tab() -> None:
 
         # Show historical notarial series for context
         if len(notarial_data) > 1:
-            import pandas as pd
-            import plotly.graph_objects as go
             df_not = pd.DataFrame(notarial_data)
             fig_not = go.Figure()
             fig_not.add_trace(go.Scatter(
