@@ -9,7 +9,10 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import datetime
 
-from database import get_connection, get_property_price_stats, get_notarial_prices
+from database import (
+    get_connection, get_property_price_stats,
+    get_notarial_prices, get_price_trend_by_district,
+)
 from analytics import (
     calculate_distrito_stats,
     calculate_barrio_stats,
@@ -264,11 +267,39 @@ def render_detail_tab() -> None:
 
     st.markdown("---")
 
+    # ── Pre-load notarial + trend data for valuation ──────────────────────────
+    _notarial_raw   = get_notarial_prices(distrito=listing.get("distrito"))
+    _not_sqm        = None
+    _not_latest_yr  = None
+    if _notarial_raw:
+        _not_latest     = max(_notarial_raw, key=lambda r: r["periodo"])
+        _not_sqm        = _not_latest["precio_m2"]
+        _not_latest_yr  = _not_latest["periodo"]
+
+    # District price trend over last 8 weeks
+    _district_trend_pct = None
+    try:
+        trend_rows = [
+            r for r in get_price_trend_by_district(weeks=8)
+            if r["distrito"] == listing.get("distrito")
+        ]
+        if len(trend_rows) >= 3:
+            first_sqm = trend_rows[0]["avg_sqm"]
+            last_sqm  = trend_rows[-1]["avg_sqm"]
+            if first_sqm:
+                _district_trend_pct = (last_sqm - first_sqm) / first_sqm * 100
+    except Exception:
+        pass
+
     # ── Valoración estimada ───────────────────────────────────────────────────
     st.subheader("💡 Valoración Estimada")
 
     try:
-        valuation = estimate_fair_price(listing, all_active)
+        valuation = estimate_fair_price(
+            listing, all_active,
+            notarial_sqm=_not_sqm,
+            district_trend_pct=_district_trend_pct,
+        )
 
         if "error" in valuation:
             st.warning(valuation["error"])
@@ -278,49 +309,94 @@ def render_detail_tab() -> None:
             conf  = valuation["confidence"]
             scope = valuation["scope"]
             nc    = valuation["num_comps"]
+            not_p = valuation.get("notarial_price")
+            not_g = valuation.get("notarial_gap_pct")
+            trend = valuation.get("district_trend_pct")
+            trend_adj = valuation.get("trend_adjusted_price")
 
-            conf_color = {"alta": "#2ecc71", "media": "#f39c12", "baja": "#e74c3c"}[conf]
-            conf_icon  = {"alta": "🟢", "media": "🟡", "baja": "🔴"}[conf]
+            conf_icon = {"alta": "🟢", "media": "🟡", "baja": "🔴"}[conf]
 
-            # Main metrics row
-            v1, v2, v3, v4 = st.columns(4)
-            v1.metric("Precio listado",    f"€{listing['price']:,}")
-            v2.metric("Precio estimado",   f"€{est:,}")
-            delta_label = f"{gap:+.1f}% {'sobre' if gap > 0 else 'bajo'} valor"
-            delta_color = "inverse" if gap > 0 else "normal"
-            v3.metric("Diferencia", f"€{abs(listing['price'] - est):,}", delta_label, delta_color=delta_color)
-            v4.metric("Confianza", f"{conf_icon} {conf.capitalize()}",
-                      f"Basado en {nc} comparables del {scope}")
+            # ── Trend warning banner ──────────────────────────────────────────
+            if valuation.get("trend_warning") and trend is not None:
+                st.warning(
+                    f"📉 **Tendencia bajista en {listing.get('distrito')}**: los precios han caído "
+                    f"**{trend:.1f}%** en las últimas 8 semanas. El precio estimado puede estar inflado "
+                    f"respecto a la situación actual del mercado."
+                )
 
-            # Gap verdict
-            if gap > 10:
-                st.error(f"⚠️ Este piso está **{gap:.1f}% por encima** del precio estimado. Margen de negociación elevado.")
-            elif gap > 5:
-                st.warning(f"📊 Precio ligeramente alto ({gap:.1f}% sobre el estimado). Hay margen de negociación.")
-            elif gap < -10:
-                st.success(f"🎯 ¡Oportunidad! El precio está **{abs(gap):.1f}% por debajo** del valor estimado.")
-            elif gap < -5:
-                st.success(f"✅ Buen precio ({abs(gap):.1f}% bajo el estimado).")
+            # ── Main metrics: oferta + transacción estimada ───────────────────
+            if not_p:
+                v1, v2, v3, v4 = st.columns(4)
+                v1.metric("Precio listado", f"€{listing['price']:,}")
+                v2.metric(
+                    "Est. oferta (comparables)",
+                    f"€{est:,}",
+                    f"{gap:+.1f}% vs listado",
+                    delta_color="inverse" if gap > 0 else "normal",
+                    help=f"Media ponderada de {nc} comparables en Idealista ({scope}), con ajustes por características.",
+                )
+                not_delta_color = "inverse" if not_g and not_g > 0 else "normal"
+                v3.metric(
+                    f"Est. transacción (notarial {_not_latest_yr})",
+                    f"€{not_p:,}",
+                    f"{not_g:+.1f}% vs listado" if not_g is not None else None,
+                    delta_color=not_delta_color,
+                    help=f"Precio notarial escriturado ({_not_latest_yr}) en {listing.get('distrito')} "
+                         f"ajustado por características (planta, orientación, tamaño). "
+                         "Refleja lo que realmente se escritura, no lo que se pide.",
+                )
+                v4.metric(
+                    "Confianza", f"{conf_icon} {conf.capitalize()}",
+                    f"{nc} comparables · {scope}",
+                )
             else:
-                st.info(f"⚖️ Precio en línea con el mercado (diferencia de {abs(gap):.1f}%).")
+                v1, v2, v3, v4 = st.columns(4)
+                v1.metric("Precio listado",  f"€{listing['price']:,}")
+                v2.metric("Precio estimado", f"€{est:,}")
+                delta_label = f"{gap:+.1f}% {'sobre' if gap > 0 else 'bajo'} valor"
+                v3.metric("Diferencia", f"€{abs(listing['price'] - est):,}", delta_label,
+                          delta_color="inverse" if gap > 0 else "normal")
+                v4.metric("Confianza", f"{conf_icon} {conf.capitalize()}",
+                          f"Basado en {nc} comparables del {scope}")
 
-            # Adjustments breakdown
+            # ── Trend-adjusted price note ─────────────────────────────────────
+            if trend_adj and trend is not None:
+                st.caption(
+                    f"💡 Aplicando la tendencia actual ({trend:+.1f}%), el precio estimado ajustado sería **€{trend_adj:,}**."
+                )
+
+            # ── Gap verdict (vs comparables) ──────────────────────────────────
+            if gap > 10:
+                st.error(f"⚠️ Precio de oferta **{gap:.1f}% por encima** del estimado de comparables. Margen de negociación elevado.")
+            elif gap > 5:
+                st.warning(f"📊 Precio ligeramente alto ({gap:.1f}% sobre el estimado de comparables).")
+            elif gap < -10:
+                st.success(f"🎯 ¡Oportunidad! Precio **{abs(gap):.1f}% por debajo** del estimado de comparables.")
+            elif gap < -5:
+                st.success(f"✅ Buen precio ({abs(gap):.1f}% bajo el estimado de comparables).")
+            else:
+                st.info(f"⚖️ Precio en línea con el mercado de oferta (diferencia de {abs(gap):.1f}%).")
+
+            # ── Adjustments breakdown ─────────────────────────────────────────
             if valuation["adjustments"]:
                 with st.expander("🔧 Detalle de ajustes aplicados"):
                     st.markdown(
-                        f"**Base:** €{valuation['base_sqm']:,}/m² "
+                        f"**Base comparables:** €{valuation['base_sqm']:,}/m² "
                         f"(media ponderada de {nc} comparables del {scope})"
                     )
+                    if _not_sqm:
+                        st.markdown(f"**Base notarial {_not_latest_yr}:** €{round(_not_sqm):,}/m²")
+                    st.markdown("**Ajustes por características:**")
                     for adj in valuation["adjustments"]:
                         sign = "+" if adj["pct"] > 0 else ""
                         st.markdown(f"- {adj['label']} → **{sign}{adj['pct']*100:.0f}%**")
                     st.markdown(
-                        f"**€/m² ajustado:** €{valuation['adjusted_sqm']:,}/m² · "
+                        f"**€/m² ajustado (comparables):** €{valuation['adjusted_sqm']:,}/m² · "
                         f"**Precio estimado:** €{valuation['adjusted_sqm']:,} × "
                         f"{listing['size_sqm']:.0f} m² = **€{est:,}**"
                     )
 
-            # Comparable properties used
+            # ── Comparable properties used ────────────────────────────────────
             if valuation["comp_listings"]:
                 with st.expander(f"📋 Ver los {min(nc, 10)} comparables utilizados"):
                     for c in valuation["comp_listings"]:
@@ -333,90 +409,39 @@ def render_detail_tab() -> None:
     except Exception as e:
         st.warning(f"No se pudo calcular la valoración: {e}")
 
-    # ── Referencia notarial ───────────────────────────────────────────────────
-    notarial_data = get_notarial_prices(distrito=listing.get("distrito"))
-    if notarial_data and listing.get("size_sqm"):
-        # Most recent year
-        latest = max(notarial_data, key=lambda r: r["periodo"])
-        notarial_sqm   = latest["precio_m2"]
-        notarial_total = round(notarial_sqm * listing["size_sqm"])
-        notarial_gap   = 100 * (listing["price"] - notarial_total) / notarial_total if notarial_total else None
-
+    # ── Evolución notarial histórica (sección compacta) ──────────────────────
+    if _notarial_raw and len(_notarial_raw) > 1 and listing.get("size_sqm"):
         st.markdown("---")
-        st.subheader("🏛️ Referencia Notarial")
+        st.subheader("🏛️ Evolución del Precio Real Escriturado")
         st.caption(
-            f"Precio escriturado real en {listing['distrito']} en {latest['periodo']} "
-            f"según el Portal del Notariado."
+            f"Precios escriturados reales en {listing.get('distrito')} desde 2014 "
+            f"(Portal del Notariado). La línea roja muestra el €/m² de este piso."
         )
-
-        nr1, nr2, nr3 = st.columns(3)
-        nr1.metric(
-            f"€/m² notarial ({latest['periodo']})",
-            f"€{notarial_sqm:,.0f}",
+        df_not = pd.DataFrame(_notarial_raw)
+        fig_not = go.Figure()
+        fig_not.add_trace(go.Scatter(
+            x=df_not["periodo"], y=df_not["precio_m2"],
+            mode="lines+markers", name="€/m² notarial",
+            line=dict(color="#9b59b6", width=2), marker=dict(size=7),
+            hovertemplate="<b>%{x}</b><br>€/m²: %{y:,.0f}<extra></extra>",
+        ))
+        listing_sqm = listing["price"] / listing["size_sqm"]
+        fig_not.add_hline(
+            y=listing_sqm,
+            line_dash="dot", line_color="#e74c3c",
+            annotation_text=f"Este piso: €{listing_sqm:,.0f}/m²",
+            annotation_position="top right",
         )
-        nr2.metric(
-            "Precio estimado (notarial)",
-            f"€{notarial_total:,}",
-            help=f"€{notarial_sqm:,.0f}/m² × {listing['size_sqm']:.0f} m²",
+        fig_not.update_layout(
+            height=260,
+            xaxis=dict(title="Año", dtick=1),
+            yaxis_title="€/m²",
+            margin=dict(t=20, b=30, l=10, r=10),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
         )
-        if notarial_gap is not None:
-            delta_color = "inverse" if notarial_gap > 0 else "normal"
-            nr3.metric(
-                "Diferencia vs precio listado",
-                f"€{abs(listing['price'] - notarial_total):,}",
-                f"{notarial_gap:+.1f}% vs notarial",
-                delta_color=delta_color,
-            )
-
-        if notarial_gap is not None:
-            if notarial_gap > 20:
-                st.error(
-                    f"⚠️ El precio listado está **{notarial_gap:.1f}% por encima** del precio "
-                    f"escriturado real del distrito en {latest['periodo']}. Margen de negociación elevado."
-                )
-            elif notarial_gap > 5:
-                st.warning(
-                    f"📊 El precio listado supera en {notarial_gap:.1f}% el precio escriturado del distrito."
-                )
-            elif notarial_gap < -10:
-                st.success(
-                    f"🎯 El precio listado está {abs(notarial_gap):.1f}% **por debajo** del precio "
-                    f"escriturado del distrito — potencial oportunidad."
-                )
-            else:
-                st.info(
-                    f"⚖️ Precio en línea con el precio escriturado notarial "
-                    f"(diferencia de {notarial_gap:+.1f}%)."
-                )
-
-        # Show historical notarial series for context
-        if len(notarial_data) > 1:
-            df_not = pd.DataFrame(notarial_data)
-            fig_not = go.Figure()
-            fig_not.add_trace(go.Scatter(
-                x=df_not["periodo"], y=df_not["precio_m2"],
-                mode="lines+markers", name="€/m² notarial",
-                line=dict(color="#9b59b6", width=2), marker=dict(size=7),
-                hovertemplate="<b>%{x}</b><br>€/m²: %{y:,.0f}<extra></extra>",
-            ))
-            # Current listing price/m² as reference line
-            if listing.get("size_sqm"):
-                fig_not.add_hline(
-                    y=listing["price"] / listing["size_sqm"],
-                    line_dash="dot", line_color="#e74c3c",
-                    annotation_text=f"Este piso: €{listing['price']/listing['size_sqm']:,.0f}/m²",
-                    annotation_position="top right",
-                )
-            fig_not.update_layout(
-                height=280,
-                xaxis=dict(title="Año", dtick=1),
-                yaxis_title="€/m²",
-                margin=dict(t=20, b=30, l=10, r=10),
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                showlegend=False,
-            )
-            st.plotly_chart(fig_not, use_container_width=True)
+        st.plotly_chart(fig_not, use_container_width=True)
 
     st.markdown("---")
 

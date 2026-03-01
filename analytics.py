@@ -835,16 +835,30 @@ def _size_adjustment(size_sqm: float | None) -> tuple[float, str]:
     return 0.0, f"{size_sqm:.0f} m² (sin ajuste)"
 
 
-def estimate_fair_price(listing: dict, all_active_df: pd.DataFrame) -> dict:
+def estimate_fair_price(
+    listing: dict,
+    all_active_df: pd.DataFrame,
+    notarial_sqm: Optional[float] = None,
+    district_trend_pct: Optional[float] = None,
+) -> dict:
     """
     Estimate the fair market price for a property using:
       A) Comparable properties in same barrio/distrito (weighted by size similarity)
       C) Characteristic adjustments: floor, orientation, size
+      N) Notarial anchor: real transaction price adjusted for property characteristics
+      T) Trend adjustment: if district prices are falling, flag and adjust estimate
+
+    Args:
+        listing:             property dict
+        all_active_df:       active listings DataFrame for comparables
+        notarial_sqm:        latest notarial €/m² for the district (optional)
+        district_trend_pct:  % change in district €/m² over recent weeks (negative = falling)
 
     Returns dict with keys:
       estimated_price, confidence, num_comps, base_sqm,
-      adjustments (list of {label, pct}), comp_listings (list of dicts),
-      listed_price, gap_pct
+      adjustments, comp_listings, listed_price, gap_pct,
+      notarial_price, notarial_gap_pct,
+      district_trend_pct, trend_warning, trend_adjusted_price
     """
     size   = listing.get("size_sqm")
     rooms  = listing.get("rooms")
@@ -937,6 +951,28 @@ def estimate_fair_price(listing: dict, all_active_df: pd.DataFrame) -> dict:
     estimated_price = int(adjusted_sqm * size)
     gap_pct = ((price - estimated_price) / estimated_price * 100) if estimated_price > 0 else 0
 
+    # ── Notarial-anchored estimate ────────────────────────────────────────────
+    # Apply the same characteristic adjustments to the notarial base price.
+    # This gives an estimate of what the property would actually transact for,
+    # rather than what the market is asking.
+    notarial_price = None
+    notarial_gap_pct = None
+    if notarial_sqm and notarial_sqm > 0:
+        notarial_adj_sqm = notarial_sqm * (1 + total_adj)
+        notarial_price = int(notarial_adj_sqm * size)
+        if notarial_price > 0:
+            notarial_gap_pct = round((price - notarial_price) / notarial_price * 100, 1)
+
+    # ── Trend adjustment ──────────────────────────────────────────────────────
+    # If district prices are trending down significantly, the comparables-based
+    # estimate may be stale. Flag as a warning and compute a trend-adjusted price.
+    trend_warning = False
+    trend_adjusted_price = None
+    if district_trend_pct is not None and district_trend_pct < -1.5:
+        trend_warning = True
+        # Apply the observed trend drop to the comparables estimate
+        trend_adjusted_price = int(estimated_price * (1 + district_trend_pct / 100))
+
     # Top comps for display
     comp_listings = (
         comps.sort_values("weight", ascending=False)
@@ -945,15 +981,23 @@ def estimate_fair_price(listing: dict, all_active_df: pd.DataFrame) -> dict:
     )
 
     return {
-        "estimated_price": estimated_price,
-        "adjusted_sqm":    round(adjusted_sqm),
-        "base_sqm":        round(base_sqm),
-        "num_comps":       num_comps,
-        "scope":           scope,
-        "confidence":      confidence,
-        "adjustments":     adjustments,
-        "total_adj_pct":   total_adj * 100,
-        "listed_price":    price,
-        "gap_pct":         round(gap_pct, 1),
-        "comp_listings":   comp_listings,
+        "estimated_price":      estimated_price,
+        "adjusted_sqm":         round(adjusted_sqm),
+        "base_sqm":             round(base_sqm),
+        "num_comps":            num_comps,
+        "scope":                scope,
+        "confidence":           confidence,
+        "adjustments":          adjustments,
+        "total_adj_pct":        total_adj * 100,
+        "listed_price":         price,
+        "gap_pct":              round(gap_pct, 1),
+        "comp_listings":        comp_listings,
+        # Notarial anchor
+        "notarial_sqm":         round(notarial_sqm) if notarial_sqm else None,
+        "notarial_price":       notarial_price,
+        "notarial_gap_pct":     notarial_gap_pct,
+        # Trend
+        "district_trend_pct":   round(district_trend_pct, 1) if district_trend_pct is not None else None,
+        "trend_warning":        trend_warning,
+        "trend_adjusted_price": trend_adjusted_price,
     }
