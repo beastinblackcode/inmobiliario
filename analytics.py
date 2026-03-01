@@ -209,7 +209,10 @@ def calculate_distrito_stats(df: pd.DataFrame) -> Dict:
     return stats
 
 
-def calculate_quality_score(row, distrito_stats: Dict, barrio_stats: Dict) -> float:
+def calculate_quality_score(
+    row, distrito_stats: Dict, barrio_stats: Dict,
+    notarial_stats: Optional[Dict] = None
+) -> float:
     """
     Calculate opportunity score (0-100). Higher = better deal.
 
@@ -219,6 +222,7 @@ def calculate_quality_score(row, distrito_stats: Dict, barrio_stats: Dict) -> fl
     - Price drop history        25 pts  (num_drops + total magnitude)
     - Days on market            15 pts  (negotiation pressure)
     - Seller type (particular)  10 pts
+    - Notarial bonus/penalty    ±10 pts (real transaction price as ground truth)
     """
     score = 0.0
 
@@ -318,6 +322,23 @@ def calculate_quality_score(row, distrito_stats: Dict, barrio_stats: Dict) -> fl
     if row.get('seller_type') == 'Particular':
         score += 10
 
+    # ── 6. €/m² vs precio notarial real (±10 pts bonus) ──────────────────────
+    if notarial_stats and pd.notna(sqm):
+        distrito = row.get('distrito')
+        notarial_sqm = notarial_stats.get(distrito)
+        if notarial_sqm and notarial_sqm > 0:
+            ratio = sqm / notarial_sqm
+            if ratio < 1.00:
+                score += 10   # Por debajo del precio escriturado real — excepcional
+            elif ratio < 1.05:
+                score += 7    # Casi a precio de mercado real
+            elif ratio < 1.15:
+                score += 4    # Poco margen sobre real
+            elif ratio < 1.25:
+                score += 1    # En línea con mercado real
+            elif ratio > 1.50:
+                score -= 5    # Muy por encima del precio real escriturado
+
     return min(100.0, max(0.0, score))
 
 
@@ -385,9 +406,22 @@ def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
     distrito_stats = calculate_distrito_stats(df_copy)
     barrio_stats   = calculate_barrio_stats(df_copy)
 
+    # ── Notarial stats: latest real price per distrito ────────────────────────
+    notarial_stats: Dict[str, float] = {}
+    try:
+        from database import get_notarial_prices
+        notarial_rows = get_notarial_prices()
+        if notarial_rows:
+            import pandas as _pd
+            df_not = _pd.DataFrame(notarial_rows)
+            latest_not = df_not.sort_values("periodo").groupby("distrito").last().reset_index()
+            notarial_stats = dict(zip(latest_not["distrito"], latest_not["precio_m2"]))
+    except Exception:
+        pass
+
     # ── Score ─────────────────────────────────────────────────────────────────
     df_copy['quality_score'] = df_copy.apply(
-        lambda row: calculate_quality_score(row, distrito_stats, barrio_stats),
+        lambda row: calculate_quality_score(row, distrito_stats, barrio_stats, notarial_stats),
         axis=1,
     )
 
@@ -637,7 +671,12 @@ def get_price_history_summary() -> Dict:
         }
 
 
-def explain_score(row: dict, distrito_stats: Dict, barrio_stats: Dict) -> List[Dict]:
+def explain_score(
+    row: dict,
+    distrito_stats: Dict,
+    barrio_stats: Dict,
+    notarial_stats: Optional[Dict] = None,
+) -> List[Dict]:
     """
     Return a breakdown of score factors for a single property row.
     Each factor: {label, points, max_points, description}
@@ -718,6 +757,31 @@ def explain_score(row: dict, distrito_stats: Dict, barrio_stats: Dict) -> List[D
     pts = 10 if seller == 'Particular' else 0
     breakdown.append({"label": "Vendedor", "points": pts, "max_points": 10,
                       "description": seller or "desconocido"})
+
+    # ── 6. Precio vs notarial ─────────────────────────────────────────────────
+    if notarial_stats and pd.notna(sqm):
+        distrito = row.get('distrito')
+        notarial_sqm = notarial_stats.get(distrito)
+        if notarial_sqm and notarial_sqm > 0:
+            ratio = sqm / notarial_sqm
+            if ratio < 1.00:
+                pts = 10;  verdict = f"¡Por debajo del escriturado! ({(ratio-1)*100:+.1f}%)"
+            elif ratio < 1.05:
+                pts = 7;   verdict = f"Casi a precio real ({(ratio-1)*100:+.1f}%)"
+            elif ratio < 1.15:
+                pts = 4;   verdict = f"Poco margen vs real ({(ratio-1)*100:+.1f}%)"
+            elif ratio < 1.25:
+                pts = 1;   verdict = f"En línea con real ({(ratio-1)*100:+.1f}%)"
+            elif ratio > 1.50:
+                pts = -5;  verdict = f"Muy por encima del real ({(ratio-1)*100:+.1f}%)"
+            else:
+                pts = 0;   verdict = f"{(ratio-1)*100:+.1f}% sobre precio notarial"
+            desc = f"{verdict} — notarial {distrito}: €{notarial_sqm:,.0f}/m²"
+        else:
+            pts = 0
+            desc = "sin datos notariales para este distrito"
+        breakdown.append({"label": "Precio vs notarial", "points": pts, "max_points": 10,
+                          "description": desc})
 
     return breakdown
 

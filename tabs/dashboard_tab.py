@@ -15,6 +15,7 @@ from database import (
     get_price_trends_by_zone,
     get_connection,
     get_property_price_stats,
+    get_notarial_gap_by_district,
 )
 from data_utils import load_data
 
@@ -66,6 +67,37 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
 
         sold_30_days = get_sold_last_n_days(30)
         st.metric(label="Vendidos (30 días)", value=f"{sold_30_days:,}", delta=None)
+
+    # ── Notarial gap row ──────────────────────────────────────────────────────
+    gap_data = get_notarial_gap_by_district()
+    if gap_data:
+        import pandas as _pd
+        df_gap = _pd.DataFrame(gap_data)
+        avg_gap   = df_gap["gap_pct"].mean()
+        max_row   = df_gap.loc[df_gap["gap_pct"].idxmax()]
+        min_row   = df_gap.loc[df_gap["gap_pct"].idxmin()]
+        notarial_yr = int(df_gap["notarial_year"].max())
+
+        gk1, gk2, gk3 = st.columns(3)
+        gk1.metric(
+            "Sobreprecio oferta vs real",
+            f"{avg_gap:+.1f}%",
+            f"Media Madrid vs notarial {notarial_yr}",
+            delta_color="inverse",
+            help="Gap entre el €/m² medio en Idealista y el precio escriturado real del Notariado.",
+        )
+        gk2.metric(
+            f"Más tensionado — {max_row['distrito']}",
+            f"{max_row['gap_pct']:+.1f}%",
+            f"€{max_row['idealista_price']:,} vs €{max_row['notarial_price']:,}/m²",
+            delta_color="inverse",
+        )
+        gk3.metric(
+            f"Más ajustado — {min_row['distrito']}",
+            f"{min_row['gap_pct']:+.1f}%",
+            f"€{min_row['idealista_price']:,} vs €{min_row['notarial_price']:,}/m²",
+            delta_color="normal",
+        )
 
     # =========================================================================
     # Price Drops trend

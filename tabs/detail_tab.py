@@ -150,7 +150,14 @@ def render_detail_tab() -> None:
                      "num_drops": drop_row.get("num_drops") or 0,
                      "total_drop_pct": drop_row.get("total_drop_pct") or 0}
 
-        factors = explain_score(score_row, distrito_stats, barrio_stats)
+        # Build notarial_stats for this distrito
+        _notarial_raw = get_notarial_prices(distrito=listing.get("distrito"))
+        _notarial_stats = {}
+        if _notarial_raw:
+            latest_not = max(_notarial_raw, key=lambda r: r["periodo"])
+            _notarial_stats[listing.get("distrito")] = latest_not["precio_m2"]
+
+        factors = explain_score(score_row, distrito_stats, barrio_stats, _notarial_stats)
         total_score = sum(f["points"] for f in factors)
         total_score = max(0, min(100, total_score))
 
