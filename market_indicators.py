@@ -683,7 +683,8 @@ def get_market_alerts(
     inventory: Dict = None,
     rotation: Dict = None,
     affordability: Dict = None,
-    macro: Dict = None
+    macro: Dict = None,
+    notarial_gap: Dict = None,
 ) -> list:
     """
     Detect significant market changes and return a list of alert dicts.
@@ -833,6 +834,28 @@ def get_market_alerts(
                 f"Euríbor 12M en {euribor_val:.2f}% con tendencia bajista. Buena señal para hipotecas.",
                 "euribor")
 
+    # ── Notarial gap alerts ───────────────────────────────────────────────────
+    if notarial_gap and notarial_gap.get("current") is not None:
+        gap = notarial_gap["current"]
+        yr  = notarial_gap.get("notarial_year", "")
+        max_d = notarial_gap.get("max_distrito", "")
+        max_g = notarial_gap.get("max_gap", 0)
+        if gap >= 40:
+            add("critical", "🏛️", "Sobreprecio extremo vs precio real",
+                f"La oferta en Idealista supera en {gap:.1f}% el precio escriturado notarial {yr}. "
+                f"Mayor tensión en {max_d} (+{max_g:.0f}%). Margen de negociación elevado.",
+                "notarial_gap")
+        elif gap >= 25:
+            add("warning", "🏛️", "Oferta por encima del precio real",
+                f"Gap medio Idealista vs notarial {yr}: +{gap:.1f}%. "
+                f"Los vendedores piden más de lo que se escritura en la mayoría de distritos.",
+                "notarial_gap")
+        elif gap < 5:
+            add("info", "🏛️", "Precios de oferta alineados con el notarial",
+                f"Gap medio Madrid vs notarial {yr}: {gap:+.1f}%. "
+                "Las diferencias entre oferta y precio real son mínimas.",
+                "notarial_gap")
+
     # Sort: critical first, then warning, then info
     order = {"critical": 0, "warning": 1, "info": 2}
     alerts.sort(key=lambda a: order.get(a["level"], 9))
@@ -965,6 +988,7 @@ def calculate_market_score(
     paro: Dict = None,
     affordability: Dict = None,
     price_drop_ratio: Dict = None,
+    notarial_gap: Dict = None,
 ) -> Dict:
     """
     Calculate composite market health score (0-100).
@@ -974,14 +998,15 @@ def calculate_market_score(
     - 40-74:  🟡 Neutral  (mercado en transición — señales mixtas)
     - 0-39:   🔴 Bearish  (mercado bajista — demanda débil, vendedores bajo presión)
 
-    Weights (revised):
-    - Price trend       : 25 %   ← bajado del 30 %
-    - Sales speed       : 20 %   ← bajado del 25 %
-    - Supply/demand     : 15 %   ← bajado del 20 %
-    - Affordability     : 15 %   ← NUEVO  (accesibilidad hipotecaria)
-    - Euríbor + trend   : 10 %   ← bajado del 15 %
-    - Price drop ratio  : 10 %   ← NUEVO  (estrés vendedor)
-    - Employment        :  5 %   ← bajado del 10 %
+    Weights:
+    - Price trend       : 20 %
+    - Sales speed       : 20 %
+    - Supply/demand     : 15 %
+    - Affordability     : 15 %
+    - Euríbor + trend   : 10 %
+    - Price drop ratio  : 10 %
+    - Notarial gap      :  5 %   ← NUEVO (tensión precio oferta vs precio real)
+    - Employment        :  5 %
     """
     scores: Dict = {}
 
@@ -1111,7 +1136,27 @@ def calculate_market_score(
         scores["price_drops"] = 50
 
     # ------------------------------------------------------------------
-    # 7. Employment (5 %) — lower unemployment → bullish
+    # 7. Notarial gap (5 %) — gap between asking prices and real prices
+    #    A large gap signals an overheated market (bearish for buyers).
+    #    A small or negative gap signals a realistic / deflating market.
+    # ------------------------------------------------------------------
+    if notarial_gap and notarial_gap.get("current") is not None:
+        gap = notarial_gap["current"]
+        if gap < 5:
+            scores["notarial_gap"] = 85   # prices almost aligned with reality
+        elif gap < 15:
+            scores["notarial_gap"] = 70
+        elif gap < 25:
+            scores["notarial_gap"] = 55
+        elif gap < 40:
+            scores["notarial_gap"] = 35
+        else:
+            scores["notarial_gap"] = 15   # extreme overvaluation vs real txns
+    else:
+        scores["notarial_gap"] = 50
+
+    # ------------------------------------------------------------------
+    # 8. Employment (5 %) — lower unemployment → bullish
     # ------------------------------------------------------------------
     if paro and paro.get("current"):
         paro_val = paro["current"]
@@ -1132,12 +1177,13 @@ def calculate_market_score(
     # Weighted total
     # ------------------------------------------------------------------
     weights = {
-        "prices":        0.25,
+        "prices":        0.20,
         "speed":         0.20,
         "supply_demand": 0.15,
         "affordability": 0.15,
         "euribor":       0.10,
         "price_drops":   0.10,
+        "notarial_gap":  0.05,
         "employment":    0.05,
     }
 
@@ -1530,6 +1576,39 @@ def get_rental_yield(min_listings: int = 3) -> Dict:
     }
 
 
+def get_notarial_gap_indicator() -> Dict:
+    """
+    Build a standard indicator dict for the avg Idealista vs notarial gap.
+    Gap > 0 means asking prices exceed real transaction prices (bearish for buyers).
+    """
+    try:
+        from database import get_notarial_gap_by_district
+        gap_data = get_notarial_gap_by_district()
+        if not gap_data:
+            return {"name": "Sobreprecio vs Notarial", "current": None, "unit": "%"}
+
+        import statistics
+        gaps = [r["gap_pct"] for r in gap_data]
+        avg_gap   = round(statistics.mean(gaps), 1)
+        max_row   = max(gap_data, key=lambda r: r["gap_pct"])
+        min_row   = min(gap_data, key=lambda r: r["gap_pct"])
+        year      = max(r["notarial_year"] for r in gap_data)
+
+        return {
+            "name":            "Sobreprecio vs Notarial",
+            "current":         avg_gap,
+            "unit":            "%",
+            "notarial_year":   year,
+            "max_distrito":    max_row["distrito"],
+            "max_gap":         max_row["gap_pct"],
+            "min_distrito":    min_row["distrito"],
+            "min_gap":         min_row["gap_pct"],
+            "all_gaps":        gap_data,
+        }
+    except Exception as e:
+        return {"name": "Sobreprecio vs Notarial", "current": None, "unit": "%", "error": str(e)}
+
+
 def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
     """
     Fetch all internal market indicators at once.
@@ -1548,6 +1627,7 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
         "affordability":    get_affordability_index(euribor_rate=euribor_rate),
         "price_drop_ratio": get_price_drop_ratio(),
         "rental_yield":     get_rental_yield(),
+        "notarial_gap":     get_notarial_gap_indicator(),
     }
     return indicators
 

@@ -37,6 +37,7 @@ def render_market_surveillance():
         paro=macro.get("paro"),
         affordability=indicators.get("affordability"),
         price_drop_ratio=indicators.get("price_drop_ratio"),
+        notarial_gap=indicators.get("notarial_gap"),
     )
 
     alerts = get_market_alerts(
@@ -46,7 +47,8 @@ def render_market_surveillance():
         inventory=indicators.get("inventory"),
         rotation=indicators.get("rotation"),
         affordability=indicators.get("affordability"),
-        macro=macro
+        macro=macro,
+        notarial_gap=indicators.get("notarial_gap"),
     )
 
     # ========================================================================
@@ -320,7 +322,7 @@ def _render_internal_kpis(indicators: dict):
             st.metric(label="🏠 Cuota Hipotecaria", value="Sin datos")
 
     # Third row — new indicators
-    col9, col10, col11, _ = st.columns(4)
+    col9, col10, col11, col12 = st.columns(4)
 
     # 9. Price drop ratio (seller stress)
     pdr = indicators.get("price_drop_ratio", {})
@@ -378,6 +380,29 @@ def _render_internal_kpis(indicators: dict):
                 label="🏘️ Rentabilidad Alquiler",
                 value="Sin datos",
                 help="Requiere datos de alquiler. Se actualizan con cada ejecución del scraper."
+            )
+
+    # 12. Notarial gap (overpricing vs real transaction prices)
+    ng = indicators.get("notarial_gap", {})
+    with col12:
+        gap_val = ng.get("current")
+        if gap_val is not None:
+            yr = ng.get("notarial_year", "")
+            badge = "🟢" if gap_val < 15 else ("🟡" if gap_val < 30 else "🔴")
+            max_d = ng.get("max_distrito", "")
+            st.metric(
+                label=f"🏛️ Sobreprecio vs Notarial {badge}",
+                value=f"{gap_val:+.1f}%",
+                delta=f"Mayor en {max_d}" if max_d else None,
+                delta_color="off",
+                help=(f"Gap medio entre €/m² de Idealista y el precio escriturado real "
+                      f"del Notariado {yr}. >30% = mercado muy tensionado.")
+            )
+        else:
+            st.metric(
+                label="🏛️ Sobreprecio vs Notarial",
+                value="Sin datos",
+                help="Requiere datos del Portal del Notariado importados en BD."
             )
 
 
@@ -1011,11 +1036,12 @@ def _render_score_breakdown(score: dict):
             "affordability": "🏠 Asequibilidad",
             "euribor":       "🏦 Euríbor + Tendencia",
             "price_drops":   "📉 Estrés Vendedor",
+            "notarial_gap":  "🏛️ Sobreprecio vs Notarial",
             "employment":    "👥 Empleo",
         }
 
         # Progress bars for each component
-        for key in ["prices", "speed", "supply_demand", "affordability", "euribor", "price_drops", "employment"]:
+        for key in ["prices", "speed", "supply_demand", "affordability", "euribor", "price_drops", "notarial_gap", "employment"]:
             component_score = components.get(key, 50)
             weight = weights.get(key, 0)
             weighted = component_score * weight
