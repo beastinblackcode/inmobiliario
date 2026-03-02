@@ -9,6 +9,10 @@ Optimizations applied:
 - Intelligent HTTP retry (only retries on transient errors, not 404/502)
 - Integrated retry mode for failed barrios (--retry flag)
 - Configurable description fetching (disabled by default)
+- Per-phase request tracking (venta / alquiler / retry)
+- Rental scraping frequency control (RENTAL_SCRAPE_INTERVAL_DAYS)
+- Per-barrio "already scraped today" guard to avoid double-runs
+- Request budget cap (BRIGHTDATA_REQUEST_BUDGET) to prevent runaway costs
 """
 
 import os
@@ -65,10 +69,26 @@ PAGE_HISTORY_FILE = "barrio_page_history.json"
 PAGE_HISTORY_MARGIN = 2
 
 # Maximum pages to scrape per barrio (hard limit)
-MAX_PAGES_PER_BARRIO = 60
+MAX_PAGES_PER_BARRIO = int(os.getenv('MAX_PAGES_PER_BARRIO', '30'))
 
 # Early exit: if this % of listings on page 1 were already seen today, skip remaining pages
-EARLY_EXIT_THRESHOLD = 0.95  # 95% already seen = skip
+EARLY_EXIT_THRESHOLD = 0.90  # 90% already seen = skip (more aggressive than previous 95%)
+
+# ---------------------------------------------------------------------------
+# COST CONTROL
+# ---------------------------------------------------------------------------
+
+# Maximum BrightData requests allowed per run (0 = unlimited).
+# If exceeded mid-run, scraping stops gracefully and logs a warning.
+# Set via env var to protect against runaway costs.
+BRIGHTDATA_REQUEST_BUDGET = int(os.getenv('BRIGHTDATA_REQUEST_BUDGET', '0'))
+
+# How often to re-scrape rental prices (days). Rental data changes slowly;
+# daily scraping wastes ~139 requests per run. Default: every 7 days.
+RENTAL_SCRAPE_INTERVAL_DAYS = int(os.getenv('RENTAL_SCRAPE_INTERVAL_DAYS', '7'))
+
+# File that records the last date rental scraping ran successfully.
+RENTAL_LAST_SCRAPED_FILE = "rental_last_scraped.txt"
 
 
 def load_page_history() -> Dict:
@@ -103,15 +123,23 @@ def get_max_pages_for_barrio(history: Dict, barrio_key: str) -> int:
 
 
 def update_page_history(history: Dict, barrio_key: str, pages_found: int) -> None:
-    """Update historical page count for a barrio."""
+    """Update historical page count and last-scraped date for a barrio."""
+    today = datetime.now().strftime("%Y-%m-%d")
     if barrio_key not in history:
-        history[barrio_key] = {'max_pages': pages_found, 'last_updated': ''}
+        history[barrio_key] = {'max_pages': pages_found, 'last_updated': today, 'last_scraped': today}
     else:
         history[barrio_key]['max_pages'] = max(
             history[barrio_key].get('max_pages', 0),
             pages_found
         )
-    history[barrio_key]['last_updated'] = datetime.now().strftime("%Y-%m-%d")
+        history[barrio_key]['last_updated'] = today
+        history[barrio_key]['last_scraped'] = today
+
+
+def was_barrio_scraped_today(history: Dict, barrio_key: str) -> bool:
+    """Return True if this barrio was already fully scraped today."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    return history.get(barrio_key, {}).get('last_scraped') == today
 
 # Madrid's barrios organized by district (139 total - Centro fixed with compound names)
 # Format: (Distrito, Barrio, URL_path)
@@ -320,8 +348,27 @@ def get_proxy_config() -> Optional[Dict]:
 # Global request counter for Bright Data usage tracking
 request_counter = {'successful': 0, 'failed': 0, 'total': 0}
 
+# Per-phase request counters: venta (sale scraping), rental, retry
+phase_counters: Dict[str, int] = {'venta': 0, 'rental': 0, 'retry': 0}
+
+# Current scraping phase (updated before each section runs)
+_current_phase: str = 'venta'
+
 # Global tracking for retryable errors (502, 404)
 retry_errors = []  # List of (distrito, barrio, url_path, error_code) tuples
+
+
+def _set_phase(phase: str) -> None:
+    """Switch the current scraping phase for request attribution."""
+    global _current_phase
+    _current_phase = phase
+
+
+def _budget_exceeded() -> bool:
+    """Return True if the configured request budget has been hit."""
+    if BRIGHTDATA_REQUEST_BUDGET <= 0:
+        return False
+    return request_counter['total'] >= BRIGHTDATA_REQUEST_BUDGET
 
 def get_brightdata_cost_estimate():
     """
@@ -374,8 +421,9 @@ def fetch_page(
 
     for attempt in range(retries):
         try:
-            # Increment request counter
+            # Increment request counters (global + per-phase)
             request_counter['total'] += 1
+            phase_counters[_current_phase] = phase_counters.get(_current_phase, 0) + 1
 
             response = requests.get(
                 url,
@@ -605,19 +653,30 @@ def scrape_barrio(
     Returns:
         Tuple of (total_listings, new_listings, updated_listings)
     """
-    print(f"\n📍 Scraping {distrito} - {barrio}...")
     listings_count = 0
     total_new = 0
     total_updated = 0
     page = 1
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Smart pagination: get max pages from history
+    # Guard: skip barrio if already fully scraped today (e.g. double-run in CI)
     barrio_key = f"{distrito}|{barrio}"
+    if page_history is not None and was_barrio_scraped_today(page_history, barrio_key):
+        print(f"\n⏭️  {distrito} - {barrio}: ya scrapeado hoy — omitiendo")
+        return 0, 0, 0
+
+    # Budget guard: stop before making more requests if budget is set and hit
+    if _budget_exceeded():
+        print(f"\n🛑 PRESUPUESTO ALCANZADO ({request_counter['total']:,} req) — omitiendo {barrio}")
+        return 0, 0, 0
+
+    print(f"\n📍 Scraping {distrito} - {barrio}...")
+
+    # Smart pagination: get max pages from history
     if page_history is not None:
         max_pages = get_max_pages_for_barrio(page_history, barrio_key)
         if max_pages < MAX_PAGES_PER_BARRIO:
-            print(f"  📊 Smart pagination: limit {max_pages} pages (historical)")
+            print(f"  📊 Smart pagination: limit {max_pages} páginas (histórico)")
     else:
         max_pages = MAX_PAGES_PER_BARRIO
 
@@ -901,7 +960,8 @@ def run_scraper(retry_only: bool = False):
         barrios_to_scrape = BARRIO_URLS
         print(f"\n🏘️ Scraping {len(barrios_to_scrape)} barrios...")
 
-    # Scrape barrios
+    # Scrape barrios (venta phase)
+    _set_phase('venta')
     for entry in barrios_to_scrape:
         distrito, barrio, url_path = entry[0], entry[1], entry[2]
         count, new_count, updated_count = scrape_barrio(
@@ -916,7 +976,8 @@ def run_scraper(retry_only: bool = False):
     save_page_history(page_history)
     print(f"\n  💾 Saved page history for {len(page_history)} barrios")
 
-    # Retry failed barrios (404/502 errors from this run)
+    # Retry failed barrios (retry phase)
+    _set_phase('retry')
     retry_count, retry_new, retry_updated = retry_failed_barrios(
         proxies, active_ids, page_history
     )
@@ -968,7 +1029,7 @@ def run_scraper(retry_only: bool = False):
     print("=" * 60)
 
     # -------------------------------------------------------------------------
-    # 💰 BRIGHT DATA COST REPORT
+    # 💰 BRIGHT DATA COST REPORT  (venta + retry phases, before rental)
     # -------------------------------------------------------------------------
     total_req = cost_data['total_requests']
     ok_req    = cost_data['successful_requests']
@@ -976,52 +1037,56 @@ def run_scraper(retry_only: bool = False):
     cost_usd  = cost_data['estimated_cost_usd']
     duration  = (end_time - start_time).total_seconds()
 
+    # Budget warning if cap was reached
+    if BRIGHTDATA_REQUEST_BUDGET > 0 and total_req >= BRIGHTDATA_REQUEST_BUDGET:
+        print(f"\n⚠️  PRESUPUESTO ALCANZADO: {total_req:,} / {BRIGHTDATA_REQUEST_BUDGET:,} requests")
+        print(f"   Aumenta BRIGHTDATA_REQUEST_BUDGET en .env o en GitHub Secrets si necesitas más.")
+
     print("\n")
-    print("╔" + "═" * 58 + "╗")
-    print("║" + "  💰  BRIGHT DATA — RESUMEN DE COSTE".center(58) + "║")
-    print("╠" + "═" * 58 + "╣")
+    print("╔" + "═" * 62 + "╗")
+    print("║" + "  💰  BRIGHT DATA — RESUMEN DE COSTE".center(62) + "║")
+    print("╠" + "═" * 62 + "╣")
 
     if total_req > 0:
         ok_pct   = ok_req / total_req * 100
         fail_pct = fail_req / total_req * 100
 
-        # Requests
-        print(f"║  {'Requests totales:':<28} {total_req:>8,}               ║")
-        print(f"║  {'  ✓ Exitosas:':<28} {ok_req:>8,}  ({ok_pct:4.1f}%)       ║")
-        print(f"║  {'  ✗ Fallidas:':<28} {fail_req:>8,}  ({fail_pct:4.1f}%)       ║")
-        print("╠" + "─" * 58 + "╣")
+        # Per-phase breakdown
+        venta_req  = phase_counters.get('venta', 0)
+        retry_req  = phase_counters.get('retry', 0)
+        # rental will be filled after run_rental_scraping()
+        print(f"║  {'Requests totales:':<30} {total_req:>8,}                   ║")
+        print(f"║  {'  ✓ Exitosas:':<30} {ok_req:>8,}  ({ok_pct:4.1f}%)         ║")
+        print(f"║  {'  ✗ Fallidas:':<30} {fail_req:>8,}  ({fail_pct:4.1f}%)         ║")
+        print("╠" + "─" * 62 + "╣")
+        print(f"║  {'Por fase — venta (anuncios):':<30} {venta_req:>8,}                   ║")
+        print(f"║  {'Por fase — retries:':<30} {retry_req:>8,}                   ║")
+        print(f"║  {'Por fase — alquiler:':<30} {'(ver abajo)':>12}               ║")
+        print("╠" + "─" * 62 + "╣")
 
         # Cost
         cost_per_req     = cost_usd / total_req
         cost_per_listing = cost_usd / total_listings if total_listings > 0 else 0
-        print(f"║  {'Coste estimado:':<28} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
-        print(f"║  {'Coste por request:':<28} {'$' + f'{cost_per_req:.5f}':>10} USD         ║")
-        print(f"║  {'Coste por anuncio:':<28} {'$' + f'{cost_per_listing:.5f}':>10} USD         ║")
-        print("╠" + "─" * 58 + "╣")
+        print(f"║  {'Coste estimado (sin alquiler):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
+        print(f"║  {'Coste por request:':<30} {'$' + f'{cost_per_req:.5f}':>10} USD         ║")
+        print(f"║  {'Coste por anuncio:':<30} {'$' + f'{cost_per_listing:.5f}':>10} USD         ║")
+        print("╠" + "─" * 62 + "╣")
 
         # Timing
         mins, secs = divmod(int(duration), 60)
         req_per_min = total_req / (duration / 60) if duration > 0 else 0
-        print(f"║  {'Duración total:':<28} {f'{mins}m {secs}s':>10}              ║")
-        print(f"║  {'Velocidad:':<28} {f'{req_per_min:.1f} req/min':>14}          ║")
-        print("╠" + "─" * 58 + "╣")
-
-        # Savings estimate (vs original with district scraping)
-        # Original made ~21 district passes before barrios → ~30% more requests
-        estimated_original = int(total_req * 1.35)
-        saved_req  = estimated_original - total_req
-        saved_cost = saved_req * (4.0 / 1000)
-        print(f"║  {'Ahorro vs versión anterior:':<28} ~{saved_req:>5,} req  (-35%)  ║")
-        print(f"║  {'Ahorro estimado en coste:':<28} {'≈$' + f'{saved_cost:.4f}':>10} USD         ║")
+        print(f"║  {'Duración total:':<30} {f'{mins}m {secs}s':>10}                  ║")
+        print(f"║  {'Velocidad:':<30} {f'{req_per_min:.1f} req/min':>14}              ║")
     else:
-        print("║" + "  Sin requests — todos los barrios ya estaban al día".center(58) + "║")
+        print("║" + "  Sin requests — todos los barrios ya estaban al día".center(62) + "║")
 
-    print("╚" + "═" * 58 + "╝")
+    print("╚" + "═" * 62 + "╝")
 
     # -------------------------------------------------------------------------
-    # 🏘️  RENTAL PRICE SCRAPING (page 1 per barrio, ~184 extra requests)
+    # 🏘️  RENTAL PRICE SCRAPING — frequency-controlled
     # -------------------------------------------------------------------------
-    run_rental_scraping(proxies)
+    _set_phase('rental')
+    _run_rental_if_due(proxies)
 
     # -------------------------------------------------------------------------
     # 🔍  NLP ANALYSIS — scan new descriptions for seller signals
@@ -1071,6 +1136,76 @@ def _parse_rental_prices(html: str) -> List[float]:
     except Exception as exc:
         print(f"  ⚠ Error parsing rental prices: {exc}")
     return prices
+
+
+def _rental_last_scraped_date() -> Optional[str]:
+    """Return the date string of the last successful rental scraping, or None."""
+    try:
+        p = Path(RENTAL_LAST_SCRAPED_FILE)
+        if p.exists():
+            return p.read_text(strip=True) if hasattr(p.read_text(), 'strip') else p.read_text().strip()
+    except IOError:
+        pass
+    return None
+
+
+def _rental_save_scraped_date() -> None:
+    """Record today as the last successful rental scraping date."""
+    try:
+        Path(RENTAL_LAST_SCRAPED_FILE).write_text(datetime.now().strftime("%Y-%m-%d"))
+    except IOError as e:
+        print(f"  ⚠ Could not save rental last-scraped date: {e}")
+
+
+def _rental_is_due() -> bool:
+    """Return True if it's time to re-scrape rental prices."""
+    if RENTAL_SCRAPE_INTERVAL_DAYS <= 0:
+        return True  # 0 = always run
+    last = _rental_last_scraped_date()
+    if last is None:
+        return True  # Never ran before
+    from datetime import date
+    try:
+        last_date = date.fromisoformat(last)
+        delta = (date.today() - last_date).days
+        return delta >= RENTAL_SCRAPE_INTERVAL_DAYS
+    except ValueError:
+        return True  # Bad date format → re-run to be safe
+
+
+def _run_rental_if_due(proxies: Optional[Dict] = None) -> None:
+    """
+    Run rental scraping only when the configured interval has elapsed.
+    Prints a clear skip message when not due, so CI logs are easy to read.
+    """
+    if not _rental_is_due():
+        last = _rental_last_scraped_date()
+        from datetime import date
+        days_since = (date.today() - date.fromisoformat(last)).days
+        days_left  = RENTAL_SCRAPE_INTERVAL_DAYS - days_since
+        rental_req_saved = len(BARRIO_URLS)
+        rental_cost_saved = rental_req_saved * (4.0 / 1000)
+        print("\n")
+        print("╔" + "═" * 62 + "╗")
+        print("║" + "  🏘️   ALQUILER — SCRAPING OMITIDO (intervalo)".center(62) + "║")
+        print("╠" + "═" * 62 + "╣")
+        print(f"║  {'Último scrape:':<30} {last:<30} ║")
+        print(f"║  {'Días desde el último:':<30} {days_since:<30} ║")
+        print(f"║  {'Próximo scrape en:':<30} {f'{days_left} días':30} ║")
+        print(f"║  {'Requests ahorradas hoy:':<30} {f'~{rental_req_saved} req (≈${rental_cost_saved:.4f})':30} ║")
+        print(f"║  {'Configura con:':<30} {'RENTAL_SCRAPE_INTERVAL_DAYS':30} ║")
+        print("╚" + "═" * 62 + "╝")
+        return
+
+    stored = run_rental_scraping(proxies)
+
+    # Print per-rental-phase cost
+    rental_req  = phase_counters.get('rental', 0)
+    rental_cost = rental_req * (4.0 / 1000)
+    print(f"\n  💰 Alquiler: {rental_req:,} requests usadas ≈ ${rental_cost:.4f} USD")
+
+    if stored > 0:
+        _rental_save_scraped_date()
 
 
 def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
