@@ -8,6 +8,7 @@ modules in the `tabs/` package.
 
 import streamlit as st
 import pandas as pd
+import streamlit.components.v1 as components
 from datetime import datetime
 from pathlib import Path
 
@@ -329,6 +330,57 @@ def main():
     with admin_tab:
         from tabs.admin_tab import render_admin_tab
         render_admin_tab(df)
+
+    # ------------------------------------------------------------------
+    # Tab persistence: restore active tab after Streamlit reruns.
+    # When the user interacts with a widget inside a tab (e.g. presses
+    # Enter in the Detalle URL input), Streamlit reruns the whole app
+    # and always resets to tab 0. We detect which tab should be active
+    # via session_state flags set by each tab module, then auto-click it
+    # via a small JS injection.
+    # Tab order (0-based): Dashboard=0, Mapa=1, Mi Espacio=2,
+    #   Oportunidades=3, Bajadas=4, Tendencias=5, Detalle=6, Admin=7
+    # ------------------------------------------------------------------
+    _tab_flags = {
+        "_goto_tab_detalle": 6,
+        "_goto_tab_oportunidades": 3,
+        "_goto_tab_tendencias": 5,
+    }
+    _target_tab = None
+    for flag, idx in _tab_flags.items():
+        if st.session_state.pop(flag, False):
+            _target_tab = idx
+            break
+
+    # Also restore Detalle tab whenever the URL input has a value,
+    # so that any rerun triggered from within the Detalle tab lands back there.
+    if _target_tab is None and st.session_state.get("detail_url_input", "").strip():
+        _target_tab = 6
+
+    if _target_tab is not None:
+        components.html(
+            f"""
+            <script>
+            (function() {{
+                // Poll until the tab buttons appear (Streamlit renders async)
+                let attempts = 0;
+                const maxAttempts = 20;
+                const interval = setInterval(function() {{
+                    const tabs = window.parent.document.querySelectorAll(
+                        '[data-testid="stTab"] button, button[role="tab"]'
+                    );
+                    if (tabs.length > {_target_tab}) {{
+                        clearInterval(interval);
+                        tabs[{_target_tab}].click();
+                    }} else if (++attempts >= maxAttempts) {{
+                        clearInterval(interval);
+                    }}
+                }}, 80);
+            }})();
+            </script>
+            """,
+            height=0,
+        )
 
     # ------------------------------------------------------------------
     # Footer
