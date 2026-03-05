@@ -37,6 +37,86 @@ def _get_listing_by_url(url: str) -> dict | None:
     return dict(row) if row else None
 
 
+def _get_listing_by_id(listing_id: str) -> dict | None:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT listing_id, title, url, price, distrito, barrio, rooms,
+                      size_sqm, floor, orientation, seller_type, description,
+                      first_seen_date, last_seen_date, status
+               FROM listings WHERE listing_id = ? LIMIT 1""",
+            (listing_id.strip(),),
+        )
+        row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _search_listings(query: str, limit: int = 8) -> list[dict]:
+    """
+    Full-text search across title, barrio, distrito and listing_id.
+    Returns up to `limit` results ordered by relevance (active first, then by
+    how well the query matches the title).
+    """
+    q = query.strip()
+    if not q:
+        return []
+
+    # If query looks like a listing ID (all digits) search by ID directly
+    if q.isdigit():
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """SELECT listing_id, title, url, price, distrito, barrio,
+                          rooms, size_sqm, floor, orientation, seller_type,
+                          description, first_seen_date, last_seen_date, status
+                   FROM listings
+                   WHERE listing_id LIKE ?
+                   ORDER BY status = 'active' DESC, listing_id
+                   LIMIT ?""",
+                (f"%{q}%", limit),
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    # If query looks like a URL, fall back to URL search
+    if q.startswith("http"):
+        result = _get_listing_by_url(q)
+        return [result] if result else []
+
+    # Free-text search: match against title, barrio, distrito
+    pattern = f"%{q}%"
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT listing_id, title, url, price, distrito, barrio,
+                      rooms, size_sqm, floor, orientation, seller_type,
+                      description, first_seen_date, last_seen_date, status
+               FROM listings
+               WHERE title LIKE ?
+                  OR barrio LIKE ?
+                  OR distrito LIKE ?
+                  OR listing_id LIKE ?
+               ORDER BY
+                   status = 'active' DESC,
+                   title LIKE ? DESC,
+                   last_seen_date DESC
+               LIMIT ?""",
+            (pattern, pattern, pattern, pattern, f"{q}%", limit),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def _format_result_label(r: dict) -> str:
+    """Human-readable label for a search result used in the selectbox."""
+    status_icon = "🟢" if r["status"] == "active" else "🔴"
+    price = f"€{r['price']:,}" if r.get("price") else "—"
+    size  = f"{int(r['size_sqm'])}m²" if r.get("size_sqm") else "—"
+    rooms = f"{r['rooms']}hab" if r.get("rooms") else "—"
+    return (
+        f"{status_icon} {r['title'][:55]}  ·  {r['barrio']}  ·  "
+        f"{price}  ·  {size}  ·  {rooms}"
+    )
+
+
 def _get_price_history(listing_id: str) -> list:
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -67,23 +147,64 @@ def _get_similar(listing: dict, exclude_id: str, limit: int = 5) -> list:
 
 def render_detail_tab() -> None:
     st.header("🔍 Detalle de Propiedad")
-    st.caption("Pega la URL de Idealista para ver el análisis completo del piso.")
 
-    # ── URL input ─────────────────────────────────────────────────────────────
-    url_input = st.text_input(
-        "URL del piso",
-        placeholder="https://www.idealista.com/inmueble/12345678/",
+    # ── Buscador inteligente ───────────────────────────────────────────────────
+    # Soporta: texto libre (título, barrio, distrito), ID numérico, URL completa
+    query = st.text_input(
+        "Buscar piso",
+        placeholder="Escribe título, barrio, ID o pega la URL de Idealista…",
         key="detail_url_input",
     )
 
-    if not url_input or not url_input.strip():
-        st.info("Introduce la URL del piso para ver su ficha completa.")
+    listing = None  # se resolverá a continuación
+
+    if not query or not query.strip():
+        st.info("💡 Busca por nombre del anuncio, barrio, ID numérico o pega directamente la URL de Idealista.")
         return
 
-    listing = _get_listing_by_url(url_input)
+    q = query.strip()
+
+    # ── Resolución directa: URL o ID exacto ───────────────────────────────────
+    if q.startswith("http"):
+        listing = _get_listing_by_url(q)
+        if not listing:
+            st.warning("No se encontró ningún piso con esa URL en la base de datos.")
+            return
+    elif q.isdigit() and len(q) >= 7:
+        listing = _get_listing_by_id(q)
+        if not listing:
+            st.warning(f"No se encontró ningún piso con el ID {q}.")
+            return
+    else:
+        # ── Búsqueda por texto: mostrar resultados como selector ───────────────
+        results = _search_listings(q)
+
+        if not results:
+            st.warning(f"Sin resultados para «{q}». Prueba con el barrio, parte del título o el ID del anuncio.")
+            return
+
+        if len(results) == 1:
+            # Un único resultado → cargarlo directamente
+            listing = results[0]
+        else:
+            # Varios resultados → selectbox para elegir
+            labels = [_format_result_label(r) for r in results]
+            labels_with_placeholder = ["— Selecciona un anuncio —"] + labels
+
+            selected_label = st.selectbox(
+                f"{len(results)} resultados encontrados",
+                options=labels_with_placeholder,
+                key="detail_search_select",
+            )
+
+            if selected_label == "— Selecciona un anuncio —":
+                return
+
+            selected_idx = labels.index(selected_label)
+            listing = results[selected_idx]
 
     if not listing:
-        st.warning("No se encontró ningún piso con esa URL en la base de datos.")
+        st.warning("No se pudo cargar el piso seleccionado.")
         return
 
     history = _get_price_history(listing["listing_id"])
