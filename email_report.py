@@ -319,42 +319,82 @@ def build_html_report(
         alert_blocks = ""
         for hit in hits:
             al      = hit["alert"]
-            matches = hit["matches"][:5]
+            matches = hit["matches"][:8]
             rows_html = ""
             for m in matches:
-                sqm   = f"€{m['price_sqm']:,.0f}/m²" if m.get("price_sqm") else "—"
-                size  = f"{m['size_sqm']}m²" if m.get("size_sqm") else "—"
-                url   = m.get("url", "#")
-                title = (m.get("title") or "—")[:50]
+                sqm_price = f"€{m['price_sqm']:,.0f}/m²" if m.get("price_sqm") else "—"
+                size      = f"{int(m['size_sqm'])}m²" if m.get("size_sqm") else "—"
+                rooms_str = f"{m['rooms']} hab." if m.get("rooms") else "—"
+                url       = m.get("url", "#")
+                title     = (m.get("title") or "—")[:55]
+                score     = m.get("score_oportunidad")
+                score_str = (
+                    f"<span style='background:{'#1b7f3a' if score >= 80 else '#e69c1a' if score >= 60 else '#888'};"
+                    f"color:white;border-radius:8px;padding:1px 7px;font-size:10px;font-weight:700;'>{int(score)}</span>"
+                    if score else ""
+                )
+                # NLP badges
+                nlp_parts = []
+                if m.get("urgency"):    nlp_parts.append("🔴 Urgente")
+                if m.get("direct"):     nlp_parts.append("💼 Directo")
+                if m.get("negotiable"): nlp_parts.append("🟡 Negociable")
+                if m.get("renovated"):  nlp_parts.append("🟢 Reformado")
+                if m.get("needs_work"): nlp_parts.append("🔧 A reformar")
+                nlp_html = (
+                    f"<br><small style='color:#777;font-size:10px;'>{'  ·  '.join(nlp_parts)}</small>"
+                    if nlp_parts else ""
+                )
+                first_seen = m.get("first_seen_date", "")[:10] if m.get("first_seen_date") else ""
                 rows_html += f"""
                 <tr style='border-bottom:1px solid #e8f5e9;'>
-                  <td style='padding:8px 12px;font-size:13px;'>
-                    <a href='{url}' style='color:#2e7d32;text-decoration:none;'>{title}</a><br>
-                    <small style='color:#888;'>{m.get('barrio','—')} · {size} · {al.get('seller_type') or ''}</small>
+                  <td style='padding:9px 12px;font-size:13px;'>
+                    <a href='{url}' style='color:#2e7d32;text-decoration:none;font-weight:600;'>{title}</a><br>
+                    <small style='color:#888;'>{m.get('barrio','—')}, {m.get('distrito','—')}
+                      · {rooms_str} · {size}
+                      {f'· visto: {first_seen}' if first_seen else ''}
+                    </small>
+                    {nlp_html}
                   </td>
-                  <td style='padding:8px 12px;text-align:right;font-size:13px;font-weight:bold;'>€{m['price']:,}</td>
-                  <td style='padding:8px 12px;text-align:right;font-size:13px;color:#555;'>{sqm}</td>
+                  <td style='padding:9px 12px;text-align:right;font-size:13px;font-weight:bold;'>€{m['price']:,}</td>
+                  <td style='padding:9px 12px;text-align:right;font-size:12px;color:#555;'>{sqm_price}</td>
+                  <td style='padding:9px 12px;text-align:center;'>{score_str}</td>
                 </tr>"""
+
+            n_total = len(hit["matches"])
+            criteria_tags = []
+            if al.get("max_price"):     criteria_tags.append(f"💰 ≤{al['max_price']:,}€")
+            if al.get("min_size"):      criteria_tags.append(f"📐 ≥{al['min_size']}m²")
+            if al.get("max_sqm_price"): criteria_tags.append(f"📊 ≤{al['max_sqm_price']:,}€/m²")
+            if al.get("min_rooms"):     criteria_tags.append(f"🛏️ ≥{al['min_rooms']} hab.")
+            if al.get("min_score"):     criteria_tags.append(f"⭐ Score ≥{al['min_score']}")
+            criteria_line = "  ·  ".join(criteria_tags) if criteria_tags else "Sin filtros adicionales"
+
             alert_blocks += f"""
-            <div style='margin-bottom:16px;'>
-              <p style='margin:0 0 8px;font-weight:700;font-size:14px;color:#1b5e20;'>🔔 {al['name']}</p>
+            <div style='margin-bottom:20px;border:1px solid #c8e6c9;border-radius:6px;overflow:hidden;'>
+              <div style='background:#e8f5e9;padding:10px 14px;'>
+                <p style='margin:0;font-weight:700;font-size:14px;color:#1b5e20;'>🔔 {al['name']}</p>
+                <p style='margin:2px 0 0;font-size:11px;color:#555;'>{criteria_line}</p>
+              </div>
               <table style='width:100%;border-collapse:collapse;'>
                 <thead>
-                  <tr style='background:#e8f5e9;'>
-                    <th style='padding:8px 12px;text-align:left;font-size:11px;color:#555;'>Propiedad</th>
-                    <th style='padding:8px 12px;text-align:right;font-size:11px;color:#555;'>Precio</th>
-                    <th style='padding:8px 12px;text-align:right;font-size:11px;color:#555;'>€/m²</th>
+                  <tr style='background:#f9fbe7;'>
+                    <th style='padding:7px 12px;text-align:left;font-size:11px;color:#666;'>Propiedad</th>
+                    <th style='padding:7px 12px;text-align:right;font-size:11px;color:#666;'>Precio</th>
+                    <th style='padding:7px 12px;text-align:right;font-size:11px;color:#666;'>€/m²</th>
+                    <th style='padding:7px 12px;text-align:center;font-size:11px;color:#666;'>Score</th>
                   </tr>
                 </thead>
                 <tbody>{rows_html}</tbody>
               </table>
-              <p style='margin:4px 0 0;font-size:11px;color:#aaa;'>{len(hit['matches'])} coincidencias en las últimas 24h</p>
+              <p style='margin:0;padding:6px 12px;font-size:11px;color:#aaa;background:#fafafa;'>
+                {n_total} coincidencia{'s' if n_total != 1 else ''} en las últimas 24h
+              </p>
             </div>"""
 
         custom_alerts_html = f"""
-        <div style='background:#f1f8e9;border-left:4px solid #2e7d32;border-radius:6px;padding:16px 20px;margin:24px 0 0;'>
-          <p style='margin:0 0 4px;font-weight:700;font-size:15px;color:#1b5e20;'>🔔 Tus Alertas Personalizadas</p>
-          <p style='margin:0 0 12px;color:#388e3c;font-size:12px;'>Nuevas propiedades en las últimas 24h que coinciden con tus criterios</p>
+        <div style='background:#f1f8e9;border-left:4px solid #2e7d32;border-radius:6px;padding:14px 18px;margin:28px 0 12px;'>
+          <p style='margin:0 0 2px;font-weight:700;font-size:15px;color:#1b5e20;'>🔔 Tus Alertas Personalizadas</p>
+          <p style='margin:0;color:#388e3c;font-size:12px;'>Nuevos anuncios en las últimas 24h que coinciden con tus criterios guardados</p>
         </div>
         {alert_blocks}"""
     else:

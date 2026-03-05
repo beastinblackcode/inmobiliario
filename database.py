@@ -2484,23 +2484,44 @@ def get_market_summary_trend() -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def init_alerts_table() -> None:
-    """Create custom_alerts table if it doesn't exist."""
+    """Create custom_alerts table and run additive migrations if needed."""
     with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS custom_alerts (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                name        TEXT NOT NULL,
-                distritos   TEXT,          -- JSON list, empty = all
-                barrios     TEXT,          -- JSON list, empty = all
-                max_price   INTEGER,
-                min_size    INTEGER,
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                name          TEXT NOT NULL,
+                distritos     TEXT,          -- JSON list, empty = all
+                barrios       TEXT,          -- JSON list, empty = all
+                max_price     INTEGER,
+                min_size      INTEGER,
                 max_sqm_price INTEGER,
-                min_rooms   INTEGER,
-                seller_type TEXT,          -- 'Particular', 'Agencia', or NULL = all
-                active      INTEGER DEFAULT 1,
-                created_at  TEXT DEFAULT (datetime('now'))
+                min_rooms     INTEGER,
+                seller_type   TEXT,          -- 'Particular', 'Agencia', or NULL = all
+                min_score     INTEGER,       -- minimum opportunity score (0-100), NULL = no filter
+                last_checked  TEXT,          -- ISO datetime of last time user viewed matches
+                active        INTEGER DEFAULT 1,
+                created_at    TEXT DEFAULT (datetime('now'))
             )
         """)
+        # Additive migrations for existing tables (safe to run repeatedly)
+        for col, definition in [
+            ("min_score",    "INTEGER"),
+            ("last_checked", "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE custom_alerts ADD COLUMN {col} {definition}")
+            except Exception:
+                pass  # Column already exists
+        conn.commit()
+
+
+def touch_alert_checked(alert_id: int) -> None:
+    """Update last_checked timestamp for an alert (called when user views matches)."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE custom_alerts SET last_checked = datetime('now') WHERE id = ?",
+            (alert_id,),
+        )
         conn.commit()
 
 
@@ -2519,14 +2540,15 @@ def get_alerts() -> List[Dict]:
 def add_alert(name: str, distritos: list = None, barrios: list = None,
               max_price: int = None, min_size: int = None,
               max_sqm_price: int = None, min_rooms: int = None,
-              seller_type: str = None) -> int:
+              seller_type: str = None, min_score: int = None) -> int:
     """Insert a new alert. Returns the new alert ID."""
     import json
     with get_connection() as conn:
         cur = conn.execute("""
             INSERT INTO custom_alerts
-              (name, distritos, barrios, max_price, min_size, max_sqm_price, min_rooms, seller_type)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+              (name, distritos, barrios, max_price, min_size, max_sqm_price,
+               min_rooms, seller_type, min_score)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             name,
             json.dumps(distritos or []),
@@ -2536,6 +2558,7 @@ def add_alert(name: str, distritos: list = None, barrios: list = None,
             max_sqm_price,
             min_rooms,
             seller_type,
+            min_score,
         ))
         conn.commit()
         return cur.lastrowid
@@ -2548,59 +2571,102 @@ def delete_alert(alert_id: int) -> None:
         conn.commit()
 
 
-def get_alert_matches(alert: Dict, hours: int = 24) -> List[Dict]:
+def get_alert_matches(
+    alert: Dict,
+    hours: int = 24,
+    since_datetime: str = None,
+) -> List[Dict]:
     """
-    Return listings added in the last N hours that match the given alert criteria.
+    Return listings that match the given alert criteria.
+
+    Time window (pick one):
+    - since_datetime: ISO datetime string — match listings first seen AFTER this timestamp.
+      Used for "new since last check" mode.
+    - hours: fallback rolling window (last N hours). Used when last_checked is None.
+
+    Also applies min_score filter if set on the alert, joining with nlp_signals for
+    NLP badge columns (urgency, direct, negotiable, renovated, needs_work).
     """
     import json
     try:
         distritos = json.loads(alert.get("distritos") or "[]")
         barrios   = json.loads(alert.get("barrios")   or "[]")
 
-        conditions = ["first_seen_date >= datetime('now', ? || ' hours')", "status = 'active'"]
-        params: List = [f"-{hours}"]
+        # Time filter
+        if since_datetime:
+            conditions = ["l.first_seen_date > ?", "l.status = 'active'"]
+            params: List = [since_datetime]
+        else:
+            conditions = ["l.first_seen_date >= datetime('now', ? || ' hours')", "l.status = 'active'"]
+            params = [f"-{hours}"]
 
         if distritos:
             placeholders = ",".join("?" * len(distritos))
-            conditions.append(f"distrito IN ({placeholders})")
+            conditions.append(f"l.distrito IN ({placeholders})")
             params.extend(distritos)
         if barrios:
             placeholders = ",".join("?" * len(barrios))
-            conditions.append(f"barrio IN ({placeholders})")
+            conditions.append(f"l.barrio IN ({placeholders})")
             params.extend(barrios)
         if alert.get("max_price"):
-            conditions.append("price <= ?")
+            conditions.append("l.price <= ?")
             params.append(alert["max_price"])
         if alert.get("min_size"):
-            conditions.append("size_sqm >= ?")
+            conditions.append("l.size_sqm >= ?")
             params.append(alert["min_size"])
         if alert.get("max_sqm_price"):
-            conditions.append("CAST(price AS FLOAT) / NULLIF(size_sqm, 0) <= ?")
+            conditions.append("CAST(l.price AS FLOAT) / NULLIF(l.size_sqm, 0) <= ?")
             params.append(alert["max_sqm_price"])
         if alert.get("min_rooms"):
-            conditions.append("rooms >= ?")
+            conditions.append("l.rooms >= ?")
             params.append(alert["min_rooms"])
         if alert.get("seller_type"):
-            conditions.append("seller_type = ?")
+            conditions.append("l.seller_type = ?")
             params.append(alert["seller_type"])
 
         where = " AND ".join(conditions)
+
+        # min_score filter applied in Python (score is computed by analytics, not stored)
+        # We pull nlp_signals columns for display, and filter by score in Python below.
         with get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute(f"""
-                SELECT listing_id, title, price, size_sqm, rooms,
-                       barrio, distrito, seller_type, url,
-                       ROUND(CAST(price AS FLOAT) / NULLIF(size_sqm, 0), 0) AS price_sqm
-                FROM listings
+                SELECT l.listing_id, l.title, l.price, l.size_sqm, l.rooms,
+                       l.barrio, l.distrito, l.seller_type, l.url,
+                       l.first_seen_date,
+                       ROUND(CAST(l.price AS FLOAT) / NULLIF(l.size_sqm, 0), 0) AS price_sqm,
+                       n.urgency, n.direct_sale AS direct,
+                       n.negotiable, n.renovated, n.needs_work,
+                       n.score_oportunidad
+                FROM listings l
+                LEFT JOIN nlp_signals n ON n.listing_id = l.listing_id
                 WHERE {where}
-                ORDER BY price ASC
-                LIMIT 20
+                ORDER BY l.first_seen_date DESC, l.price ASC
+                LIMIT 50
             """, params)
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+
+        # Apply min_score filter (score may be NULL for listings without NLP)
+        min_score = alert.get("min_score")
+        if min_score:
+            rows = [r for r in rows if (r.get("score_oportunidad") or 0) >= min_score]
+
+        return rows[:20]
+
     except Exception as exc:
         print(f"Error checking alert matches: {exc}")
         return []
+
+
+def count_alert_new_matches(alert: Dict) -> int:
+    """
+    Count new listings since the alert's last_checked timestamp (or last 24h if never checked).
+    Used to show unread badges in the UI without running the full match query.
+    """
+    since = alert.get("last_checked")
+    matches = get_alert_matches(alert, hours=24, since_datetime=since)
+    return len(matches)
 
 
 def _auto_import_notarial() -> None:

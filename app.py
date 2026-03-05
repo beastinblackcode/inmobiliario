@@ -279,12 +279,23 @@ def main():
     df["days_on_market"] = df.apply(calculate_days_on_market, axis=1)
 
     # ------------------------------------------------------------------
-    # Tabs
+    # Tabs — compute alert badge count before rendering
     # ------------------------------------------------------------------
+    _alert_badge = ""
+    try:
+        from database import get_alerts, count_alert_new_matches, init_alerts_table
+        init_alerts_table()
+        _alerts = get_alerts()
+        _total_new = sum(count_alert_new_matches(a) for a in _alerts)
+        if _total_new > 0:
+            _alert_badge = f" 🔴{_total_new}"
+    except Exception:
+        pass
+
     (dashboard_tab, map_tab, mi_espacio_tab,
      opportunities_tab, price_drops_tab, trends_tab,
      detail_tab, admin_tab) = st.tabs(
-        ["📊 Dashboard", "🗺️ Mapa", "🏠 Mi Espacio",
+        ["📊 Dashboard", "🗺️ Mapa", f"🏠 Mi Espacio{_alert_badge}",
          "🎯 Oportunidades", "📉 Bajadas de Precio", "📈 Tendencias",
          "🔍 Detalle", "⚙️ Administración"]
     )
@@ -298,8 +309,9 @@ def main():
         render_map_tab(df)
 
     with mi_espacio_tab:
+        _alerts_label = f"🔔 Alertas{_alert_badge}" if _alert_badge else "🔔 Alertas"
         sub_busqueda, sub_alertas, sub_watchlist = st.tabs([
-            "🔍 Búsqueda", "🔔 Alertas", "📌 Watchlist"
+            "🔍 Búsqueda", _alerts_label, "📌 Watchlist"
         ])
         with sub_busqueda:
             from tabs.search_tab import render_search_tab
