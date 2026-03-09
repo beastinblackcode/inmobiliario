@@ -183,6 +183,58 @@ def _load_price_drop_stats() -> Dict:
     return _safe(get_price_drop_stats) or {}
 
 
+def _build_aged_stock_alert(threshold_warning: float = 0.35,
+                             threshold_critical: float = 0.50,
+                             min_days: int = 90) -> Optional[Dict]:
+    """
+    Returns an alert dict if a significant % of active listings have been
+    on the market for more than *min_days* days — a sign of weak real demand.
+
+    Returns None if the data is insufficient or below the threshold.
+    """
+    from database import get_connection
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(f"""
+                SELECT
+                    COUNT(*) AS total_active,
+                    SUM(CASE
+                        WHEN julianday('now') - julianday(first_seen_date) > {min_days}
+                        THEN 1 ELSE 0
+                    END) AS aged_count
+                FROM listings
+                WHERE status = 'active'
+                  AND first_seen_date IS NOT NULL
+            """)
+            row = cur.fetchone()
+        if not row:
+            return None
+        total, aged = row
+        if not total or total < 50:          # not enough data
+            return None
+        aged = aged or 0
+        ratio = aged / total
+        if ratio < threshold_warning:
+            return None
+
+        pct = round(ratio * 100, 1)
+        level = "critical" if ratio >= threshold_critical else "warning"
+        return {
+            "level": level,
+            "metric": "aged_stock",
+            "title": f"Stock envejecido: {pct}% lleva +{min_days} días",
+            "detail": (
+                f"{aged:,} de {total:,} pisos activos llevan más de {min_days} días "
+                f"en el mercado ({pct}%). Esto sugiere que la demanda real es más débil "
+                f"de lo que indica el volumen de oferta."
+            ),
+        }
+    except Exception as exc:
+        print(f"⚠️  _build_aged_stock_alert failed: {exc}")
+        return None
+
+
 # ===================================================================
 # Sanitise helpers  (strip series / internal data that might leak
 # individual listing info)
@@ -214,8 +266,11 @@ def _sanitise_alert(alert: Dict) -> Dict:
     return {
         "level": alert.get("level", "info"),
         "title": alert.get("title", ""),
-        "message": alert.get("message", ""),
+        "message": alert.get("detail") or alert.get("message", ""),
     }
+
+# Métricas cuyo ratio es poco fiable por limitaciones del scraper
+_UNRELIABLE_METRICS = {"supply_demand"}
 
 
 # ===================================================================
@@ -240,8 +295,13 @@ def build_public_metrics() -> Dict[str, Any]:
     # 3. Market score
     score = _load_market_score(indicators, euribor, paro)
 
-    # 4. Alerts
+    # 4. Alerts (base)
     alerts_raw = _load_market_alerts(indicators, macro)
+
+    # 4b. Custom alerts (not in market_indicators.py)
+    aged_alert = _build_aged_stock_alert()
+    if aged_alert:
+        alerts_raw = alerts_raw + [aged_alert]
 
     # 5. Zone-level data
     zone_prices = _load_zone_prices()
@@ -322,7 +382,10 @@ def build_public_metrics() -> Dict[str, Any]:
         "notarial_gap": notarial_gap,
         "price_drop_stats": drop_stats,
         "db_stats": db_stats,
-        "alerts": [_sanitise_alert(a) for a in alerts_raw[:10]],
+        "alerts": [
+            _sanitise_alert(a) for a in alerts_raw
+            if a.get("metric") not in _UNRELIABLE_METRICS
+        ][:10],
     }
 
     print(f"✅ Public metrics generated — {len(json.dumps(metrics)) / 1024:.1f} KB")
