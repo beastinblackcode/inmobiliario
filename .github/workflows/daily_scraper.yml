@@ -8,7 +8,7 @@ on:
     # Permite lanzar manualmente desde la pestaña Actions de GitHub
 
 permissions:
-  contents: write                # Needed to commit drive_file_id.txt back to repo
+  contents: read
 
 jobs:
   scrape:
@@ -93,16 +93,6 @@ jobs:
           GOOGLE_SA_CREDENTIALS: ${{ secrets.GOOGLE_SA_CREDENTIALS }}
           GOOGLE_DRIVE_FILE_ID:  ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
         run: python ci_drive_upload.py
-
-      # ── 8. Persistir file ID si cambió ──────────────────────────────────────
-      - name: Commit updated Drive file ID
-        run: |
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add drive_file_id.txt
-          git diff --staged --quiet || git commit -m "chore: update Drive file ID [skip ci]"
-          git push
-        continue-on-error: true
 
       # ── 9. Resumen ────────────────────────────────────────────────────────────
       - name: Scrape summary
