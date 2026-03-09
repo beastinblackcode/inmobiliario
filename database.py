@@ -2453,7 +2453,11 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
 
 def get_market_summary_trend() -> List[Dict]:
     """
-    Weekly overall market stats: avg price, avg €/m², new listings, sold/removed.
+    Weekly market price trend based on last_seen_date.
+
+    Groups active listings by the week the scraper last checked them, giving a
+    rolling snapshot of the market price each week (rather than grouping by
+    first_seen_date which stagnates once the initial bulk load is complete).
     """
     try:
         with get_connection() as conn:
@@ -2461,15 +2465,15 @@ def get_market_summary_trend() -> List[Dict]:
             cur = conn.cursor()
             cur.execute("""
                 SELECT
-                    strftime('%Y-%W', first_seen_date)            AS week,
-                    date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
+                    strftime('%Y-%W', last_seen_date)            AS week,
+                    date(last_seen_date, 'weekday 1', '-7 days') AS week_start,
                     ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
                     ROUND(AVG(price), 0)                          AS avg_price,
                     COUNT(*)                                       AS n_listings
                 FROM listings
                 WHERE size_sqm > 20
                   AND price > 50000
-                  AND first_seen_date IS NOT NULL
+                  AND last_seen_date IS NOT NULL
                 GROUP BY week
                 ORDER BY week
             """)
