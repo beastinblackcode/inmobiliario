@@ -183,6 +183,134 @@ def _load_price_drop_stats() -> Dict:
     return _safe(get_price_drop_stats) or {}
 
 
+# All 139 barrios tracked by the scraper, grouped by district
+_ALL_BARRIOS: list = [
+    # Arganzuela
+    ("Arganzuela", "Acacias"), ("Arganzuela", "Chopera"), ("Arganzuela", "Delicias"),
+    ("Arganzuela", "Imperial"), ("Arganzuela", "Legazpi"), ("Arganzuela", "Palos de la Frontera"),
+    # Barajas
+    ("Barajas", "Aeropuerto"), ("Barajas", "Alameda de Osuna"),
+    ("Barajas", "Campo de las Naciones"), ("Barajas", "Casco Histórico de Barajas"), ("Barajas", "Timón"),
+    # Carabanchel
+    ("Carabanchel", "Abrantes"), ("Carabanchel", "Buena Vista"), ("Carabanchel", "Comillas"),
+    ("Carabanchel", "Opañel"), ("Carabanchel", "PAU de Carabanchel"), ("Carabanchel", "Puerta Bonita"),
+    ("Carabanchel", "San Isidro"), ("Carabanchel", "Vista Alegre"),
+    # Centro
+    ("Centro", "Chueca-Justicia"), ("Centro", "Huertas-Cortes"), ("Centro", "Lavapiés-Embajadores"),
+    ("Centro", "Malasaña-Universidad"), ("Centro", "Palacio"), ("Centro", "Sol"),
+    # Chamartín
+    ("Chamartín", "Bernabéu-Hispanoamérica"), ("Chamartín", "Castilla"), ("Chamartín", "Ciudad Jardín"),
+    ("Chamartín", "El Viso"), ("Chamartín", "Nueva España"), ("Chamartín", "Prosperidad"),
+    # Chamberí
+    ("Chamberí", "Almagro"), ("Chamberí", "Arapiles"), ("Chamberí", "Gaztambide"),
+    ("Chamberí", "Nuevos Ministerios-Ríos Rosas"), ("Chamberí", "Trafalgar"), ("Chamberí", "Vallehermoso"),
+    # Ciudad Lineal
+    ("Ciudad Lineal", "Atalaya"), ("Ciudad Lineal", "Colina"), ("Ciudad Lineal", "Concepción"),
+    ("Ciudad Lineal", "Costillares"), ("Ciudad Lineal", "Pueblo Nuevo"), ("Ciudad Lineal", "Quintana"),
+    ("Ciudad Lineal", "San Juan Bautista"), ("Ciudad Lineal", "San Pascual"), ("Ciudad Lineal", "Ventas"),
+    # Fuencarral-El Pardo
+    ("Fuencarral-El Pardo", "Arroyo del Fresno"), ("Fuencarral-El Pardo", "El Pardo"),
+    ("Fuencarral-El Pardo", "Fuentelarreina"), ("Fuencarral-El Pardo", "La Paz"),
+    ("Fuencarral-El Pardo", "Las Tablas"), ("Fuencarral-El Pardo", "Mirasierra"),
+    ("Fuencarral-El Pardo", "Montecarmelo"), ("Fuencarral-El Pardo", "Peñagrande"),
+    ("Fuencarral-El Pardo", "Pilar"), ("Fuencarral-El Pardo", "Tres Olivos-Valverde"),
+    # Hortaleza
+    ("Hortaleza", "Apóstol Santiago"), ("Hortaleza", "Canillas"), ("Hortaleza", "Conde Orgaz-Piovera"),
+    ("Hortaleza", "Palomas"), ("Hortaleza", "Pinar del Rey"), ("Hortaleza", "Sanchinarro"),
+    ("Hortaleza", "Valdebebas-Valdefuentes"), ("Hortaleza", "Virgen del Cortijo-Manoteras"),
+    # Latina
+    ("Latina", "Águilas"), ("Latina", "Aluche"), ("Latina", "Campamento"),
+    ("Latina", "Cuatro Vientos"), ("Latina", "Los Cármenes"), ("Latina", "Lucero"),
+    ("Latina", "Puerta del Ángel"),
+    # Moncloa-Aravaca
+    ("Moncloa-Aravaca", "Aravaca"), ("Moncloa-Aravaca", "Argüelles"), ("Moncloa-Aravaca", "Casa de Campo"),
+    ("Moncloa-Aravaca", "Ciudad Universitaria"), ("Moncloa-Aravaca", "El Plantío"),
+    ("Moncloa-Aravaca", "Valdemarín"), ("Moncloa-Aravaca", "Valdezarza"),
+    # Moratalaz
+    ("Moratalaz", "Fontarrón"), ("Moratalaz", "Horcajo"), ("Moratalaz", "Marroquina"),
+    ("Moratalaz", "Media Legua"), ("Moratalaz", "Pavones"), ("Moratalaz", "Vinateros"),
+    # Puente de Vallecas
+    ("Puente de Vallecas", "Entrevías"), ("Puente de Vallecas", "Numancia"),
+    ("Puente de Vallecas", "Palomeras Bajas"), ("Puente de Vallecas", "Palomeras Sureste"),
+    ("Puente de Vallecas", "Portazgo"), ("Puente de Vallecas", "San Diego"),
+    # Retiro
+    ("Retiro", "Adelfas"), ("Retiro", "Estrella"), ("Retiro", "Ibiza"),
+    ("Retiro", "Jerónimos"), ("Retiro", "Niño Jesús"), ("Retiro", "Pacífico"),
+    # Salamanca
+    ("Salamanca", "Castellana"), ("Salamanca", "Fuente del Berro"), ("Salamanca", "Goya"),
+    ("Salamanca", "Guindalera"), ("Salamanca", "Lista"), ("Salamanca", "Recoletos"),
+    # San Blas-Canillejas
+    ("San Blas-Canillejas", "Amposta"), ("San Blas-Canillejas", "Arcos"),
+    ("San Blas-Canillejas", "Canillejas"), ("San Blas-Canillejas", "Hellín"),
+    ("San Blas-Canillejas", "Rejas"), ("San Blas-Canillejas", "Rosas"),
+    ("San Blas-Canillejas", "Salvador"), ("San Blas-Canillejas", "Simancas"),
+    # Tetuán
+    ("Tetuán", "Bellas Vistas"), ("Tetuán", "Berruguete"), ("Tetuán", "Cuatro Caminos"),
+    ("Tetuán", "Cuzco-Castillejos"), ("Tetuán", "Valdeacederas"), ("Tetuán", "Ventilla-Almenara"),
+    # Usera
+    ("Usera", "12 de Octubre-Orcasur"), ("Usera", "Almendrales"), ("Usera", "Moscardó"),
+    ("Usera", "Orcasitas"), ("Usera", "Pradolongo"), ("Usera", "San Fermín"), ("Usera", "Zofío"),
+    # Vicálvaro
+    ("Vicálvaro", "Ambroz"), ("Vicálvaro", "Casco Histórico de Vicálvaro"),
+    ("Vicálvaro", "El Cañaveral"), ("Vicálvaro", "Los Ahijones"), ("Vicálvaro", "Los Berrocales"),
+    ("Vicálvaro", "Los Cerros"), ("Vicálvaro", "Valdebernardo-Valderrivas"),
+    # Villa de Vallecas
+    ("Villa de Vallecas", "Casco Histórico de Vallecas"),
+    ("Villa de Vallecas", "Ensanche de Vallecas-La Gavia"),
+    ("Villa de Vallecas", "Santa Eugenia"), ("Villa de Vallecas", "Valdecarros"),
+    # Villaverde
+    ("Villaverde", "Butarque"), ("Villaverde", "Los Ángeles"), ("Villaverde", "Los Rosales"),
+    ("Villaverde", "San Cristóbal"), ("Villaverde", "Villaverde Alto"),
+]
+
+
+def _load_barrio_data(rental_yields_raw: list) -> list:
+    """
+    Build a summary entry for each of the 139 tracked barrios.
+    Merges KPIs from get_barrio_summary() with rental yield if available.
+    Barrios with fewer than 5 active listings are still included but with null values.
+    """
+    from database import get_barrio_summary
+    barrio_names = [b for _, b in _ALL_BARRIOS]
+    distrito_map = {b: d for d, b in _ALL_BARRIOS}
+
+    summaries = _safe(get_barrio_summary, barrio_names) or []
+    summary_map = {s["barrio"]: s for s in summaries}
+
+    # Build yield lookup by barrio name
+    yield_map = {ry.get("barrio", ""): ry for ry in rental_yields_raw}
+
+    result = []
+    for distrito, barrio in _ALL_BARRIOS:
+        s = summary_map.get(barrio, {})
+        ry = yield_map.get(barrio, {})
+        entry = {
+            "barrio": barrio,
+            "distrito": s.get("distrito") or distrito,
+            "active_count": s.get("active_count"),
+            "median_price": round(s["median_price"]) if s.get("median_price") else None,
+            "price_per_sqm": round(s["median_price_sqm"]) if s.get("median_price_sqm") else None,
+            "avg_size_sqm": round(s["avg_size_sqm"], 1) if s.get("avg_size_sqm") else None,
+            "avg_rooms": round(s["avg_rooms"], 1) if s.get("avg_rooms") else None,
+            "avg_days_market": round(s["avg_days_market"]) if s.get("avg_days_market") else None,
+            "gross_yield": ry.get("yield_pct"),
+            "rent_median": ry.get("median_rent"),
+        }
+        result.append(entry)
+    return result
+
+
+def _load_barrio_trends(barrios_with_data: list) -> list:
+    """
+    Return weekly price evolution for barrios that have active listings.
+    Uses last_seen_date (same approach as market/district trends).
+    """
+    from database import get_price_evolution_by_barrio
+    if not barrios_with_data:
+        return []
+    return _safe(get_price_evolution_by_barrio, barrios_with_data, 12) or []
+
+
 def _build_aged_stock_alert(threshold_warning: float = 0.35,
                              threshold_critical: float = 0.50,
                              min_days: int = 90) -> Optional[Dict]:
@@ -317,6 +445,11 @@ def build_public_metrics() -> Dict[str, Any]:
     db_stats = _load_db_stats()
     drop_stats = _load_price_drop_stats()
 
+    # 8. Barrio-level data (Fase 2)
+    barrios_data = _load_barrio_data(rental_yields)
+    barrios_with_data = [b["barrio"] for b in barrios_data if b.get("active_count")]
+    barrio_trends = _load_barrio_trends(barrios_with_data)
+
     # ----- Merge zone prices + speed into one list -----
     speed_map = {z.get("zone"): z for z in zone_speed}
     zones_merged = []
@@ -380,6 +513,8 @@ def build_public_metrics() -> Dict[str, Any]:
             "by_district": district_trend,
         },
         "notarial_gap": notarial_gap,
+        "barrios": barrios_data,
+        "barrio_trends": barrio_trends,
         "price_drop_stats": drop_stats,
         "db_stats": db_stats,
         "alerts": [

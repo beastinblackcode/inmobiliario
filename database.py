@@ -1360,13 +1360,14 @@ def get_price_evolution_by_barrio(barrios: List[str], weeks: int = 16) -> List[D
             cursor.execute(f"""
                 SELECT
                     barrio,
-                    strftime('%Y-%W', first_seen_date)          AS week,
-                    MIN(first_seen_date)                        AS week_start,
-                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm,0)) AS median_price_sqm,
-                    COUNT(*)                                    AS listing_count
+                    strftime('%Y-%W', last_seen_date)               AS week,
+                    date(last_seen_date, 'weekday 1', '-7 days')    AS week_start,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm,0))  AS median_price_sqm,
+                    COUNT(*)                                         AS listing_count
                 FROM listings
                 WHERE barrio IN ({placeholders})
-                  AND first_seen_date >= ?
+                  AND last_seen_date >= ?
+                  AND last_seen_date IS NOT NULL
                   AND price   > 0
                   AND size_sqm > 10
                 GROUP BY barrio, week
