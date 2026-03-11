@@ -311,6 +311,230 @@ def _load_barrio_trends(barrios_with_data: list) -> list:
     return _safe(get_price_evolution_by_barrio, barrios_with_data, 12) or []
 
 
+def _load_valuation_model() -> Dict:
+    """
+    Compute valuation coefficients from the listings data.
+
+    Returns a dict with:
+    - barrio_baselines: per-barrio median €/m², count, std, avg_rooms, avg_size
+    - district_baselines: per-district fallback
+    - adjustments: global coefficients for floor, elevator, exterior
+    - model_stats: training samples, date
+    """
+    import statistics
+    from collections import defaultdict
+    from database import get_connection
+
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT distrito, barrio, price, size_sqm, rooms, floor, orientation
+                FROM listings
+                WHERE status IN ('active', 'sold_removed')
+                  AND price > 10000
+                  AND size_sqm > 10
+                  AND distrito IS NOT NULL
+                  AND barrio IS NOT NULL
+            """)
+            rows = cur.fetchall()
+
+        if not rows:
+            return {}
+
+        # ── Parse floor & orientation ─────────────────
+        import re
+
+        def parse_floor(floor_str):
+            if not floor_str:
+                return 0.0, None, None
+            f = str(floor_str).lower()
+            has_lift = True if "con ascensor" in f else (False if "sin ascensor" in f else None)
+            is_ext = None  # extracted from orientation
+            level = 0.0
+            if "bajo" in f or "sótano" in f:
+                level = 0.0
+            elif "entreplanta" in f:
+                level = 0.5
+            elif "ático" in f:
+                level = 10.0
+            else:
+                m = re.search(r"planta (\d+)", f)
+                if m:
+                    level = float(m.group(1))
+            return level, has_lift, is_ext
+
+        # ── Gather per-barrio stats ────────────────────
+        barrio_data = defaultdict(lambda: {
+            "prices_sqm": [], "sizes": [], "rooms_list": [],
+            "floors": [], "with_lift": 0, "without_lift": 0,
+            "exterior": 0, "interior": 0, "distrito": "",
+        })
+
+        for distrito, barrio, price, size_sqm, rooms, floor, orient in rows:
+            psqm = price / size_sqm
+            bd = barrio_data[barrio]
+            bd["distrito"] = distrito
+            bd["prices_sqm"].append(psqm)
+            bd["sizes"].append(size_sqm)
+            if rooms:
+                bd["rooms_list"].append(rooms)
+            level, has_lift, _ = parse_floor(floor)
+            bd["floors"].append(level)
+            if has_lift is True:
+                bd["with_lift"] += 1
+            elif has_lift is False:
+                bd["without_lift"] += 1
+            if orient:
+                o = str(orient).lower()
+                if o == "exterior":
+                    bd["exterior"] += 1
+                elif o == "interior":
+                    bd["interior"] += 1
+
+        # ── Build barrio baselines ─────────────────────
+        barrio_baselines = {}
+        all_prices_sqm = []
+
+        for barrio, bd in barrio_data.items():
+            plist = bd["prices_sqm"]
+            if len(plist) < 3:
+                continue
+            med = statistics.median(plist)
+            # Filter extreme outliers (>3x or <0.33x median)
+            filtered = [p for p in plist if 0.33 * med < p < 3 * med]
+            if len(filtered) < 3:
+                filtered = plist
+
+            med_clean = statistics.median(filtered)
+            std = statistics.stdev(filtered) if len(filtered) > 1 else med_clean * 0.15
+            all_prices_sqm.extend(filtered)
+
+            barrio_baselines[barrio] = {
+                "distrito": bd["distrito"],
+                "median_sqm": round(med_clean),
+                "std_sqm": round(std),
+                "count": len(filtered),
+                "avg_size": round(statistics.mean(bd["sizes"]), 1),
+                "avg_rooms": round(statistics.mean(bd["rooms_list"]), 1) if bd["rooms_list"] else None,
+                "avg_floor": round(statistics.mean(bd["floors"]), 1) if bd["floors"] else None,
+            }
+
+        # ── District baselines (fallback) ──────────────
+        district_data = defaultdict(list)
+        for barrio, bl in barrio_baselines.items():
+            district_data[bl["distrito"]].append(bl["median_sqm"])
+
+        district_baselines = {}
+        for dist, prices in district_data.items():
+            district_baselines[dist] = {
+                "median_sqm": round(statistics.median(prices)),
+                "count": sum(
+                    barrio_baselines[b]["count"]
+                    for b, bl in barrio_baselines.items()
+                    if bl["distrito"] == dist
+                ),
+            }
+
+        # ── Global adjustment coefficients ─────────────
+        # Elevator premium: compare with_lift vs without_lift listings
+        lift_prices = []
+        no_lift_prices = []
+        ext_prices = []
+        int_prices = []
+
+        for _, bd in barrio_data.items():
+            # We need individual listing data for this...
+            pass
+
+        # Recompute from raw rows for elevator & exterior premium
+        lift_sqm = []
+        no_lift_sqm = []
+        ext_sqm = []
+        int_sqm = []
+        floor_price_pairs = []  # (floor_level, €/m²)
+
+        for _, _, price, size_sqm, _, floor, orient in rows:
+            psqm = price / size_sqm
+            level, has_lift, _ = parse_floor(floor)
+            if has_lift is True:
+                lift_sqm.append(psqm)
+            elif has_lift is False:
+                no_lift_sqm.append(psqm)
+            if orient:
+                o = str(orient).lower()
+                if o == "exterior":
+                    ext_sqm.append(psqm)
+                elif o == "interior":
+                    int_sqm.append(psqm)
+            floor_price_pairs.append((level, psqm))
+
+        # Calculate premiums
+        lift_premium = 0.0
+        if lift_sqm and no_lift_sqm:
+            med_lift = statistics.median(lift_sqm)
+            med_no_lift = statistics.median(no_lift_sqm)
+            if med_no_lift > 0:
+                lift_premium = round((med_lift - med_no_lift) / med_no_lift, 4)
+
+        ext_premium = 0.0
+        if ext_sqm and int_sqm:
+            med_ext = statistics.median(ext_sqm)
+            med_int = statistics.median(int_sqm)
+            if med_int > 0:
+                ext_premium = round((med_ext - med_int) / med_int, 4)
+
+        # Floor premium per level (approximate)
+        floor_premium = 0.015  # default 1.5% per floor
+        if floor_price_pairs:
+            # Simple: compare floor >=3 vs floor 0-1
+            high_floor = [p for f, p in floor_price_pairs if f >= 3]
+            low_floor = [p for f, p in floor_price_pairs if f <= 1]
+            if high_floor and low_floor:
+                med_high = statistics.median(high_floor)
+                med_low = statistics.median(low_floor)
+                if med_low > 0:
+                    avg_diff = (med_high - med_low) / med_low
+                    # Divide by ~4 floors difference to get per-floor premium
+                    floor_premium = round(avg_diff / 4, 4)
+                    floor_premium = max(0.005, min(0.04, floor_premium))  # clamp
+
+        # Room premium (per extra room vs barrio median)
+        room_premium = 0.02  # default 2% per room
+
+        # Madrid global median
+        madrid_median_sqm = round(statistics.median(all_prices_sqm)) if all_prices_sqm else 0
+
+        return {
+            "barrio_baselines": barrio_baselines,
+            "district_baselines": district_baselines,
+            "adjustments": {
+                "elevator_premium": round(lift_premium, 4),
+                "exterior_premium": round(ext_premium, 4),
+                "floor_premium_per_level": round(floor_premium, 4),
+                "room_premium_per_unit": round(room_premium, 4),
+                "terrace_premium": 0.06,
+                "garage_premium": 0.04,
+                "condition_reformado": 0.12,
+                "condition_obra_nueva": 0.18,
+                "energy_A": 0.05,
+                "energy_B": 0.03,
+                "energy_C": 0.01,
+                "energy_D": 0.0,
+                "energy_E": -0.02,
+                "energy_F": -0.04,
+                "energy_G": -0.06,
+            },
+            "madrid_median_sqm": madrid_median_sqm,
+            "training_samples": len(rows),
+            "training_date": datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception as exc:
+        print(f"⚠️  _load_valuation_model failed: {exc}")
+        traceback.print_exc()
+        return {}
+
+
 def _build_aged_stock_alert(threshold_warning: float = 0.35,
                              threshold_critical: float = 0.50,
                              min_days: int = 90) -> Optional[Dict]:
@@ -450,6 +674,9 @@ def build_public_metrics() -> Dict[str, Any]:
     barrios_with_data = [b["barrio"] for b in barrios_data if b.get("active_count")]
     barrio_trends = _load_barrio_trends(barrios_with_data)
 
+    # 9. Valuation model coefficients (Fase 5)
+    valuation_model = _load_valuation_model()
+
     # ----- Merge zone prices + speed into one list -----
     speed_map = {z.get("zone"): z for z in zone_speed}
     zones_merged = []
@@ -521,6 +748,7 @@ def build_public_metrics() -> Dict[str, Any]:
             _sanitise_alert(a) for a in alerts_raw
             if a.get("metric") not in _UNRELIABLE_METRICS
         ][:10],
+        "valuation_model": valuation_model,
     }
 
     print(f"✅ Public metrics generated — {len(json.dumps(metrics)) / 1024:.1f} KB")
