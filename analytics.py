@@ -133,9 +133,10 @@ def get_velocity_metrics(df: pd.DataFrame) -> Dict:
             'sold_last_7_days': 0
         }
     
-    # Calculate days on market
+    # Calculate days on market (skip if already computed in SQL)
     df_copy = df.copy()
-    df_copy['days_on_market'] = df_copy.apply(calculate_days_on_market, axis=1)
+    if 'days_on_market' not in df_copy.columns:
+        df_copy['days_on_market'] = df_copy.apply(calculate_days_on_market, axis=1)
     
     # Date calculations
     today = datetime.now()
@@ -361,7 +362,8 @@ def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
     # Filter out unrealistic sizes
     df_copy = df_copy[df_copy['size_sqm'] >= 10]
 
-    df_copy['days_on_market'] = df_copy.apply(calculate_days_on_market, axis=1)
+    if 'days_on_market' not in df_copy.columns:
+        df_copy['days_on_market'] = df_copy.apply(calculate_days_on_market, axis=1)
 
     if 'price_per_sqm' not in df_copy.columns:
         df_copy['price_per_sqm'] = df_copy.apply(

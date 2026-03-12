@@ -40,6 +40,7 @@ def _nlp_badges(match: dict) -> str:
     return "  ·  ".join(parts) if parts else ""
 
 
+@st.fragment
 def render_alerts_tab():
     init_alerts_table()
 

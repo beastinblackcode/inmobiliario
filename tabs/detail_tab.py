@@ -145,6 +145,7 @@ def _get_similar(listing: dict, exclude_id: str, limit: int = 5) -> list:
         return [dict(r) for r in cursor.fetchall()]
 
 
+@st.fragment
 def render_detail_tab() -> None:
     st.header("🔍 Detalle de Propiedad")
 

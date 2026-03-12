@@ -50,8 +50,13 @@ def score_badge(score: int) -> str:
 
 # ── Main render ───────────────────────────────────────────────────────────────
 
+@st.fragment
 def render_search_tab() -> None:
-    """Render all content for the 🔍 Mis Búsquedas tab."""
+    """Render all content for the 🔍 Mis Búsquedas tab.
+
+    Wrapped in @st.fragment so that interactions with the search filters
+    only re-render this section, not the entire page.
+    """
 
     st.subheader("🔍 Mis Búsquedas Personalizadas")
 
@@ -142,12 +147,13 @@ def render_search_tab() -> None:
         st.warning("No se encontraron inmuebles con los filtros actuales.")
         return
 
-    # Derived columns
-    df["price_per_sqm"] = df.apply(
-        lambda r: r["price"] / r["size_sqm"]
-        if r.get("size_sqm") and r["size_sqm"] > 0 else None,
-        axis=1,
-    )
+    # Derived columns — use SQL-computed column if available
+    if "price_per_sqm" not in df.columns:
+        df["price_per_sqm"] = df.apply(
+            lambda r: r["price"] / r["size_sqm"]
+            if r.get("size_sqm") and r["size_sqm"] > 0 else None,
+            axis=1,
+        )
     df["floor"]       = df["floor"].fillna("").astype(str)
     df["description"] = df["description"].fillna("").astype(str)
     df["rooms"]       = pd.to_numeric(df["rooms"], errors="coerce")

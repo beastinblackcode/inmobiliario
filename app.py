@@ -1,30 +1,20 @@
 """
-Streamlit dashboard for Madrid Real Estate Tracker.
+Streamlit multipage dashboard for Madrid Real Estate Tracker.
 
-This file is the thin orchestrator: it handles authentication, sidebar filters,
-data loading, and tab routing. All tab-specific rendering is delegated to the
-modules in the `tabs/` package.
+Uses ``st.navigation`` (Streamlit 1.36+) so that only the active page
+executes on each run.  Replaces the old ``st.tabs()`` + JS-polling hack
+which rendered *all* 8 tabs on every interaction.
 """
 
 import streamlit as st
-import pandas as pd
-import streamlit.components.v1 as components
 from datetime import datetime
 from pathlib import Path
 
 from database import (
-    get_database_stats,
     download_database_from_cloud,
     is_streamlit_cloud,
     DATABASE_PATH,
 )
-from data_utils import load_data
-
-# ---------------------------------------------------------------------------
-# Tab renderers — imported lazily inside main() to avoid import-time side
-# effects when Streamlit is still bootstrapping.
-# ---------------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------------
 # Page configuration (must be the first Streamlit call)
@@ -40,23 +30,15 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .main {
-        padding: 0rem 1rem;
-    }
+    .main { padding: 0rem 1rem; }
     .stMetric {
         background-color: #f0f2f6;
         padding: 15px;
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    h1 {
-        color: #1f77b4;
-        padding-bottom: 20px;
-    }
-    h2 {
-        color: #2c3e50;
-        padding-top: 20px;
-    }
+    h1 { color: #1f77b4; padding-bottom: 20px; }
+    h2 { color: #2c3e50; padding-top: 20px; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -120,49 +102,11 @@ def check_password() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Sidebar: version & environment info
 # ---------------------------------------------------------------------------
 
-def calculate_days_on_market(row) -> int:
-    """Return days between first and last seen dates."""
-    try:
-        first = datetime.fromisoformat(row["first_seen_date"])
-        last = datetime.fromisoformat(row["last_seen_date"])
-        return (last - first).days
-    except Exception:
-        return 0
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main():
-    # Authentication
-    if not check_password():
-        st.stop()
-
-    # Ensure database is available
-    if not download_database_from_cloud():
-        st.error(
-            "❌ No se pudo cargar la base de datos. Por favor, contacta al administrador."
-        )
-        st.stop()
-
-    # ------------------------------------------------------------------
-    # Page navigation
-    # ------------------------------------------------------------------
-    st.sidebar.markdown("---")
-    page = st.sidebar.radio(
-        "📄 Página",
-        options=["dashboard", "surveillance"],
-        format_func=lambda x: {
-            "dashboard": "🏠 Dashboard Principal",
-            "surveillance": "🛡️ Vigilancia del Mercado",
-        }[x],
-        index=0,
-    )
-    # ── Version & environment info ──────────────────────────────────────────
+def _render_sidebar_info():
+    """Show version, last scrape, DB size at the bottom of the sidebar."""
     st.sidebar.markdown("---")
 
     # Git commit hash
@@ -200,206 +144,56 @@ def main():
     if "current_user" in st.session_state:
         st.sidebar.caption(f"👤 {st.session_state['current_user']}")
 
-    # Route: Market Surveillance (no sidebar filters needed)
-    if page == "surveillance":
-        from market_surveillance import render_market_surveillance
-        render_market_surveillance()
-        return
 
-    # ------------------------------------------------------------------
-    # Main Dashboard
-    # ------------------------------------------------------------------
-    st.title("🏠 Madrid Real Estate Tracker")
-    st.markdown("**Monitorización diaria del mercado inmobiliario de Madrid**")
+# ---------------------------------------------------------------------------
+# Main entry point — multipage navigation
+# ---------------------------------------------------------------------------
 
-    # Sidebar filters
-    st.sidebar.header("🔍 Filtros")
+def main():
+    # Authentication gate
+    if not check_password():
+        st.stop()
 
-    status_filter = st.sidebar.radio(
-        "Estado",
-        options=["active", "sold_removed", "all"],
-        format_func=lambda x: {
-            "active": "Activos",
-            "sold_removed": "Vendidos/Retirados",
-            "all": "Todos",
-        }[x],
-        index=0,
-    )
-    status_value = None if status_filter == "all" else status_filter
-
-    all_districts = [
-        "Centro", "Arganzuela", "Retiro", "Salamanca", "Chamartín",
-        "Tetuán", "Chamberí", "Fuencarral-El Pardo", "Moncloa-Aravaca",
-        "Latina", "Carabanchel", "Usera", "Puente de Vallecas",
-        "Moratalaz", "Ciudad Lineal", "Hortaleza", "Villaverde",
-        "Villa de Vallecas", "Vicálvaro", "San Blas-Canillejas", "Barajas",
-    ]
-    selected_districts = st.sidebar.multiselect(
-        "Distritos", options=all_districts, default=[]
-    )
-
-    st.sidebar.subheader("Rango de Precio")
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        min_price = st.number_input("Mín (€)", min_value=0, value=0, step=10000)
-    with col2:
-        max_price = st.number_input(
-            "Máx (€)", min_value=0, value=2000000, step=10000
+    # Ensure database is available
+    if not download_database_from_cloud():
+        st.error(
+            "❌ No se pudo cargar la base de datos. Por favor, contacta al administrador."
         )
-
-    seller_type = st.sidebar.selectbox(
-        "Tipo de Vendedor", options=["All", "Particular", "Agencia"]
-    )
+        st.stop()
 
     # ------------------------------------------------------------------
-    # Load data
+    # Build page registry with st.navigation (Streamlit ≥1.36)
+    # Only the selected page runs — no more rendering all 8 tabs.
     # ------------------------------------------------------------------
-    with st.spinner("Cargando datos..."):
-        df = load_data(
-            status=status_value,
-            distritos=selected_districts,
-            min_price=min_price if min_price > 0 else None,
-            max_price=max_price if max_price < 2000000 else None,
-            seller_type=seller_type,
-        )
-
-    if df.empty:
-        st.warning(
-            "⚠️ No hay datos disponibles. Ejecuta el scraper primero: `python scraper.py`"
-        )
-        return
-
-    # Derived metrics
-    df["price_per_sqm"] = df.apply(
-        lambda row: row["price"] / row["size_sqm"]
-        if row["size_sqm"] and row["size_sqm"] > 0
-        else None,
-        axis=1,
-    )
-    df["days_on_market"] = df.apply(calculate_days_on_market, axis=1)
-
-    # ------------------------------------------------------------------
-    # Tabs — compute alert badge count before rendering
-    # ------------------------------------------------------------------
-    _alert_badge = ""
-    try:
-        from database import get_alerts, count_alert_new_matches, init_alerts_table
-        init_alerts_table()
-        _alerts = get_alerts()
-        _total_new = sum(count_alert_new_matches(a) for a in _alerts)
-        if _total_new > 0:
-            _alert_badge = f" 🔴{_total_new}"
-    except Exception:
-        pass
-
-    (dashboard_tab, map_tab, mi_espacio_tab,
-     opportunities_tab, price_drops_tab, trends_tab,
-     detail_tab, admin_tab) = st.tabs(
-        ["📊 Dashboard", "🗺️ Mapa", f"🏠 Mi Espacio{_alert_badge}",
-         "🎯 Oportunidades", "📉 Bajadas de Precio", "📈 Tendencias",
-         "🔍 Detalle", "⚙️ Administración"]
-    )
-
-    with dashboard_tab:
-        from tabs.dashboard_tab import render_dashboard_tab
-        render_dashboard_tab(df)
-
-    with map_tab:
-        from tabs.map_tab import render_map_tab
-        render_map_tab(df)
-
-    with mi_espacio_tab:
-        _alerts_label = f"🔔 Alertas{_alert_badge}" if _alert_badge else "🔔 Alertas"
-        sub_busqueda, sub_alertas, sub_watchlist = st.tabs([
-            "🔍 Búsqueda", _alerts_label, "📌 Watchlist"
-        ])
-        with sub_busqueda:
-            from tabs.search_tab import render_search_tab
-            render_search_tab()
-        with sub_alertas:
-            from tabs.alerts_tab import render_alerts_tab
-            render_alerts_tab()
-        with sub_watchlist:
-            from tabs.watchlist_tab import render_watchlist_tab
-            render_watchlist_tab()
-
-    with opportunities_tab:
-        from tabs.opportunities_tab import render_opportunities_tab
-        render_opportunities_tab(df)
-
-    with price_drops_tab:
-        from tabs.price_drops_tab import render_price_drops_tab
-        render_price_drops_tab()
-
-    with trends_tab:
-        from tabs.market_trends_tab import render_market_trends_tab
-        render_market_trends_tab()
-
-    with detail_tab:
-        from tabs.detail_tab import render_detail_tab
-        render_detail_tab()
-
-    with admin_tab:
-        from tabs.admin_tab import render_admin_tab
-        render_admin_tab(df)
-
-    # ------------------------------------------------------------------
-    # Tab persistence: restore active tab after Streamlit reruns.
-    # When the user interacts with a widget inside a tab (e.g. presses
-    # Enter in the Detalle URL input), Streamlit reruns the whole app
-    # and always resets to tab 0. We detect which tab should be active
-    # via session_state flags set by each tab module, then auto-click it
-    # via a small JS injection.
-    # Tab order (0-based): Dashboard=0, Mapa=1, Mi Espacio=2,
-    #   Oportunidades=3, Bajadas=4, Tendencias=5, Detalle=6, Admin=7
-    # ------------------------------------------------------------------
-    _tab_flags = {
-        "_goto_tab_detalle": 6,
-        "_goto_tab_oportunidades": 3,
-        "_goto_tab_tendencias": 5,
+    pages = {
+        "Dashboard": [
+            st.Page("pages/dashboard.py",     title="📊 Dashboard", default=True),
+            st.Page("pages/mapa.py",          title="🗺️ Mapa"),
+            st.Page("pages/tendencias.py",    title="📈 Tendencias"),
+        ],
+        "Análisis": [
+            st.Page("pages/oportunidades.py", title="🎯 Oportunidades"),
+            st.Page("pages/bajadas.py",       title="📉 Bajadas de Precio"),
+        ],
+        "Mi Espacio": [
+            st.Page("pages/busqueda.py",      title="🔍 Búsqueda"),
+            st.Page("pages/alertas.py",       title="🔔 Alertas"),
+            st.Page("pages/watchlist.py",     title="📌 Watchlist"),
+            st.Page("pages/detalle.py",       title="🔍 Detalle"),
+        ],
+        "Admin": [
+            st.Page("pages/admin.py",         title="⚙️ Administración"),
+            st.Page("pages/vigilancia.py",    title="🛡️ Vigilancia"),
+        ],
     }
-    _target_tab = None
-    for flag, idx in _tab_flags.items():
-        if st.session_state.pop(flag, False):
-            _target_tab = idx
-            break
 
-    # Also restore Detalle tab whenever the URL input has a value,
-    # so that any rerun triggered from within the Detalle tab lands back there.
-    if _target_tab is None and st.session_state.get("detail_url_input", "").strip():
-        _target_tab = 6
+    pg = st.navigation(pages)
 
-    if _target_tab is not None:
-        components.html(
-            f"""
-            <script>
-            (function() {{
-                // Poll until the tab buttons appear (Streamlit renders async)
-                let attempts = 0;
-                const maxAttempts = 20;
-                const interval = setInterval(function() {{
-                    const tabs = window.parent.document.querySelectorAll(
-                        '[data-testid="stTab"] button, button[role="tab"]'
-                    );
-                    if (tabs.length > {_target_tab}) {{
-                        clearInterval(interval);
-                        tabs[{_target_tab}].click();
-                    }} else if (++attempts >= maxAttempts) {{
-                        clearInterval(interval);
-                    }}
-                }}, 80);
-            }})();
-            </script>
-            """,
-            height=0,
-        )
+    # Sidebar info — shown on every page
+    _render_sidebar_info()
 
-    # ------------------------------------------------------------------
-    # Footer
-    # ------------------------------------------------------------------
-    st.markdown("---")
-    st.caption(f"📅 Última actualización: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    st.caption(f"📊 Total de registros mostrados: {len(df):,}")
+    # Run the selected page
+    pg.run()
 
 
 if __name__ == "__main__":

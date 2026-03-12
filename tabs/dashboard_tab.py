@@ -169,8 +169,18 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
         st.plotly_chart(fig_bar, use_container_width=True)
 
     # =========================================================================
-    # Price per m² evolution
+    # Price per m² evolution (fragment — interactive widgets)
     # =========================================================================
+    _render_price_evolution_fragment(df)
+
+
+@st.fragment
+def _render_price_evolution_fragment(df: pd.DataFrame) -> None:
+    """Price evolution section with period/district filters.
+
+    Wrapped in @st.fragment so changing the radio or selectbox only
+    re-renders this section, not the full dashboard page.
+    """
     st.markdown("---")
     st.markdown("#### 📈 Evolución del Precio por m²")
 
@@ -324,12 +334,16 @@ def render_dashboard_tab(df: pd.DataFrame) -> None:
     sold_df = sold_df[sold_df['first_seen_date'] > '2026-01-14'].copy()
 
     if not sold_df.empty and len(sold_df) > 10:
-        sold_df['days_on_market_calc'] = sold_df.apply(
-            lambda row: (
-                pd.to_datetime(row['last_seen_date']) - pd.to_datetime(row['first_seen_date'])
-            ).days if pd.notna(row['last_seen_date']) and pd.notna(row['first_seen_date']) else 0,
-            axis=1,
-        )
+        # Use SQL-computed column if available, else fallback
+        if 'days_on_market' in sold_df.columns:
+            sold_df['days_on_market_calc'] = sold_df['days_on_market']
+        else:
+            sold_df['days_on_market_calc'] = sold_df.apply(
+                lambda row: (
+                    pd.to_datetime(row['last_seen_date']) - pd.to_datetime(row['first_seen_date'])
+                ).days if pd.notna(row['last_seen_date']) and pd.notna(row['first_seen_date']) else 0,
+                axis=1,
+            )
         time_to_sale = sold_df.groupby('distrito').agg(
             {'days_on_market_calc': ['mean', 'median', 'count']}
         ).reset_index()

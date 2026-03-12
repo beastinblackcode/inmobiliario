@@ -56,6 +56,10 @@ jobs:
           BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
         run: python scraper.py
 
+      # ── 5b. Pre-compute daily market snapshots ─────────────────────────────
+      - name: Compute daily snapshots
+        run: python compute_snapshots.py
+
       # ── 6. Email diario (opcional) ───────────────────────────────────────────
       - name: Send daily email report
         env:

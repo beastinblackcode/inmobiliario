@@ -10,6 +10,8 @@ from typing import List, Dict, Optional, Set
 from contextlib import contextmanager
 from pathlib import Path
 
+from db.connection import get_db, set_database_path, close_db
+
 
 DATABASE_PATH = "real_estate.db"
 
@@ -109,27 +111,22 @@ google_drive_file_id = "YOUR_FILE_ID_HERE" """, language="toml")
 def get_connection():
     """
     Context manager for database connections.
-    Enables WAL mode for better concurrent access.
+
+    Uses a thread-local singleton (see db/connection.py) so that PRAGMAs
+    are executed only once per thread and the connection is reused across
+    all calls within the same Streamlit session or scraper run.
+
+    The connection is **not** closed on exit — it stays alive for the
+    thread's lifetime and is reused on the next call.
     """
-    conn = sqlite3.connect(
-        DATABASE_PATH,
-        timeout=30.0,  # Increased timeout to 30 seconds
-        check_same_thread=False
-    )
-    conn.row_factory = sqlite3.Row  # Enable column access by name
-    
-    # Enable WAL mode for better concurrent access
-    # This allows multiple readers and one writer simultaneously
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")  # 30 seconds in milliseconds
+    conn = get_db()
     try:
         yield conn
         conn.commit()
     except Exception as e:
         conn.rollback()
         raise e
-    finally:
-        conn.close()
+    # NOTE: no conn.close() — the singleton keeps the connection alive
 
 
 def init_database():
@@ -157,18 +154,44 @@ def init_database():
             )
         """)
         
-        # Create indexes for common queries
+        # ── Simple indexes (legacy, kept for backward compatibility) ────
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_status 
+            CREATE INDEX IF NOT EXISTS idx_status
             ON listings(status)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_distrito 
+            CREATE INDEX IF NOT EXISTS idx_distrito
             ON listings(distrito)
         """)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_last_seen
             ON listings(last_seen_date)
+        """)
+
+        # ── Composite indexes for real query patterns ─────────────────
+        # Sidebar filter: status + distrito + price
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_active_distrito_price
+            ON listings(status, distrito, price)
+        """)
+        # Barrio lookup with price (barrio detail pages, valuation)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_active_barrio_price
+            ON listings(status, barrio, price)
+        """)
+        # Price history: fast lookup by listing + date
+        # (table created in migration_add_price_history.py — skip if missing)
+        try:
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_price_history_listing_date
+                ON price_history(listing_id, date_recorded)
+            """)
+        except sqlite3.OperationalError:
+            pass  # table doesn't exist yet
+        # Sold/removed recent (price-drop analysis, trends)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_status_last_seen
+            ON listings(status, last_seen_date DESC)
         """)
 
         # ── Rental prices snapshot table ────────────────────────────────────
@@ -222,6 +245,26 @@ def init_database():
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_notarial_distrito
             ON notarial_prices(distrito)
+        """)
+
+        # ── Market snapshots table ─────────────────────────────────────────
+        # Pre-computed daily metrics (filled by compute_snapshots.py after
+        # each scraper run).  Dashboard/Tendencias read from here instead
+        # of running heavy aggregation queries on every render.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_computed   TEXT NOT NULL,
+                scope_type      TEXT NOT NULL,
+                scope_value     TEXT,
+                metric_name     TEXT NOT NULL,
+                metric_value    REAL,
+                UNIQUE(date_computed, scope_type, scope_value, metric_name)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_lookup
+            ON market_snapshots(scope_type, scope_value, metric_name, date_computed)
         """)
 
         print("✓ Database initialized successfully")
@@ -650,6 +693,81 @@ def get_listings(
         
         cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
+
+
+def get_listings_page(
+    status: Optional[str] = None,
+    distrito: Optional[List[str]] = None,
+    min_price: Optional[int] = None,
+    max_price: Optional[int] = None,
+    seller_type: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 0,
+    order_by: str = "last_seen_date DESC",
+) -> tuple:
+    """
+    Query listings with optional filters, SQL-computed derived columns,
+    and optional pagination.
+
+    Compared to ``get_listings()``, this version:
+    - computes ``price_per_sqm`` and ``days_on_market`` inside SQLite
+      (eliminates expensive ``df.apply()`` in Python)
+    - supports LIMIT / OFFSET pagination (set *page_size=0* to disable)
+
+    Returns:
+        (rows: List[Dict], total_count: int)
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        conditions: List[str] = []
+        params: list = []
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if distrito:
+            placeholders = ",".join("?" * len(distrito))
+            conditions.append(f"distrito IN ({placeholders})")
+            params.extend(distrito)
+        if min_price is not None:
+            conditions.append("price >= ?")
+            params.append(min_price)
+        if max_price is not None:
+            conditions.append("price <= ?")
+            params.append(max_price)
+        if seller_type and seller_type != "All":
+            conditions.append("seller_type = ?")
+            params.append(seller_type)
+
+        where = " AND ".join(conditions) if conditions else "1=1"
+
+        # Total count (for UI pager)
+        total = cursor.execute(
+            f"SELECT COUNT(*) FROM listings WHERE {where}", params
+        ).fetchone()[0]
+
+        # Derived columns computed in SQL — no more df.apply()
+        derived = """,
+            CASE WHEN size_sqm > 0
+                 THEN ROUND(price * 1.0 / size_sqm, 2)
+                 ELSE NULL
+            END AS price_per_sqm,
+            CAST(
+                julianday(COALESCE(last_seen_date, date('now')))
+                - julianday(COALESCE(first_seen_date, last_seen_date, date('now')))
+            AS INTEGER) AS days_on_market"""
+
+        sql = f"SELECT *{derived} FROM listings WHERE {where} ORDER BY {order_by}"
+
+        if page_size > 0:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([page_size, (page - 1) * page_size])
+
+        cursor.execute(sql, params)
+        rows = [dict(row) for row in cursor.fetchall()]
+
+        return rows, total
 
 
 def get_sold_last_n_days(days: int = 30) -> int:
@@ -2803,6 +2921,106 @@ def get_notarial_gap_by_district() -> List[Dict]:
         return sorted(results, key=lambda x: x["gap_pct"], reverse=True)
     except Exception as e:
         print(f"Error in get_notarial_gap_by_district: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Market Snapshots — read helpers
+# ---------------------------------------------------------------------------
+
+def get_snapshot(
+    scope_type: str,
+    scope_value: Optional[str],
+    metric_name: str,
+    date_str: Optional[str] = None,
+) -> Optional[float]:
+    """
+    Return the most recent value of a single metric.
+
+    If *date_str* is given, return exactly that day's value.
+    Otherwise return the latest available value.
+    """
+    try:
+        with get_connection() as conn:
+            if date_str:
+                row = conn.execute(
+                    """SELECT metric_value FROM market_snapshots
+                       WHERE scope_type = ? AND scope_value IS ?
+                         AND metric_name = ? AND date_computed = ?""",
+                    (scope_type, scope_value, metric_name, date_str),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """SELECT metric_value FROM market_snapshots
+                       WHERE scope_type = ? AND scope_value IS ?
+                         AND metric_name = ?
+                       ORDER BY date_computed DESC LIMIT 1""",
+                    (scope_type, scope_value, metric_name),
+                ).fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
+
+
+def get_snapshot_series(
+    scope_type: str,
+    scope_value: Optional[str],
+    metric_name: str,
+    days: int = 90,
+) -> List[Dict]:
+    """
+    Return a time-series of a single metric (last *days* days).
+
+    Returns list of {date_computed, metric_value} dicts ordered by date.
+    """
+    try:
+        with get_connection() as conn:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """SELECT date_computed, metric_value
+                   FROM market_snapshots
+                   WHERE scope_type = ? AND scope_value IS ?
+                     AND metric_name = ? AND date_computed >= ?
+                   ORDER BY date_computed""",
+                (scope_type, scope_value, metric_name, cutoff),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def get_latest_snapshots(
+    scope_type: str,
+    metric_name: str,
+) -> List[Dict]:
+    """
+    Return the latest value of *metric_name* for every scope_value
+    of the given *scope_type*.
+
+    Useful for "compare all distritos" views.
+    Returns list of {scope_value, metric_value, date_computed} dicts.
+    """
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT scope_value, metric_value, date_computed
+                FROM market_snapshots s1
+                WHERE scope_type = ?
+                  AND metric_name = ?
+                  AND date_computed = (
+                      SELECT MAX(date_computed)
+                      FROM market_snapshots s2
+                      WHERE s2.scope_type = s1.scope_type
+                        AND s2.scope_value IS s1.scope_value
+                        AND s2.metric_name = s1.metric_name
+                  )
+                ORDER BY metric_value DESC
+                """,
+                (scope_type, metric_name),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
         return []
 
 
