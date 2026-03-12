@@ -469,25 +469,31 @@ def _load_valuation_model() -> Dict:
                     int_sqm.append(psqm)
             floor_price_pairs.append((level, psqm))
 
-        # Calculate premiums
-        lift_premium = 0.0
+        # Calculate premiums — CLAMPED to realistic ranges to avoid
+        # confounding bias (e.g. lifts correlate with expensive zones).
+        # Market studies for Madrid put these premiums at:
+        #   elevator: +3% to +8%
+        #   exterior: +2% to +6%
+        #   floor:    +0.5% to +2.5% per level
+        #   room:     +1% to +3% per extra room
+        lift_premium = 0.05  # default 5%
         if lift_sqm and no_lift_sqm:
             med_lift = statistics.median(lift_sqm)
             med_no_lift = statistics.median(no_lift_sqm)
             if med_no_lift > 0:
-                lift_premium = round((med_lift - med_no_lift) / med_no_lift, 4)
+                raw = (med_lift - med_no_lift) / med_no_lift
+                lift_premium = max(0.03, min(0.08, raw))  # clamp 3-8%
 
-        ext_premium = 0.0
+        ext_premium = 0.03  # default 3%
         if ext_sqm and int_sqm:
             med_ext = statistics.median(ext_sqm)
             med_int = statistics.median(int_sqm)
             if med_int > 0:
-                ext_premium = round((med_ext - med_int) / med_int, 4)
+                raw = (med_ext - med_int) / med_int
+                ext_premium = max(0.02, min(0.06, raw))  # clamp 2-6%
 
-        # Floor premium per level (approximate)
         floor_premium = 0.015  # default 1.5% per floor
         if floor_price_pairs:
-            # Simple: compare floor >=3 vs floor 0-1
             high_floor = [p for f, p in floor_price_pairs if f >= 3]
             low_floor = [p for f, p in floor_price_pairs if f <= 1]
             if high_floor and low_floor:
@@ -495,11 +501,9 @@ def _load_valuation_model() -> Dict:
                 med_low = statistics.median(low_floor)
                 if med_low > 0:
                     avg_diff = (med_high - med_low) / med_low
-                    # Divide by ~4 floors difference to get per-floor premium
                     floor_premium = round(avg_diff / 4, 4)
-                    floor_premium = max(0.005, min(0.04, floor_premium))  # clamp
+                    floor_premium = max(0.005, min(0.025, floor_premium))  # clamp 0.5-2.5%
 
-        # Room premium (per extra room vs barrio median)
         room_premium = 0.02  # default 2% per room
 
         # Madrid global median
