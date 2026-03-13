@@ -992,6 +992,7 @@ def calculate_market_score(
     inventory: Dict,
     euribor: Dict = None,
     paro: Dict = None,
+    afiliados_ss: Dict = None,
     affordability: Dict = None,
     price_drop_ratio: Dict = None,
     notarial_gap: Dict = None,
@@ -1180,17 +1181,36 @@ def calculate_market_score(
         scores["employment"] = 50
 
     # ------------------------------------------------------------------
+    # 9. Social Security Affiliates (3 %) — growth → bullish
+    # ------------------------------------------------------------------
+    if afiliados_ss and afiliados_ss.get("change_pct") is not None:
+        aff_change = afiliados_ss["change_pct"]
+        if aff_change > 2:
+            scores["social_security"] = 85   # strong job creation
+        elif aff_change > 0.5:
+            scores["social_security"] = 70   # moderate growth
+        elif aff_change > -0.5:
+            scores["social_security"] = 50   # flat
+        elif aff_change > -2:
+            scores["social_security"] = 30   # moderate decline
+        else:
+            scores["social_security"] = 15   # sharp decline
+    else:
+        scores["social_security"] = 50
+
+    # ------------------------------------------------------------------
     # Weighted total
     # ------------------------------------------------------------------
     weights = {
-        "prices":        0.20,
-        "speed":         0.20,
-        "supply_demand": 0.15,
-        "affordability": 0.15,
-        "euribor":       0.10,
-        "price_drops":   0.10,
-        "notarial_gap":  0.05,
-        "employment":    0.05,
+        "prices":          0.20,
+        "speed":           0.20,
+        "supply_demand":   0.15,
+        "affordability":   0.15,
+        "euribor":         0.10,
+        "price_drops":     0.10,
+        "notarial_gap":    0.04,
+        "employment":      0.03,
+        "social_security": 0.03,
     }
 
     total_score = sum(scores[k] * weights[k] for k in weights)

@@ -42,7 +42,8 @@ def _load_internal_indicators(euribor_rate: Optional[float] = None) -> Dict:
     return _safe(get_all_internal_indicators, euribor_rate=euribor_rate) or {}
 
 
-def _load_market_score(indicators: Dict, euribor: Dict, paro: Dict) -> Dict:
+def _load_market_score(indicators: Dict, euribor: Dict, paro: Dict,
+                       afiliados_ss: Dict = None) -> Dict:
     from market_indicators import calculate_market_score
     return _safe(
         calculate_market_score,
@@ -52,6 +53,7 @@ def _load_market_score(indicators: Dict, euribor: Dict, paro: Dict) -> Dict:
         inventory=indicators.get("inventory", {}),
         euribor=euribor,
         paro=paro,
+        afiliados_ss=afiliados_ss,
         affordability=indicators.get("affordability"),
         price_drop_ratio=indicators.get("price_drop_ratio"),
         notarial_gap=indicators.get("notarial_gap"),
@@ -643,13 +645,14 @@ def build_public_metrics() -> Dict[str, Any]:
     macro = _load_macro()
     euribor = macro.get("euribor", {})
     paro = macro.get("paro", {})
+    afiliados_ss = macro.get("afiliados_ss", {})
     euribor_rate = euribor.get("current") if euribor else None
 
     # 2. Internal indicators
     indicators = _load_internal_indicators(euribor_rate)
 
     # 3. Market score
-    score = _load_market_score(indicators, euribor, paro)
+    score = _load_market_score(indicators, euribor, paro, afiliados_ss)
 
     # 4. Alerts (base)
     alerts_raw = _load_market_alerts(indicators, macro)
@@ -731,6 +734,7 @@ def build_public_metrics() -> Dict[str, Any]:
                 "current": v.get("current"),
                 "previous": v.get("previous"),
                 "change": v.get("change"),
+                "change_pct": v.get("change_pct"),
                 "trend": v.get("trend"),
                 "unit": v.get("unit", ""),
             }

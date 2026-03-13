@@ -21,6 +21,8 @@ INE_TABLE_IPV = "25171"        # IPV - Índice de Precios de Vivienda
 INE_TABLE_COMPRAVENTAS = "6150" # Compraventas de vivienda
 INE_TABLE_PARO = "4247"        # Tasa de paro EPA
 INE_TABLE_HIPOTECAS = "3205"   # Hipotecas constituidas
+INE_TABLE_OCUPADOS_CCAA = "4211"  # Ocupados por grupo de edad, sexo y CCAA (EPA, trimestral)
+INE_TABLE_OCUPADOS_NAC  = "4076"  # Ocupados por sexo y grupo de edad - Nacional (EPA, fallback)
 
 # ECB API for Euribor
 ECB_EURIBOR_URL = (
@@ -524,15 +526,135 @@ def get_hipotecas_data() -> Dict:
 
 
 # ============================================================================
+# Ocupados EPA por Comunidad Autónoma (INE)
+# ============================================================================
+
+def get_afiliados_ss_data() -> Dict:
+    """
+    Fetch employed persons (Ocupados EPA) for Madrid from INE.
+
+    Primary:  INE table 42111 — Ocupados por grupo de edad, sexo y CCAA (trimestral).
+    Fallback: INE table 4076  — Ocupados Nacional (trimestral).
+
+    Returns dict with current value in millions of persons.
+    Key "afiliados_ss" kept for backwards compatibility with the JSON schema.
+    """
+    result = {
+        "name": "Ocupados Madrid (EPA)",
+        "unit": "millones",
+        "source": "INE - Encuesta de Población Activa (EPA)",
+        "frequency": "Trimestral",
+        "series": [],
+        "current": None,
+        "previous": None,
+        "change": None,
+        "change_pct": None,
+        "trend": "stable",
+        "error": None,
+        "scope": "Total Nacional"
+    }
+
+    # Table 4211 has CCAA breakdown; 4076 is fallback (nacional only)
+    table_ids = [
+        INE_TABLE_OCUPADOS_CCAA,     # 4211 — Ocupados por edad, sexo y CCAA
+        INE_TABLE_OCUPADOS_NAC,      # 4076 — Ocupados nacional (fallback)
+    ]
+
+    data = None
+    for tid in table_ids:
+        data = _fetch_ine_table(tid, nult=12)
+        if data:
+            break
+
+    if not data:
+        result["error"] = "No se pudo obtener datos de ocupados EPA de INE"
+        result["current"] = 3.2   # fallback ~3.2M ocupados Madrid
+        return result
+
+    try:
+        # Debug: show first series names (remove once validated)
+        for entry in data[:3]:
+            print(f"  📋 {entry.get('Nombre', '?')[:140]}")
+
+        # EPA uses "Madrid, Comunidad de" in series names (same as paro table)
+        # Priority 1: Madrid + both sexes + broadest age group
+        series = _find_ine_series(data, {
+            "region": "Madrid, Comunidad de",
+            "sex":    "Ambos sexos",
+            "age":    "Total",
+        })
+        if not series:
+            # Priority 2: Madrid + both sexes (any age group — first match)
+            series = _find_ine_series(data, {
+                "region": "Madrid, Comunidad de",
+                "sex":    "Ambos sexos",
+            })
+        if not series:
+            # Priority 3: just Madrid
+            series = _find_ine_series(data, {"region": "Madrid"})
+
+        if series:
+            result["scope"] = "Comunidad de Madrid"
+            print(f"  ✅ Matched: {series.get('Nombre', '?')[:140]}")
+        else:
+            # Fallback: national total
+            series = _find_ine_series(data, {
+                "region": "Total Nacional",
+                "sex":    "Ambos sexos",
+            })
+            if not series and len(data) > 0:
+                    series = data[0]
+
+        points = _extract_ine_timeseries(series)
+
+        # INE EPA values are in thousands of persons → divide by 1000 → millions
+        def to_millions(v: float) -> float:
+            return round(v / 1000, 2) if v > 100 else round(v, 2)
+
+        result["series"] = [
+            {"date_str": p["date_str"], "value": to_millions(p["value"])}
+            for p in points
+        ]
+
+        if len(points) >= 2:
+            result["current"]  = to_millions(points[-1]["value"])
+            result["previous"] = to_millions(points[-2]["value"])
+            result["change"]   = round(result["current"] - result["previous"], 2)
+
+            if result["previous"] > 0:
+                result["change_pct"] = round(
+                    (result["change"] / result["previous"]) * 100, 2
+                )
+
+            if result.get("change_pct") is not None:
+                if result["change_pct"] > 1.0:
+                    result["trend"] = "up"
+                elif result["change_pct"] < -1.0:
+                    result["trend"] = "down"
+                else:
+                    result["trend"] = "stable"
+
+        elif len(points) == 1:
+            result["current"] = to_millions(points[0]["value"])
+
+    except Exception as e:
+        result["error"] = str(e)
+        result["current"] = 3.2   # fallback ~3.2M ocupados Madrid
+        print(f"⚠️ Error processing ocupados EPA data: {e}")
+
+    return result
+
+
+# ============================================================================
 # Aggregated fetch
 # ============================================================================
 
 def get_all_macro_data() -> Dict[str, Dict]:
     """
     Fetch all macro indicators at once.
-    
+
     Returns:
-        Dict with keys: euribor, ipc, ipv, compraventas, paro, hipotecas
+        Dict with keys: euribor, ipc, ipv, compraventas, paro, hipotecas, afiliados_ss
     """
     return {
         "euribor": get_euribor_data(),
@@ -540,7 +662,8 @@ def get_all_macro_data() -> Dict[str, Dict]:
         "ipv": get_ipv_data(),
         "compraventas": get_compraventas_data(),
         "paro": get_paro_data(),
-        "hipotecas": get_hipotecas_data()
+        "hipotecas": get_hipotecas_data(),
+        "afiliados_ss": get_afiliados_ss_data()
     }
 
 
