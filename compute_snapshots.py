@@ -136,14 +136,21 @@ def _compute_scope_metrics(
         count += 1
 
     # ── Sold count (last 7 days) ─────────────────────────────────────────
-    week_ago = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+    # mark_stale_as_sold() uses a 14-day threshold and does NOT update
+    # last_seen_date when marking sold, so the effective detection date is
+    # last_seen_date + 14 days. We shift the window back 14 days to count
+    # properties that were detected as sold this week.
+    sold_window_end = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=14)).strftime("%Y-%m-%d")
+    sold_window_start = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=7 + 14)).strftime("%Y-%m-%d")
     sold_row = conn.execute(
         f"""
         SELECT COUNT(*)
         FROM listings
-        WHERE status = 'sold_removed' AND last_seen_date >= ? AND {where_clause}
+        WHERE status = 'sold_removed'
+          AND last_seen_date >= ? AND last_seen_date < ?
+          AND {where_clause}
         """,
-        [week_ago] + params,
+        [sold_window_start, sold_window_end] + params,
     ).fetchone()
     if sold_row:
         _upsert_snapshot(conn, date_str, scope_type, scope_value, "sold_count", sold_row[0])

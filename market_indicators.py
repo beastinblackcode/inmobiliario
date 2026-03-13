@@ -298,11 +298,17 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
             """, (week_num,))
             new_count = cursor.fetchone()[0]
             
-            # Sold/removed this week
+            # Sold/removed this week.
+            # mark_stale_as_sold() uses a 14-day threshold before marking a
+            # property as sold_removed, and does NOT update last_seen_date —
+            # it stays as the last day the scraper found the listing active.
+            # So a property that disappeared in week W has last_seen_date ≈ W-2.
+            # We compensate by shifting the detection window +14 days:
+            # "absorbed in week W" ≡ last_seen_date falls in week W-2.
             cursor.execute("""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
-                AND strftime('%Y-%W', last_seen_date) = ?
+                AND strftime('%Y-%W', date(last_seen_date, '+14 days')) = ?
             """, (week_num,))
             sold_count = cursor.fetchone()[0]
             

@@ -232,13 +232,17 @@ def _render_internal_kpis(indicators: dict):
     with col3:
         current = sd.get("current")
         if current is not None and current < 50:  # Filter out infinity
-            indicator = "🟢" if current < 1.0 else ("🟡" if current < 2.0 else "🔴")
+            # Thresholds aligned with market_indicators.py:
+            # <0.8 = excess demand (fast absorption) → green
+            # 0.8–2.0 = balanced market → yellow
+            # >2.0 = excess supply → red
+            indicator = "🟢" if current < 0.8 else ("🟡" if current < 2.0 else "🔴")
             st.metric(
                 label="⚖️ Ratio O/D",
                 value=f"{current:.1f}x {indicator}",
                 delta=f"{sd.get('change', 0):+.1f}" if sd.get("change") else None,
                 delta_color="inverse",
-                help="Nuevas publicaciones / Ventas. >1.5 = exceso oferta, <0.8 = exceso demanda"
+                help="Nuevas publicaciones / Absorciones. >2.0 = exceso oferta, <0.8 = exceso demanda"
             )
         else:
             st.metric(label="⚖️ Ratio O/D", value="Sin datos")
