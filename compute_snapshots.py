@@ -170,6 +170,7 @@ def _compute_scope_metrics(
         count += 1
 
     # ── Price drops (last 7 days) ────────────────────────────────────────
+    week_ago = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
     try:
         drops_row = conn.execute(
             f"""
