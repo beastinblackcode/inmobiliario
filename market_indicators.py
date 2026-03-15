@@ -814,13 +814,6 @@ def get_market_alerts(
     # ── Affordability alerts ──────────────────────────────────────────────────
     if affordability:
         pti = affordability.get("price_to_income")
-        monthly = affordability.get("current")
-        affordable = affordability.get("affordable")
-        if affordable is False:
-            add("warning", "🏠", "Vivienda poco asequible",
-                f"Cuota estimada: €{monthly:,}/mes — supera el 33% del ingreso bruto de referencia. "
-                f"Ratio precio/ingreso: {pti:.1f}× ingresos anuales.",
-                "affordability")
         if pti and pti >= 10:
             add("critical", "🚨", "Ratio precio/ingreso extremo",
                 f"El precio mediano equivale a {pti:.1f} años de ingreso bruto de referencia.",
@@ -831,6 +824,8 @@ def get_market_alerts(
         euribor = macro.get("euribor", {})
         euribor_val = euribor.get("current")
         euribor_trend = euribor.get("trend")
+        euribor_series = euribor.get("series", [])
+
         if euribor_val and euribor_val >= 4.0:
             add("critical", "📈", "Euríbor muy elevado",
                 f"Euríbor 12M en {euribor_val:.2f}% — encarece significativamente las hipotecas.",
@@ -839,6 +834,49 @@ def get_market_alerts(
             add("info", "📉", "Euríbor bajando",
                 f"Euríbor 12M en {euribor_val:.2f}% con tendencia bajista. Buena señal para hipotecas.",
                 "euribor")
+
+        # ── Euríbor: impacto real en cuota vs hace 2 años ─────────────────
+        # Calcula la diferencia de cuota mensual para una hipoteca de referencia
+        # comparando el Euríbor actual con el de hace ~24 meses en el histórico.
+        if euribor_val is not None and len(euribor_series) >= 3:
+            try:
+                def _monthly_payment(rate_pct: float,
+                                     principal: float = 200_000,
+                                     years: int = 25,
+                                     spread: float = 1.0) -> float:
+                    """Standard annuity formula. rate_pct = annual %, spread in pp."""
+                    annual = (rate_pct + spread) / 100
+                    monthly_r = annual / 12
+                    n = years * 12
+                    if monthly_r <= 0:
+                        return principal / n
+                    return principal * monthly_r * (1 + monthly_r) ** n / ((1 + monthly_r) ** n - 1)
+
+                # Rate from 2 years ago: go back ~24 points in the monthly series
+                lookback = min(24, len(euribor_series) - 1)
+                past_rate = euribor_series[-lookback - 1]["value"] if lookback > 0 else euribor_series[0]["value"]
+                past_date_str = euribor_series[-lookback - 1].get("date_str", "hace 2 años") if lookback > 0 else ""
+
+                cuota_now  = _monthly_payment(euribor_val)
+                cuota_past = _monthly_payment(past_rate)
+                diff = round(cuota_now - cuota_past)
+
+                if abs(diff) >= 50:   # only surface if meaningful
+                    if diff > 0:
+                        add("warning", "💸", "Hipotecas más caras que hace 2 años",
+                            f"Con Euríbor al {euribor_val:.2f}%, una hipoteca de 200.000\u00a0€ a 25 años "
+                            f"cuesta {diff:+,}\u00a0€/mes más que cuando el Euríbor era {past_rate:.2f}% "
+                            f"({past_date_str}). El coste adicional acumulado en 25 años supera "
+                            f"los {abs(diff) * 12 * 25 / 1000:.0f}.000\u00a0€.",
+                            "euribor_impact")
+                    else:
+                        add("info", "💚", "Hipotecas más baratas que hace 2 años",
+                            f"Con Euríbor al {euribor_val:.2f}%, una hipoteca de 200.000\u00a0€ a 25 años "
+                            f"cuesta {diff:,}\u00a0€/mes menos que cuando el Euríbor era {past_rate:.2f}% "
+                            f"({past_date_str}).",
+                            "euribor_impact")
+            except Exception:
+                pass
 
     # ── Notarial gap alerts ───────────────────────────────────────────────────
     if notarial_gap and notarial_gap.get("current") is not None:
