@@ -619,6 +619,9 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         "rate",
         # rent burden
         "monthly_income_ref", "median_rent", "severity", "by_district",
+        # lanzamientos CGPJ
+        "quarter_label", "alquiler", "hipoteca", "otros", "alquiler_pct",
+        "yoy_change", "yoy_change_pct",
         # series (already aggregated weekly)
         "series", "breakpoint",
     }

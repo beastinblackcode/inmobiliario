@@ -1824,6 +1824,100 @@ def get_notarial_gap_indicator() -> Dict:
         return {"name": "Sobreprecio vs Notarial", "current": None, "unit": "%", "error": str(e)}
 
 
+def get_lanzamientos_indicator() -> Dict:
+    """
+    Quarterly evictions (lanzamientos practicados) for Madrid from CGPJ data.
+
+    Returns the latest quarter value, YoY change, and a historical series
+    suitable for charting (last 12 quarters = 3 years).
+
+    Breakdown by type: alquiler (LAU), hipoteca, otros.
+    """
+    result: Dict = {
+        "name":        "Lanzamientos CGPJ",
+        "unit":        "lanzamientos/trimestre",
+        "current":     None,
+        "quarter_label": None,
+        "alquiler":    None,
+        "hipoteca":    None,
+        "otros":       None,
+        "alquiler_pct": None,
+        "yoy_change":  None,
+        "yoy_change_pct": None,
+        "trend":       "stable",
+        "series":      [],
+    }
+
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+
+            # Latest available quarter
+            cur.execute("""
+                SELECT year, quarter, total, alquiler, hipoteca, otros, alquiler_pct
+                FROM cgpj_lanzamientos
+                WHERE tsj = 'Madrid'
+                ORDER BY year DESC, quarter DESC
+                LIMIT 1
+            """)
+            latest = cur.fetchone()
+            if not latest:
+                return result
+
+            yr, qt, total, alq, hip, otros, alq_pct = latest
+            result["current"]      = total
+            result["quarter_label"] = f"{yr} T{qt}"
+            result["alquiler"]     = alq
+            result["hipoteca"]     = hip
+            result["otros"]        = otros
+            result["alquiler_pct"] = alq_pct
+
+            # YoY: same quarter, previous year
+            cur.execute("""
+                SELECT total FROM cgpj_lanzamientos
+                WHERE tsj = 'Madrid' AND year = ? AND quarter = ?
+            """, (yr - 1, qt))
+            row_prev = cur.fetchone()
+            if row_prev and row_prev[0] and total:
+                yoy = total - row_prev[0]
+                yoy_pct = round(yoy / row_prev[0] * 100, 1)
+                result["yoy_change"]     = yoy
+                result["yoy_change_pct"] = yoy_pct
+                if yoy_pct > 5:
+                    result["trend"] = "up"
+                elif yoy_pct < -5:
+                    result["trend"] = "down"
+
+            # Historical series: last 12 quarters
+            cur.execute("""
+                SELECT year, quarter, total, alquiler, hipoteca, otros, alquiler_pct
+                FROM cgpj_lanzamientos
+                WHERE tsj = 'Madrid' AND total IS NOT NULL
+                ORDER BY year DESC, quarter DESC
+                LIMIT 12
+            """)
+            rows = cur.fetchall()
+            series = []
+            for r in reversed(rows):
+                y, q, tot, a, h, o, ap = r
+                series.append({
+                    "label":       f"{y} T{q}",
+                    "year":        y,
+                    "quarter":     q,
+                    "total":       tot,
+                    "alquiler":    a,
+                    "hipoteca":    h,
+                    "otros":       o,
+                    "alquiler_pct": ap,
+                })
+            result["series"] = series
+
+    except Exception as e:
+        result["error"] = str(e)
+
+    return result
+
+
 def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
     """
     Fetch all internal market indicators at once.
@@ -1844,6 +1938,7 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
         "rental_yield":     get_rental_yield(),
         "notarial_gap":     get_notarial_gap_indicator(),
         "rent_burden":      get_rent_burden(),
+        "lanzamientos":     get_lanzamientos_indicator(),
     }
     return indicators
 
