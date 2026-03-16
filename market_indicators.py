@@ -141,17 +141,36 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
                 })
         
         if len(result["series"]) >= 2:
-            # Compare last 2 weeks (skip baseline if it's the first)
-            current = result["series"][-1]
-            previous = result["series"][-2]
+            # Guard: if the most recent week has < 40% of the average count
+            # of the previous weeks, treat it as an incomplete scrape and
+            # exclude it from the change calculation (but keep in series for
+            # the chart so the user can see the drop-off).
+            avg_prev_count = statistics.mean(
+                pt["count"] for pt in result["series"][:-1]
+            ) if len(result["series"]) > 1 else 0
 
-            result["current"] = current["median_price"]
+            latest = result["series"][-1]
+            incomplete_week = (
+                avg_prev_count > 0
+                and latest["count"] < avg_prev_count * 0.40
+            )
+
+            if incomplete_week and len(result["series"]) >= 3:
+                # Use second-to-last as current, third-to-last as previous
+                current  = result["series"][-2]
+                previous = result["series"][-3]
+            else:
+                current  = result["series"][-1]
+                previous = result["series"][-2]
+
+            result["current"]     = current["median_price"]
             result["current_sqm"] = current["median_price_sqm"]
-            result["previous"] = previous["median_price"]
-            result["change"] = result["current"] - result["previous"]
-            result["change_pct"] = round(
+            result["previous"]    = previous["median_price"]
+            result["change"]      = result["current"] - result["previous"]
+            result["change_pct"]  = round(
                 (result["change"] / result["previous"] * 100) if result["previous"] > 0 else 0, 2
             )
+            result["incomplete_latest_week"] = incomplete_week
 
             if result["change_pct"] < -1:
                 result["trend"] = "down"
@@ -232,13 +251,27 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
                 })
         
         if len(result["series"]) >= 2:
-            current = result["series"][-1]
-            previous = result["series"][-2]
-            
+            avg_prev_count = statistics.mean(
+                pt["sold_count"] for pt in result["series"][:-1]
+            ) if len(result["series"]) > 1 else 0
+
+            incomplete_week = (
+                avg_prev_count > 0
+                and result["series"][-1]["sold_count"] < avg_prev_count * 0.40
+            )
+
+            if incomplete_week and len(result["series"]) >= 3:
+                current  = result["series"][-2]
+                previous = result["series"][-3]
+            else:
+                current  = result["series"][-1]
+                previous = result["series"][-2]
+
             result["current"] = current["median_days"]
             result["previous"] = previous["median_days"]
             result["change"] = round(result["current"] - result["previous"], 1)
-            
+            result["incomplete_latest_week"] = incomplete_week
+
             # Faster sales = positive market signal
             if result["change"] < -1:
                 result["trend"] = "up"  # Faster = market accelerating
