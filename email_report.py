@@ -594,12 +594,19 @@ def send_daily_report() -> bool:
         new_opps         = get_new_opportunity_listings(hours=24, min_score=70)
         wl_drops         = get_watchlist_price_drops(since_days=1)
 
+        # Apply €400,000 price cap to all property lists
+        MAX_PRICE_EMAIL = 400_000
+        chollos  = [p for p in chollos  if not p.get("price") or p["price"] <= MAX_PRICE_EMAIL]
+        new_opps = [p for p in new_opps if not p.get("price") or p["price"] <= MAX_PRICE_EMAIL]
+        wl_drops = [p for p in wl_drops if not p.get("price") or p["price"] <= MAX_PRICE_EMAIL]
+
         # Custom alerts: gather matches for each active alert
         init_alerts_table()
         custom_alerts      = get_alerts()
         custom_alert_hits  = []
         for alert in custom_alerts:
             matches = get_alert_matches(alert, hours=24)
+            matches = [m for m in matches if not m.get("price") or m["price"] <= MAX_PRICE_EMAIL]
             if matches:
                 custom_alert_hits.append({"alert": alert, "matches": matches})
 
