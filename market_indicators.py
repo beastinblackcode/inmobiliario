@@ -631,6 +631,127 @@ def get_affordability_index(euribor_rate: float = None) -> Dict:
 
 
 # ============================================================================
+# Rent Burden  (Tasa de esfuerzo de alquiler)
+# ============================================================================
+
+def get_rent_burden() -> Dict:
+    """
+    Rent burden = median monthly rent / household net monthly income × 100.
+
+    Uses the latest snapshot from `rental_prices` (scraped from Idealista)
+    and a reference net annual household income for Madrid (INE Encuesta de
+    Condiciones de Vida — last available: ~33 000 €/year net for the
+    Comunidad de Madrid).
+
+    Returns:
+        Dict with overall burden %, per-district breakdown, severity label,
+        and alert thresholds.
+
+    Severity thresholds (EU / Eurostat standard):
+        ≤ 30 %   → affordable
+        30–40 %  → strained
+        40–50 %  → overburdened
+        > 50 %   → severely overburdened
+    """
+    # Reference: INE "Renta media por hogar" Comunidad de Madrid ≈ 42 000 € bruto.
+    # After IRPF + SS ≈ 33 000 € net.  Monthly net ≈ 2 750 €.
+    REFERENCE_NET_ANNUAL = 33_000          # configurable
+    monthly_income = REFERENCE_NET_ANNUAL / 12
+
+    result: Dict = {
+        "name": "Tasa de Esfuerzo de Alquiler",
+        "unit": "%",
+        "current": None,
+        "monthly_income_ref": round(monthly_income),
+        "median_rent": None,
+        "severity": None,
+        "trend": "stable",
+        "by_district": [],
+    }
+
+    from database import get_connection
+
+    with get_connection() as conn:
+        cur = conn.cursor()
+
+        # Latest date in rental_prices
+        cur.execute("SELECT MAX(date_recorded) FROM rental_prices")
+        latest_date = cur.fetchone()[0]
+        if not latest_date:
+            return result
+
+        # Overall Madrid median rent (median of barrio medians)
+        cur.execute("""
+            SELECT median_rent FROM rental_prices
+            WHERE date_recorded = ?
+              AND median_rent > 0
+            ORDER BY median_rent
+        """, (latest_date,))
+        rents = [r[0] for r in cur.fetchall()]
+
+    if not rents:
+        return result
+
+    import statistics
+    madrid_median = statistics.median(rents)
+    burden_pct = round(madrid_median / monthly_income * 100, 1)
+
+    result["current"] = burden_pct
+    result["median_rent"] = round(madrid_median)
+
+    # Severity label
+    if burden_pct <= 30:
+        result["severity"] = "affordable"
+        result["trend"] = "up"
+    elif burden_pct <= 40:
+        result["severity"] = "strained"
+        result["trend"] = "stable"
+    elif burden_pct <= 50:
+        result["severity"] = "overburdened"
+        result["trend"] = "down"
+    else:
+        result["severity"] = "severely_overburdened"
+        result["trend"] = "down"
+
+    # Per-district breakdown
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT distrito,
+                   ROUND(AVG(median_rent), 0) AS district_rent,
+                   COUNT(*) AS barrios
+            FROM rental_prices
+            WHERE date_recorded = ?
+              AND median_rent > 0
+            GROUP BY distrito
+            ORDER BY district_rent DESC
+        """, (latest_date,))
+
+        by_district = []
+        for row in cur.fetchall():
+            d_rent = row[1]
+            d_burden = round(d_rent / monthly_income * 100, 1)
+            if d_burden <= 30:
+                sev = "affordable"
+            elif d_burden <= 40:
+                sev = "strained"
+            elif d_burden <= 50:
+                sev = "overburdened"
+            else:
+                sev = "severely_overburdened"
+            by_district.append({
+                "distrito": row[0],
+                "median_rent": int(d_rent),
+                "burden_pct": d_burden,
+                "severity": sev,
+                "barrios": row[2],
+            })
+        result["by_district"] = by_district
+
+    return result
+
+
+# ============================================================================
 # Price Dispersion
 # ============================================================================
 
@@ -691,6 +812,7 @@ def get_market_alerts(
     affordability: Dict = None,
     macro: Dict = None,
     notarial_gap: Dict = None,
+    rent_burden: Dict = None,
 ) -> list:
     """
     Detect significant market changes and return a list of alert dicts.
@@ -706,13 +828,15 @@ def get_market_alerts(
     """
     alerts = []
 
-    def add(level, emoji, title, detail, metric):
+    def add(level, emoji, title, detail, metric, code=None, params=None):
         alerts.append({
             "level": level,
             "emoji": emoji,
             "title": title,
             "detail": detail,
-            "metric": metric
+            "metric": metric,
+            "code": code or metric,
+            "params": params or {},
         })
 
     # ── Price alerts ──────────────────────────────────────────────────────────
@@ -721,19 +845,19 @@ def get_market_alerts(
         if chg >= 5:
             add("critical", "🚨", "Subida brusca de precios",
                 f"Los precios subieron un {chg:+.1f}% en la última semana.",
-                "price_trend")
+                "price_trend", code="price_spike", params={"pct": round(chg, 1)})
         elif chg <= -5:
             add("critical", "🚨", "Caída brusca de precios",
                 f"Los precios bajaron un {chg:+.1f}% en la última semana.",
-                "price_trend")
+                "price_trend", code="price_crash", params={"pct": round(abs(chg), 1)})
         elif chg >= 2:
             add("warning", "⚠️", "Precios al alza",
                 f"Subida del {chg:+.1f}% respecto a la semana anterior.",
-                "price_trend")
+                "price_trend", code="price_up", params={"pct": round(chg, 1)})
         elif chg <= -2:
             add("warning", "⚠️", "Precios a la baja",
                 f"Bajada del {chg:+.1f}% respecto a la semana anterior.",
-                "price_trend")
+                "price_trend", code="price_down", params={"pct": round(abs(chg), 1)})
 
         # Trend breakpoint
         bp = price_trend.get("breakpoint", {})
@@ -743,7 +867,7 @@ def get_market_alerts(
             week = bp.get("breakpoint_week", "")
             add("warning", "🔄", "Cambio de tendencia de precios",
                 f"La tendencia pasó de '{before}' a '{after}' alrededor de {week}.",
-                "price_trend")
+                "price_trend", code="trend_change", params={"before": before, "after": after, "week": week})
 
     # ── Sales speed alerts ────────────────────────────────────────────────────
     if sales_speed:
@@ -753,15 +877,15 @@ def get_market_alerts(
             if speed <= 2:
                 add("info", "⚡", "Mercado muy activo",
                     f"Mediana de venta: {speed:.0f} días. Alta presión de demanda.",
-                    "sales_speed")
+                    "sales_speed", code="market_hot", params={"days": round(speed)})
             if chg >= 7:
                 add("warning", "🐌", "Ventas ralentizándose",
                     f"El tiempo en mercado aumentó {chg:+.0f} días esta semana.",
-                    "sales_speed")
+                    "sales_speed", code="sales_slow", params={"days": round(chg)})
             elif chg <= -7:
                 add("warning", "🏃", "Aceleración de ventas",
                     f"El tiempo en mercado bajó {chg:+.0f} días esta semana.",
-                    "sales_speed")
+                    "sales_speed", code="sales_fast", params={"days": round(abs(chg))})
 
     # ── Supply / demand alerts ────────────────────────────────────────────────
     if supply_demand:
@@ -770,15 +894,15 @@ def get_market_alerts(
             if ratio >= 5:
                 add("critical", "🚨", "Exceso severo de oferta",
                     f"Ratio O/D = {ratio:.1f}×. Entran {ratio:.0f}× más propiedades de las que salen.",
-                    "supply_demand")
+                    "supply_demand", code="supply_excess_severe", params={"ratio": round(ratio, 1)})
             elif ratio >= 3:
                 add("warning", "⚠️", "Exceso de oferta",
                     f"Ratio O/D = {ratio:.1f}×. El inventario está creciendo rápido.",
-                    "supply_demand")
+                    "supply_demand", code="supply_excess", params={"ratio": round(ratio, 1)})
             elif ratio <= 0.5:
                 add("warning", "🔥", "Demanda muy superior a oferta",
                     f"Ratio O/D = {ratio:.1f}×. El stock se absorbe rápidamente.",
-                    "supply_demand")
+                    "supply_demand", code="demand_high", params={"ratio": round(ratio, 1)})
 
     # ── Inventory alerts ──────────────────────────────────────────────────────
     if inventory:
@@ -787,11 +911,11 @@ def get_market_alerts(
         if chg_pct >= 10:
             add("warning", "📦", "Inventario creciendo rápido",
                 f"El stock activo creció un {chg_pct:+.1f}% — ahora {current:,} propiedades.",
-                "inventory")
+                "inventory", code="inventory_up", params={"pct": round(chg_pct, 1), "count": current})
         elif chg_pct <= -10:
             add("warning", "📉", "Inventario cayendo rápido",
                 f"El stock activo cayó un {chg_pct:+.1f}% — ahora {current:,} propiedades.",
-                "inventory")
+                "inventory", code="inventory_down", params={"pct": round(abs(chg_pct), 1), "count": current})
 
     # ── Rotation rate alerts ──────────────────────────────────────────────────
     if rotation:
@@ -801,15 +925,15 @@ def get_market_alerts(
             if rate >= 20:
                 add("info", "🔥", "Rotación muy alta",
                     f"El {rate:.1f}% del inventario se vendió en las últimas {rotation.get('window_weeks', 4)} semanas.",
-                    "rotation")
+                    "rotation", code="rotation_high", params={"rate": round(rate, 1), "weeks": rotation.get("window_weeks", 4)})
             elif rate < 2:
                 add("warning", "⚠️", "Rotación muy baja",
                     f"Solo el {rate:.1f}% del inventario se vendió en las últimas {rotation.get('window_weeks', 4)} semanas.",
-                    "rotation")
+                    "rotation", code="rotation_low", params={"rate": round(rate, 1), "weeks": rotation.get("window_weeks", 4)})
             if chg <= -5:
                 add("warning", "📉", "Tasa de rotación bajando",
                     f"La rotación bajó {chg:+.1f}pp respecto al periodo anterior.",
-                    "rotation")
+                    "rotation", code="rotation_down", params={"change": round(abs(chg), 1)})
 
     # ── Affordability alerts ──────────────────────────────────────────────────
     if affordability:
@@ -817,7 +941,7 @@ def get_market_alerts(
         if pti and pti >= 10:
             add("critical", "🚨", "Ratio precio/ingreso extremo",
                 f"El precio mediano equivale a {pti:.1f} años de ingreso bruto de referencia.",
-                "affordability")
+                "affordability", code="pti_extreme", params={"pti": round(pti, 1)})
 
     # ── Macro alerts ──────────────────────────────────────────────────────────
     if macro:
@@ -829,11 +953,11 @@ def get_market_alerts(
         if euribor_val and euribor_val >= 4.0:
             add("critical", "📈", "Euríbor muy elevado",
                 f"Euríbor 12M en {euribor_val:.2f}% — encarece significativamente las hipotecas.",
-                "euribor")
+                "euribor", code="euribor_high", params={"rate": round(euribor_val, 2)})
         elif euribor_trend == "down" and euribor_val:
             add("info", "📉", "Euríbor bajando",
                 f"Euríbor 12M en {euribor_val:.2f}% con tendencia bajista. Buena señal para hipotecas.",
-                "euribor")
+                "euribor", code="euribor_down", params={"rate": round(euribor_val, 2)})
 
         # ── Euríbor: impacto real en cuota vs hace 2 años ─────────────────
         # Calcula la diferencia de cuota mensual para una hipoteca de referencia
@@ -868,13 +992,17 @@ def get_market_alerts(
                             f"cuesta {diff:+,}\u00a0€/mes más que cuando el Euríbor era {past_rate:.2f}% "
                             f"({past_date_str}). El coste adicional acumulado en 25 años supera "
                             f"los {abs(diff) * 12 * 25 / 1000:.0f}.000\u00a0€.",
-                            "euribor_impact")
+                            "euribor_impact", code="mortgage_expensive",
+                            params={"rate": round(euribor_val, 2), "diff": diff,
+                                    "past_rate": round(past_rate, 2), "past_date": past_date_str})
                     else:
                         add("info", "💚", "Hipotecas más baratas que hace 2 años",
                             f"Con Euríbor al {euribor_val:.2f}%, una hipoteca de 200.000\u00a0€ a 25 años "
                             f"cuesta {diff:,}\u00a0€/mes menos que cuando el Euríbor era {past_rate:.2f}% "
                             f"({past_date_str}).",
-                            "euribor_impact")
+                            "euribor_impact", code="mortgage_cheap",
+                            params={"rate": round(euribor_val, 2), "diff": abs(diff),
+                                    "past_rate": round(past_rate, 2), "past_date": past_date_str})
             except Exception:
                 pass
 
@@ -888,17 +1016,40 @@ def get_market_alerts(
             add("critical", "🏛️", "Sobreprecio extremo vs precio real",
                 f"La oferta en Idealista supera en {gap:.1f}% el precio escriturado notarial {yr}. "
                 f"Mayor tensión en {max_d} (+{max_g:.0f}%). Margen de negociación elevado.",
-                "notarial_gap")
+                "notarial_gap", code="notarial_gap_extreme",
+                params={"gap": round(gap, 1), "yr": yr, "max_d": max_d, "max_g": round(max_g)})
         elif gap >= 25:
             add("warning", "🏛️", "Oferta por encima del precio real",
                 f"Gap medio Idealista vs notarial {yr}: +{gap:.1f}%. "
                 f"Los vendedores piden más de lo que se escritura en la mayoría de distritos.",
-                "notarial_gap")
+                "notarial_gap", code="notarial_gap_high",
+                params={"gap": round(gap, 1), "yr": yr})
         elif gap < 5:
             add("info", "🏛️", "Precios de oferta alineados con el notarial",
                 f"Gap medio Madrid vs notarial {yr}: {gap:+.1f}%. "
                 "Las diferencias entre oferta y precio real son mínimas.",
-                "notarial_gap")
+                "notarial_gap", code="notarial_gap_aligned",
+                params={"gap": round(gap, 1), "yr": yr})
+
+    # ── Rent burden alerts ────────────────────────────────────────────────────
+    if rent_burden and rent_burden.get("current"):
+        rb = rent_burden["current"]
+        med = rent_burden.get("median_rent", 0)
+        if rb >= 50:
+            add("critical", "🏠", "Esfuerzo de alquiler extremo",
+                f"La renta mediana ({med} €/mes) supone el {rb}% del ingreso neto de referencia.",
+                "rent_burden", code="rent_burden_extreme",
+                params={"pct": rb, "rent": med})
+        elif rb >= 40:
+            add("warning", "🏠", "Esfuerzo de alquiler muy alto",
+                f"La renta mediana ({med} €/mes) supone el {rb}% del ingreso neto de referencia.",
+                "rent_burden", code="rent_burden_high",
+                params={"pct": rb, "rent": med})
+        elif rb >= 30:
+            add("info", "🏠", "Esfuerzo de alquiler moderado",
+                f"La renta mediana ({med} €/mes) supone el {rb}% del ingreso neto de referencia.",
+                "rent_burden", code="rent_burden_moderate",
+                params={"pct": rb, "rent": med})
 
     # Sort: critical first, then warning, then info
     order = {"critical": 0, "warning": 1, "info": 2}
@@ -1692,6 +1843,7 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
         "price_drop_ratio": get_price_drop_ratio(),
         "rental_yield":     get_rental_yield(),
         "notarial_gap":     get_notarial_gap_indicator(),
+        "rent_burden":      get_rent_burden(),
     }
     return indicators
 

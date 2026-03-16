@@ -71,6 +71,7 @@ def _load_market_alerts(indicators: Dict, macro: Dict) -> list:
         rotation=indicators.get("rotation", {}),
         affordability=indicators.get("affordability", {}),
         macro=macro,
+        rent_burden=indicators.get("rent_burden", {}),
     )
     return alerts or []
 
@@ -581,6 +582,8 @@ def _build_aged_stock_alert(threshold_warning: float = 0.35,
         return {
             "level": level,
             "metric": "aged_stock",
+            "code": "aged_stock",
+            "params": {"pct": pct, "min_days": min_days, "aged": aged, "total": total},
             "title": f"Stock envejecido: {pct}% lleva +{min_days} días",
             "detail": (
                 f"{aged:,} de {total:,} pisos activos llevan más de {min_days} días "
@@ -614,6 +617,8 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         "drop_ratio", "total_active", "with_drops",
         # rotation
         "rate",
+        # rent burden
+        "monthly_income_ref", "median_rent", "severity", "by_district",
         # series (already aggregated weekly)
         "series", "breakpoint",
     }
@@ -621,11 +626,16 @@ def _sanitise_indicator(ind: Dict) -> Dict:
 
 
 def _sanitise_alert(alert: Dict) -> Dict:
-    return {
+    out: Dict = {
         "level": alert.get("level", "info"),
         "title": alert.get("title", ""),
         "message": alert.get("detail") or alert.get("message", ""),
     }
+    if alert.get("code"):
+        out["code"] = alert["code"]
+    if alert.get("params"):
+        out["params"] = alert["params"]
+    return out
 
 # Métricas cuyo ratio es poco fiable por limitaciones del scraper
 _UNRELIABLE_METRICS = {"supply_demand"}
