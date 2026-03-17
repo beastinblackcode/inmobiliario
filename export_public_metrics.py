@@ -622,6 +622,8 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         # lanzamientos CGPJ
         "quarter_label", "alquiler", "hipoteca", "otros", "alquiler_pct",
         "yoy_change", "yoy_change_pct",
+        # morosidad (annual static)
+        "national_avg", "data_year", "source", "source_url",
         # series (already aggregated weekly)
         "series", "breakpoint",
     }

@@ -1951,6 +1951,50 @@ def get_lanzamientos_indicator() -> Dict:
     return result
 
 
+def get_morosidad_indicator() -> Dict:
+    """
+    Rental delinquency (morosidad de alquiler) indicator for Madrid.
+
+    SOURCE: Observatorio del Alquiler — annual report published each February/March.
+    https://observatoriodelalquiler.org/estudios/
+
+    This indicator is STATIC — it must be updated manually each year when
+    the Observatorio publishes its new report. Fields to update:
+        - series: append new year entry
+        - current / yoy_change_pct / data_year
+
+    Data points (Comunidad de Madrid):
+        2024: 8,831 € avg debt  (derived: 10,420 / 1.18)
+        2025: 10,420 €          +18.0 % YoY   (published Mar 2026)
+
+    National reference:
+        2024: 7,958 €   +4.2 % YoY
+        2025: 8,490 €   +16.5 % YoY
+    """
+    series = [
+        {"year": 2024, "madrid": 8_831, "national": 7_958, "yoy_pct": 4.2},
+        {"year": 2025, "madrid": 10_420, "national": 8_490, "yoy_pct": 18.0},
+    ]
+    latest = series[-1]
+    prev   = series[-2]
+
+    yoy_pct = round((latest["madrid"] - prev["madrid"]) / prev["madrid"] * 100, 1)
+
+    return {
+        "name":              "Morosidad Alquiler",
+        "unit":              "€",
+        "current":           latest["madrid"],
+        "previous":          prev["madrid"],
+        "yoy_change_pct":    yoy_pct,
+        "national_avg":      latest["national"],
+        "data_year":         latest["year"],
+        "source":            "Observatorio del Alquiler",
+        "source_url":        "https://observatoriodelalquiler.org/estudios/",
+        "trend":             "up",   # higher debt = worse
+        "series":            series,
+    }
+
+
 def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
     """
     Fetch all internal market indicators at once.
@@ -1972,6 +2016,7 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
         "notarial_gap":     get_notarial_gap_indicator(),
         "rent_burden":      get_rent_burden(),
         "lanzamientos":     get_lanzamientos_indicator(),
+        "morosidad":        get_morosidad_indicator(),
     }
     return indicators
 
