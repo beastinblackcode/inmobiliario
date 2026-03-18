@@ -71,6 +71,26 @@ def _detect_trend_breakpoint(series: list, value_key: str = "median_price") -> D
 
 
 # ============================================================================
+# Helpers
+# ============================================================================
+
+def _remove_outliers(values: list, iqr_factor: float = 1.5) -> list:
+    """
+    Remove outliers from a numeric list using the IQR fence method.
+    Values outside [Q1 - factor*IQR, Q3 + factor*IQR] are dropped.
+    Returns the original list unchanged if fewer than 20 values (too small to trim).
+    """
+    if len(values) < 20:
+        return values
+    q1, q3 = statistics.quantiles(values, n=4)[0], statistics.quantiles(values, n=4)[2]
+    iqr = q3 - q1
+    lo, hi = q1 - iqr_factor * iqr, q3 + iqr_factor * iqr
+    filtered = [v for v in values if lo <= v <= hi]
+    # Sanity check: don't discard more than 20% of values
+    return filtered if len(filtered) >= len(values) * 0.8 else values
+
+
+# ============================================================================
 # Weekly Price Evolution
 # ============================================================================
 
@@ -119,10 +139,12 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
             """, (week_num,))
             
             prices = [row[0] for row in cursor.fetchall()]
-            
+
             if len(prices) >= 10:
+                # Remove outliers using IQR fence before computing median
+                prices = _remove_outliers(prices)
                 median_price = statistics.median(prices)
-                
+
                 # Also get €/m²
                 cursor.execute("""
                     SELECT price / size_sqm FROM listings
@@ -130,6 +152,7 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
                     AND strftime('%Y-%W', first_seen_date) = ?
                 """, (week_num,))
                 prices_sqm = [row[0] for row in cursor.fetchall()]
+                prices_sqm = _remove_outliers(prices_sqm) if prices_sqm else prices_sqm
                 median_sqm = statistics.median(prices_sqm) if prices_sqm else 0
                 
                 result["series"].append({
@@ -156,19 +179,27 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
             )
 
             if incomplete_week and len(result["series"]) >= 3:
-                # Use second-to-last as current, third-to-last as previous
-                current  = result["series"][-2]
-                previous = result["series"][-3]
+                # Use second-to-last as current; rolling avg of older weeks as baseline
+                current    = result["series"][-2]
+                prior_weeks = result["series"][:-2]
             else:
-                current  = result["series"][-1]
-                previous = result["series"][-2]
+                current    = result["series"][-1]
+                prior_weeks = result["series"][:-1]
+
+            # Use rolling average of up to 3 prior complete weeks as baseline.
+            # This smooths out week-to-week composition noise (different mix of
+            # property types scrapped) while still catching genuine trends.
+            baseline_weeks = prior_weeks[-3:] if len(prior_weeks) >= 3 else prior_weeks
+            baseline_price = round(
+                statistics.mean(w["median_price"] for w in baseline_weeks)
+            ) if baseline_weeks else None
 
             result["current"]     = current["median_price"]
             result["current_sqm"] = current["median_price_sqm"]
-            result["previous"]    = previous["median_price"]
-            result["change"]      = result["current"] - result["previous"]
+            result["previous"]    = baseline_price
+            result["change"]      = (result["current"] - baseline_price) if baseline_price else None
             result["change_pct"]  = round(
-                (result["change"] / result["previous"] * 100) if result["previous"] > 0 else 0, 2
+                (result["change"] / baseline_price * 100) if baseline_price else 0, 2
             )
             result["incomplete_latest_week"] = incomplete_week
 
@@ -875,13 +906,13 @@ def get_market_alerts(
     # ── Price alerts ──────────────────────────────────────────────────────────
     if price_trend:
         chg = price_trend.get("change_pct") or 0
-        if chg >= 5:
+        if chg >= 10:
             add("critical", "🚨", "Subida brusca de precios",
-                f"Los precios subieron un {chg:+.1f}% en la última semana.",
+                f"Los precios subieron un {chg:+.1f}% respecto a la media de las semanas anteriores.",
                 "price_trend", code="price_spike", params={"pct": round(chg, 1)})
-        elif chg <= -5:
+        elif chg <= -10:
             add("critical", "🚨", "Caída brusca de precios",
-                f"Los precios bajaron un {chg:+.1f}% en la última semana.",
+                f"Los precios bajaron un {chg:+.1f}% respecto a la media de las semanas anteriores.",
                 "price_trend", code="price_crash", params={"pct": round(abs(chg), 1)})
         elif chg >= 2:
             add("warning", "⚠️", "Precios al alza",
