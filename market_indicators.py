@@ -162,7 +162,18 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
                     "median_price_sqm": round(median_sqm),
                     "count": len(prices)
                 })
-        
+
+        # ── Guard: drop bulk-import weeks (>3× the median count) ────────
+        # A bulk import has radically different composition and poisons
+        # week-over-week comparisons.
+        if len(result["series"]) >= 3:
+            counts = sorted(pt["count"] for pt in result["series"])
+            median_count = counts[len(counts) // 2]
+            result["series"] = [
+                pt for pt in result["series"]
+                if pt["count"] <= median_count * 3
+            ]
+
         if len(result["series"]) >= 2:
             # Guard: if the most recent week has < 40% of the average count
             # of the previous weeks, treat it as an incomplete scrape and
@@ -198,9 +209,12 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
             result["current_sqm"] = current["median_price_sqm"]
             result["previous"]    = baseline_price
             result["change"]      = (result["current"] - baseline_price) if baseline_price else None
-            result["change_pct"]  = round(
+            raw_pct = round(
                 (result["change"] / baseline_price * 100) if baseline_price else 0, 2
             )
+            # Clamp: any weekly change beyond ±15% is almost certainly a data
+            # artefact (composition shift), not a real market movement.
+            result["change_pct"]  = max(-15.0, min(15.0, raw_pct))
             result["incomplete_latest_week"] = incomplete_week
 
             if result["change_pct"] < -1:
@@ -280,7 +294,16 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
                     "avg_days": round(avg_days, 1),
                     "sold_count": len(days)
                 })
-        
+
+        # Drop bulk-import weeks (>3× median sold count)
+        if len(result["series"]) >= 3:
+            sold_counts = sorted(pt["sold_count"] for pt in result["series"])
+            med_sold = sold_counts[len(sold_counts) // 2]
+            result["series"] = [
+                pt for pt in result["series"]
+                if pt["sold_count"] <= med_sold * 3
+            ]
+
         if len(result["series"]) >= 2:
             avg_prev_count = statistics.mean(
                 pt["sold_count"] for pt in result["series"][:-1]
@@ -292,22 +315,25 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
             )
 
             if incomplete_week and len(result["series"]) >= 3:
-                current  = result["series"][-2]
-                previous = result["series"][-3]
+                current_weeks = result["series"][-4:-1]  # up to 3 complete weeks
             else:
-                current  = result["series"][-1]
-                previous = result["series"][-2]
+                current_weeks = result["series"][-3:]    # last 3 weeks
 
-            result["current"] = current["median_days"]
-            result["previous"] = previous["median_days"]
-            result["change"] = round(result["current"] - result["previous"], 1)
+            # Use rolling median of last N weeks for stability
+            result["current"] = round(
+                statistics.median(w["median_days"] for w in current_weeks), 1
+            )
+            result["previous"] = current_weeks[0]["median_days"] if current_weeks else None
+            result["change"] = round(
+                result["current"] - result["previous"], 1
+            ) if result["previous"] is not None else None
             result["incomplete_latest_week"] = incomplete_week
 
             # Faster sales = positive market signal
-            if result["change"] < -1:
-                result["trend"] = "up"  # Faster = market accelerating
-            elif result["change"] > 1:
-                result["trend"] = "down"  # Slower = market decelerating
+            if result["change"] is not None and result["change"] < -1:
+                result["trend"] = "up"
+            elif result["change"] is not None and result["change"] > 1:
+                result["trend"] = "down"
             else:
                 result["trend"] = "stable"
     
@@ -645,15 +671,43 @@ def get_affordability_index(euribor_rate: float = None) -> Dict:
     with get_connection() as conn:
         cursor = conn.cursor()
 
+        # Use listings from the last 4 complete scrape weeks instead of ALL
+        # active listings.  The full active set includes the bulk-import week
+        # which has a very different composition and inflates the median.
         cursor.execute("""
-            SELECT price FROM listings
-            WHERE price > 0 AND status = 'active'
+            SELECT strftime('%Y-%W', first_seen_date) AS wk, COUNT(*) AS cnt
+            FROM listings WHERE first_seen_date IS NOT NULL AND price > 0
+            GROUP BY wk ORDER BY wk DESC LIMIT 8
         """)
+        week_rows = cursor.fetchall()
+        # Detect normal weeks (skip bulk imports >3× median count)
+        if len(week_rows) >= 3:
+            counts = sorted(r[1] for r in week_rows)
+            med_cnt = counts[len(counts) // 2]
+            normal_weeks = [r[0] for r in week_rows if r[1] <= med_cnt * 3]
+        else:
+            normal_weeks = [r[0] for r in week_rows]
+        # Take last 4 normal weeks
+        recent = normal_weeks[:4]
+
+        if recent:
+            placeholders = ",".join("?" for _ in recent)
+            cursor.execute(f"""
+                SELECT price FROM listings
+                WHERE price > 0
+                AND strftime('%Y-%W', first_seen_date) IN ({placeholders})
+            """, recent)
+        else:
+            cursor.execute("""
+                SELECT price FROM listings
+                WHERE price > 0 AND status = 'active'
+            """)
         prices = [row[0] for row in cursor.fetchall()]
 
     if not prices:
         return result
 
+    prices = _remove_outliers(prices)
     median_price = statistics.median(prices)
     result["median_price"] = round(median_price)
 

@@ -624,6 +624,8 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         "yoy_change", "yoy_change_pct",
         # morosidad (annual static)
         "national_avg", "data_year", "source", "source_url",
+        # price trend extras (aligned with "current" week, not last series entry)
+        "current_sqm",
         # series (already aggregated weekly)
         "series", "breakpoint",
     }
