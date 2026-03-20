@@ -184,10 +184,24 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
             ) if len(result["series"]) > 1 else 0
 
             latest = result["series"][-1]
-            incomplete_week = (
+
+            # Guard 1: count-based — fewer than 60% of average means the scrape
+            # is clearly partial (raised from 40% to catch near-complete but biased weeks)
+            count_incomplete = (
                 avg_prev_count > 0
-                and latest["count"] < avg_prev_count * 0.40
+                and latest["count"] < avg_prev_count * 0.60
             )
+
+            # Guard 2: time-based — if the most recent week started less than 7
+            # days ago it is still open (scraping may still add listings), so
+            # treat it as incomplete regardless of the count.
+            try:
+                latest_start = datetime.strptime(latest["week_start"], "%Y-%m-%d")
+                open_week = (datetime.utcnow() - latest_start).days < 7
+            except Exception:
+                open_week = False
+
+            incomplete_week = count_incomplete or open_week
 
             if incomplete_week and len(result["series"]) >= 3:
                 # Use second-to-last as current; rolling avg of older weeks as baseline
