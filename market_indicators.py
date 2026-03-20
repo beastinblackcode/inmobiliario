@@ -292,9 +292,13 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
                 AND first_seen_date IS NOT NULL
                 AND last_seen_date IS NOT NULL
                 AND strftime('%Y-%W', last_seen_date) = ?
-                AND julianday(last_seen_date) - julianday(first_seen_date) >= 0
+                AND julianday(last_seen_date) - julianday(first_seen_date) >= 1
             """, (week_num,))
-            
+
+            # Note: 0-day observations (first_seen = last_seen) are excluded above —
+            # they are scraper artifacts (listing appeared and vanished in same scrape).
+            # The minimum of 1 day ensures we only count listings observed on
+            # at least two different scraping days.
             days = [row[0] for row in cursor.fetchall() if row[0] is not None]
             
             if len(days) >= 5:
@@ -1006,7 +1010,7 @@ def get_market_alerts(
         speed = sales_speed.get("current")
         chg = sales_speed.get("change") or 0
         if speed is not None:
-            if speed <= 2:
+            if speed <= 5:
                 add("info", "⚡", "Mercado muy activo",
                     f"Mediana de venta: {speed:.0f} días. Alta presión de demanda.",
                     "sales_speed", code="market_hot", params={"days": round(speed)})
@@ -1360,13 +1364,13 @@ def calculate_market_score(
     # ------------------------------------------------------------------
     current_speed = sales_speed.get("current")
     if current_speed is not None:
-        if current_speed <= 2:
+        if current_speed <= 5:
             scores["speed"] = 90
-        elif current_speed <= 5:
-            scores["speed"] = 75
         elif current_speed <= 10:
-            scores["speed"] = 55
+            scores["speed"] = 75
         elif current_speed <= 20:
+            scores["speed"] = 55
+        elif current_speed <= 40:
             scores["speed"] = 35
         else:
             scores["speed"] = 15
