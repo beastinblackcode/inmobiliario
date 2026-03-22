@@ -23,11 +23,11 @@ jobs:
       - name: Install dependencies
         run: pip install tweepy python-dotenv
 
-      - name: Verify files
+      - name: Fetch data files
         run: |
-          pwd
-          ls -la
-          ls -la tweet_daily.py
+          mkdir -p market-thermometer/public market-thermometer/content
+          curl -sf -o market-thermometer/public/metrics.json https://madridhome.tech/metrics.json
+          curl -sf -o market-thermometer/content/news.json https://raw.githubusercontent.com/softniric-cyber/market-thermometer/main/content/news.json
 
       - name: Publish tweet
         env:
