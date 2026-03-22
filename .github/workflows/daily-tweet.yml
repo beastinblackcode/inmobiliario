@@ -24,7 +24,10 @@ jobs:
         run: pip install tweepy python-dotenv
 
       - name: Verify files
-        run: ls -la tweet_daily.py market-thermometer/content/news.json market-thermometer/public/metrics.json
+        run: |
+          pwd
+          ls -la
+          ls -la tweet_daily.py
 
       - name: Publish tweet
         env:
