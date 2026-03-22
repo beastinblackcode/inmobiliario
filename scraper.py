@@ -1,6 +1,9 @@
 """
 Web scraper for Idealista Madrid real estate listings.
-Uses Bright Data Web Unlocker API and BeautifulSoup for parsing.
+
+Hybrid fetching strategy (cost optimization):
+1. First tries DIRECT request via curl_cffi (free, impersonates Chrome TLS)
+2. Falls back to Bright Data Web Unlocker API only when direct fails
 
 Optimizations applied:
 - No redundant district-level scraping (barrios cover all territory)
@@ -13,6 +16,7 @@ Optimizations applied:
 - Rental scraping frequency control (RENTAL_SCRAPE_INTERVAL_DAYS)
 - Per-barrio "already scraped today" guard to avoid double-runs
 - Request budget cap (BRIGHTDATA_REQUEST_BUDGET) to prevent runaway costs
+- HYBRID mode: direct+fallback saves 70-90% of proxy costs
 """
 
 import os
@@ -20,6 +24,7 @@ import re
 import sys
 import time
 import json
+import random
 from typing import Dict, List, Optional
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +33,15 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import urllib3
+
+# curl_cffi: browser-grade TLS fingerprinting (free, no proxy needed)
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+    print("⚠ curl_cffi not installed — falling back to BrightData for all requests")
+    print("  Install with: pip install curl_cffi")
 
 # Disable SSL warnings when using Bright Data proxy
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -82,6 +96,20 @@ EARLY_EXIT_THRESHOLD = 0.90  # 90% already seen = skip (more aggressive than pre
 # If exceeded mid-run, scraping stops gracefully and logs a warning.
 # Set via env var to protect against runaway costs.
 BRIGHTDATA_REQUEST_BUDGET = int(os.getenv('BRIGHTDATA_REQUEST_BUDGET', '0'))
+
+# ---------------------------------------------------------------------------
+# HYBRID FETCH MODE (cost optimization)
+# ---------------------------------------------------------------------------
+# 'hybrid'  : try direct (curl_cffi) first, fallback to BrightData on failure
+# 'direct'  : only direct requests (no BrightData at all — risky but free)
+# 'proxy'   : original behavior — all requests via BrightData
+FETCH_MODE = os.getenv('FETCH_MODE', 'hybrid').lower()
+
+# Seconds to wait between direct requests (politeness delay to avoid bans)
+DIRECT_REQUEST_DELAY = float(os.getenv('DIRECT_REQUEST_DELAY', '2.0'))
+
+# After this many consecutive direct failures, switch to proxy-only for rest of run
+DIRECT_FAIL_THRESHOLD = int(os.getenv('DIRECT_FAIL_THRESHOLD', '10'))
 
 # How often to re-scrape rental prices (days). Rental data changes slowly;
 # daily scraping wastes ~139 requests per run. Default: every 7 days.
@@ -348,6 +376,12 @@ def get_proxy_config() -> Optional[Dict]:
 # Global request counter for Bright Data usage tracking
 request_counter = {'successful': 0, 'failed': 0, 'total': 0}
 
+# Direct (free) request counters
+direct_counter = {'successful': 0, 'failed': 0, 'total': 0}
+
+# Consecutive direct failures (triggers auto-switch to proxy-only)
+_consecutive_direct_fails = 0
+
 # Per-phase request counters: venta (sale scraping), rental, retry
 phase_counters: Dict[str, int] = {'venta': 0, 'rental': 0, 'retry': 0}
 
@@ -372,56 +406,133 @@ def _budget_exceeded() -> bool:
 
 def get_brightdata_cost_estimate():
     """
-    Calculate estimated Bright Data cost based on requests made.
+    Calculate estimated Bright Data cost and show hybrid savings.
     Bright Data Web Unlocker pricing: ~$3-5 per 1000 requests (varies by plan)
     Using conservative estimate of $4 per 1000 requests.
     """
-    total_requests = request_counter['total']
+    proxy_requests = request_counter['total']
+    direct_requests = direct_counter['total']
+    total_all = proxy_requests + direct_requests
     cost_per_1k = 4.0  # USD per 1000 requests
-    estimated_cost = (total_requests / 1000) * cost_per_1k
+    actual_cost = (proxy_requests / 1000) * cost_per_1k
+    would_have_cost = (total_all / 1000) * cost_per_1k
+    savings = would_have_cost - actual_cost
+
     return {
-        'total_requests': total_requests,
-        'successful_requests': request_counter['successful'],
-        'failed_requests': request_counter['failed'],
-        'estimated_cost_usd': round(estimated_cost, 2),
-        'cost_per_request': round(cost_per_1k / 1000, 4)
+        'total_requests': total_all,
+        'direct_requests': direct_requests,
+        'direct_successful': direct_counter['successful'],
+        'proxy_requests': proxy_requests,
+        'proxy_successful': request_counter['successful'],
+        'failed_requests': request_counter['failed'] + direct_counter['failed'],
+        'estimated_cost_usd': round(actual_cost, 2),
+        'savings_usd': round(savings, 2),
+        'savings_pct': round((savings / would_have_cost * 100) if would_have_cost > 0 else 0, 1),
+        'cost_per_request': round(cost_per_1k / 1000, 4),
+        'fetch_mode': FETCH_MODE,
     }
 
 
-def fetch_page(
-    url: str,
-    proxies: Optional[Dict] = None,
-    retries: int = 3,
-    silent_404: bool = False,
-) -> tuple:
+def _get_random_headers() -> Dict[str, str]:
+    """Return realistic browser headers with randomized User-Agent."""
+    user_agents = [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0',
+    ]
+    return {
+        'User-Agent': random.choice(user_agents),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Upgrade-Insecure-Requests': '1',
+    }
+
+
+def _fetch_direct(url: str) -> tuple:
     """
-    Fetch HTML content from URL with smart retry logic.
+    Fetch via curl_cffi impersonating a real Chrome browser (free, no proxy).
 
-    Only retries on transient errors (timeouts, connection errors).
-    Returns immediately on definitive errors (404, 502) to save API calls.
-
-    Args:
-        url:         Target URL
-        proxies:     Proxy configuration
-        retries:     Number of retry attempts (only for transient errors)
-        silent_404:  If True, suppress 404 log file writes and console warnings.
-                     Use for rental scraping where 404 = no listings (expected).
+    curl_cffi mimics the TLS fingerprint of a real browser, which is the
+    primary signal anti-bot systems use to block requests.
 
     Returns:
         Tuple of (HTML content or None, status_code)
     """
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-    }
+    global _consecutive_direct_fails
 
-    # Definitive HTTP errors: no point retrying, saves Bright Data requests
+    if not HAS_CURL_CFFI:
+        return None, 0
+
+    try:
+        direct_counter['total'] += 1
+        # impersonate= tells curl_cffi which browser TLS fingerprint to use
+        response = cffi_requests.get(
+            url,
+            headers=_get_random_headers(),
+            impersonate="chrome131",
+            timeout=30,
+        )
+
+        if response.status_code == 200:
+            # Check for CAPTCHA/challenge pages
+            text = response.text
+            if _is_challenge_page(text):
+                direct_counter['failed'] += 1
+                _consecutive_direct_fails += 1
+                return None, 403  # Treat as blocked
+            direct_counter['successful'] += 1
+            _consecutive_direct_fails = 0
+            return text, 200
+        else:
+            direct_counter['failed'] += 1
+            _consecutive_direct_fails += 1
+            return None, response.status_code
+
+    except Exception as e:
+        direct_counter['failed'] += 1
+        _consecutive_direct_fails += 1
+        print(f"  ⚠ Direct request error: {e}")
+        return None, 0
+
+
+def _is_challenge_page(html: str) -> bool:
+    """Detect if the response is a CAPTCHA or anti-bot challenge page."""
+    if len(html) < 2000:
+        return True  # Real Idealista pages are much larger
+    challenge_signals = [
+        'captcha', 'challenge', 'cf-browser-verification',
+        'ray-id', 'just a moment', 'checking your browser',
+        'access denied', 'blocked',
+    ]
+    html_lower = html[:5000].lower()
+    return any(signal in html_lower for signal in challenge_signals)
+
+
+def _fetch_via_proxy(
+    url: str,
+    proxies: Optional[Dict],
+    retries: int = 3,
+    silent_404: bool = False,
+) -> tuple:
+    """
+    Fetch via Bright Data proxy (original method, costs ~$0.004/request).
+
+    Only retries on transient errors (timeouts, connection errors).
+    Returns immediately on definitive errors (404, 502) to save API calls.
+    """
+    headers = _get_random_headers()
     DEFINITIVE_ERRORS = {404, 403, 410, 502}
 
     for attempt in range(retries):
         try:
-            # Increment request counters (global + per-phase)
             request_counter['total'] += 1
             phase_counters[_current_phase] = phase_counters.get(_current_phase, 0) + 1
 
@@ -430,14 +541,13 @@ def fetch_page(
                 proxies=proxies,
                 headers=headers,
                 timeout=60,
-                verify=False  # Disable SSL verification for Bright Data proxy
+                verify=False,
             )
 
             if response.status_code == 200:
                 request_counter['successful'] += 1
                 return response.text, 200
             elif response.status_code in DEFINITIVE_ERRORS:
-                # Definitive error: return immediately, do NOT retry
                 request_counter['failed'] += 1
                 if response.status_code == 404:
                     if not silent_404:
@@ -448,7 +558,6 @@ def fetch_page(
                     print(f"  ⚠ HTTP {response.status_code} - definitive error (no retry)")
                 return None, response.status_code
             else:
-                # Potentially transient error (429, 500, 503, etc.) - retry
                 request_counter['failed'] += 1
                 print(f"  ⚠ HTTP {response.status_code} for {url} (attempt {attempt + 1}/{retries})")
                 if attempt < retries - 1:
@@ -458,11 +567,75 @@ def fetch_page(
 
         except requests.exceptions.RequestException as e:
             request_counter['failed'] += 1
-            print(f"  ⚠ Request error (attempt {attempt + 1}/{retries}): {e}")
+            print(f"  ⚠ Proxy request error (attempt {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)  # Exponential backoff
+                time.sleep(2 ** attempt)
 
     return None, 0
+
+
+def fetch_page(
+    url: str,
+    proxies: Optional[Dict] = None,
+    retries: int = 3,
+    silent_404: bool = False,
+) -> tuple:
+    """
+    Fetch HTML content with hybrid strategy (direct → proxy fallback).
+
+    Strategy depends on FETCH_MODE:
+    - 'hybrid':  try direct first (free), fallback to proxy on failure
+    - 'direct':  only direct requests (free but risky)
+    - 'proxy':   only Bright Data proxy (original behavior)
+
+    Auto-switches to proxy-only if DIRECT_FAIL_THRESHOLD consecutive
+    direct failures are detected (likely IP ban).
+
+    Args:
+        url:         Target URL
+        proxies:     Proxy configuration
+        retries:     Number of retry attempts (only for proxy/transient errors)
+        silent_404:  If True, suppress 404 log file writes.
+
+    Returns:
+        Tuple of (HTML content or None, status_code)
+    """
+    mode = FETCH_MODE
+
+    # Auto-degrade to proxy if too many consecutive direct failures
+    if mode == 'hybrid' and _consecutive_direct_fails >= DIRECT_FAIL_THRESHOLD:
+        if _consecutive_direct_fails == DIRECT_FAIL_THRESHOLD:
+            print(f"  ⚠ {DIRECT_FAIL_THRESHOLD} consecutive direct failures — auto-switching to proxy-only")
+        mode = 'proxy'
+
+    # ----- DIRECT attempt (free) -----
+    if mode in ('hybrid', 'direct') and HAS_CURL_CFFI:
+        # Politeness delay to reduce chance of IP ban
+        time.sleep(DIRECT_REQUEST_DELAY + random.uniform(0, 1.0))
+
+        html, status = _fetch_direct(url)
+        if status == 200:
+            return html, 200
+
+        if mode == 'direct':
+            # Direct-only: no fallback, return whatever we got
+            if status == 404 and not silent_404:
+                with open('404_errors.log', 'a') as f:
+                    f.write(f"{url}\n")
+                print(f"  ⚠ HTTP 404 Not Found (direct) - logged")
+            return html, status
+
+        # hybrid mode: direct failed, try proxy
+        print(f"  ↻ Direct blocked (HTTP {status}) — falling back to BrightData proxy")
+
+    # ----- PROXY attempt (paid) -----
+    if proxies is None:
+        proxies = get_proxy_config()
+    if proxies is None:
+        print("  ✗ No proxy configured and direct request failed")
+        return None, 0
+
+    return _fetch_via_proxy(url, proxies, retries=retries, silent_404=silent_404)
 
 
 def extract_number(text: str) -> Optional[int]:
@@ -1029,47 +1202,61 @@ def run_scraper(retry_only: bool = False):
     print("=" * 60)
 
     # -------------------------------------------------------------------------
-    # 💰 BRIGHT DATA COST REPORT  (venta + retry phases, before rental)
+    # 💰 COST REPORT  (venta + retry phases, before rental)
     # -------------------------------------------------------------------------
-    total_req = cost_data['total_requests']
-    ok_req    = cost_data['successful_requests']
-    fail_req  = cost_data['failed_requests']
-    cost_usd  = cost_data['estimated_cost_usd']
-    duration  = (end_time - start_time).total_seconds()
+    total_req    = cost_data['total_requests']
+    direct_req   = cost_data['direct_requests']
+    direct_ok    = cost_data['direct_successful']
+    proxy_req    = cost_data['proxy_requests']
+    proxy_ok     = cost_data['proxy_successful']
+    fail_req     = cost_data['failed_requests']
+    cost_usd     = cost_data['estimated_cost_usd']
+    savings_usd  = cost_data['savings_usd']
+    savings_pct  = cost_data['savings_pct']
+    fetch_mode   = cost_data['fetch_mode']
+    duration     = (end_time - start_time).total_seconds()
 
     # Budget warning if cap was reached
-    if BRIGHTDATA_REQUEST_BUDGET > 0 and total_req >= BRIGHTDATA_REQUEST_BUDGET:
-        print(f"\n⚠️  PRESUPUESTO ALCANZADO: {total_req:,} / {BRIGHTDATA_REQUEST_BUDGET:,} requests")
+    if BRIGHTDATA_REQUEST_BUDGET > 0 and proxy_req >= BRIGHTDATA_REQUEST_BUDGET:
+        print(f"\n⚠️  PRESUPUESTO ALCANZADO: {proxy_req:,} / {BRIGHTDATA_REQUEST_BUDGET:,} requests de proxy")
         print(f"   Aumenta BRIGHTDATA_REQUEST_BUDGET en .env o en GitHub Secrets si necesitas más.")
 
     print("\n")
     print("╔" + "═" * 62 + "╗")
-    print("║" + "  💰  BRIGHT DATA — RESUMEN DE COSTE".center(62) + "║")
+    title = f"  💰  RESUMEN DE COSTE — modo {fetch_mode.upper()}"
+    print("║" + title.center(62) + "║")
     print("╠" + "═" * 62 + "╣")
 
     if total_req > 0:
-        ok_pct   = ok_req / total_req * 100
-        fail_pct = fail_req / total_req * 100
+        # Direct (free) vs Proxy (paid) breakdown
+        if direct_req > 0:
+            d_rate = direct_ok / direct_req * 100 if direct_req > 0 else 0
+            print(f"║  {'Requests directas (gratis):':<30} {direct_req:>8,}                   ║")
+            print(f"║  {'  ✓ Exitosas:':<30} {direct_ok:>8,}  ({d_rate:4.1f}%)         ║")
+        if proxy_req > 0:
+            p_rate = proxy_ok / proxy_req * 100 if proxy_req > 0 else 0
+            print(f"║  {'Requests proxy (BrightData):':<30} {proxy_req:>8,}                   ║")
+            print(f"║  {'  ✓ Exitosas:':<30} {proxy_ok:>8,}  ({p_rate:4.1f}%)         ║")
+        print(f"║  {'Requests totales:':<30} {total_req:>8,}                   ║")
+        print(f"║  {'  ✗ Fallidas (total):':<30} {fail_req:>8,}                   ║")
+        print("╠" + "─" * 62 + "╣")
 
         # Per-phase breakdown
         venta_req  = phase_counters.get('venta', 0)
         retry_req  = phase_counters.get('retry', 0)
-        # rental will be filled after run_rental_scraping()
-        print(f"║  {'Requests totales:':<30} {total_req:>8,}                   ║")
-        print(f"║  {'  ✓ Exitosas:':<30} {ok_req:>8,}  ({ok_pct:4.1f}%)         ║")
-        print(f"║  {'  ✗ Fallidas:':<30} {fail_req:>8,}  ({fail_pct:4.1f}%)         ║")
-        print("╠" + "─" * 62 + "╣")
         print(f"║  {'Por fase — venta (anuncios):':<30} {venta_req:>8,}                   ║")
         print(f"║  {'Por fase — retries:':<30} {retry_req:>8,}                   ║")
         print(f"║  {'Por fase — alquiler:':<30} {'(ver abajo)':>12}               ║")
         print("╠" + "─" * 62 + "╣")
 
         # Cost
-        cost_per_req     = cost_usd / total_req
+        cost_per_req     = cost_usd / proxy_req if proxy_req > 0 else 0
         cost_per_listing = cost_usd / total_listings if total_listings > 0 else 0
-        print(f"║  {'Coste estimado (sin alquiler):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
-        print(f"║  {'Coste por request:':<30} {'$' + f'{cost_per_req:.5f}':>10} USD         ║")
-        print(f"║  {'Coste por anuncio:':<30} {'$' + f'{cost_per_listing:.5f}':>10} USD         ║")
+        print(f"║  {'Coste real (solo proxy):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
+        if savings_usd > 0:
+            print(f"║  {'Ahorro vs proxy-only:':<30} {'$' + f'{savings_usd:.4f}':>10} USD ({savings_pct:.0f}%)  ║")
+        if total_listings > 0:
+            print(f"║  {'Coste por anuncio:':<30} {'$' + f'{cost_per_listing:.5f}':>10} USD         ║")
         print("╠" + "─" * 62 + "╣")
 
         # Timing
