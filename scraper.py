@@ -79,14 +79,30 @@ FETCH_DESCRIPTIONS = os.getenv('FETCH_DESCRIPTIONS', 'false').lower() == 'true'
 # File to persist page count history per barrio (for smart pagination)
 PAGE_HISTORY_FILE = "barrio_page_history.json"
 
-# Margin to add to historical max pages (safety buffer)
-PAGE_HISTORY_MARGIN = 2
+# Margin to add to historical max pages (safety buffer).
+# Reduced from 2 to 1: saves 139 requests/day. The extra page is almost always 404.
+PAGE_HISTORY_MARGIN = int(os.getenv('PAGE_HISTORY_MARGIN', '1'))
 
 # Maximum pages to scrape per barrio (hard limit)
 MAX_PAGES_PER_BARRIO = int(os.getenv('MAX_PAGES_PER_BARRIO', '30'))
 
 # Early exit: if this % of listings on page 1 were already seen today, skip remaining pages
-EARLY_EXIT_THRESHOLD = 0.90  # 90% already seen = skip (more aggressive than previous 95%)
+# Reduced from 90% to 80%: saves ~30 requests/day on multi-page barrios
+EARLY_EXIT_THRESHOLD = float(os.getenv('EARLY_EXIT_THRESHOLD', '0.80'))
+
+# ---------------------------------------------------------------------------
+# LOW-ACTIVITY BARRIO FREQUENCY
+# ---------------------------------------------------------------------------
+# Barrios with max_pages <= this threshold are "low-activity".
+# They are scraped every LOW_ACTIVITY_INTERVAL days instead of daily.
+# Saves ~35 requests/day on average (71 barrios with 1 page).
+# Does NOT affect price history: existing listings stay in DB.
+# Only risk: a new listing published & sold within the skip window is missed.
+LOW_ACTIVITY_MAX_PAGES = int(os.getenv('LOW_ACTIVITY_MAX_PAGES', '1'))
+LOW_ACTIVITY_INTERVAL_DAYS = int(os.getenv('LOW_ACTIVITY_INTERVAL_DAYS', '2'))
+
+# File tracking when each low-activity barrio was last scraped
+LOW_ACTIVITY_TRACKER_FILE = "low_activity_last_scraped.json"
 
 # ---------------------------------------------------------------------------
 # COST CONTROL
@@ -148,6 +164,62 @@ def get_max_pages_for_barrio(history: Dict, barrio_key: str) -> int:
         historical_max = history[barrio_key].get('max_pages', MAX_PAGES_PER_BARRIO)
         return min(historical_max + PAGE_HISTORY_MARGIN, MAX_PAGES_PER_BARRIO)
     return MAX_PAGES_PER_BARRIO
+
+
+# ---------------------------------------------------------------------------
+# LOW-ACTIVITY BARRIO FREQUENCY CONTROL
+# ---------------------------------------------------------------------------
+
+def _load_low_activity_tracker() -> Dict:
+    """Load last-scraped dates for low-activity barrios."""
+    try:
+        if Path(LOW_ACTIVITY_TRACKER_FILE).exists():
+            with open(LOW_ACTIVITY_TRACKER_FILE, 'r') as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        pass
+    return {}
+
+
+def _save_low_activity_tracker(tracker: Dict) -> None:
+    """Persist last-scraped dates for low-activity barrios."""
+    try:
+        with open(LOW_ACTIVITY_TRACKER_FILE, 'w') as f:
+            json.dump(tracker, f, indent=2, ensure_ascii=False)
+    except IOError as e:
+        print(f"  ⚠ Could not save low-activity tracker: {e}")
+
+
+def should_skip_low_activity(barrio_key: str, page_history: Dict,
+                              tracker: Dict) -> bool:
+    """
+    Check if a low-activity barrio can be skipped today.
+
+    A barrio is "low-activity" if its historical max_pages <= LOW_ACTIVITY_MAX_PAGES.
+    These barrios are scraped every LOW_ACTIVITY_INTERVAL_DAYS instead of daily.
+
+    Returns True if the barrio should be SKIPPED (was scraped recently enough).
+    """
+    if LOW_ACTIVITY_INTERVAL_DAYS <= 1:
+        return False  # Feature disabled (scrape daily)
+
+    # Check if this barrio qualifies as low-activity
+    info = page_history.get(barrio_key, {})
+    max_pages = info.get('max_pages', MAX_PAGES_PER_BARRIO)
+    if max_pages > LOW_ACTIVITY_MAX_PAGES:
+        return False  # Active barrio — always scrape
+
+    # Check when it was last scraped
+    last_scraped = tracker.get(barrio_key)
+    if not last_scraped:
+        return False  # Never tracked — scrape now
+
+    try:
+        last_date = datetime.strptime(last_scraped, "%Y-%m-%d").date()
+        days_since = (datetime.utcnow().date() - last_date).days
+        return days_since < LOW_ACTIVITY_INTERVAL_DAYS
+    except (ValueError, TypeError):
+        return False  # Bad date — scrape to be safe
 
 
 def update_page_history(history: Dict, barrio_key: str, pages_found: int) -> None:
@@ -1121,6 +1193,9 @@ def run_scraper(retry_only: bool = False):
     total_updated = 0
 
     # Determine which barrios to scrape
+    low_activity_tracker = _load_low_activity_tracker()
+    skipped_low_activity = 0
+
     if retry_only:
         # RETRY MODE: only scrape barrios that failed previously
         barrios_to_scrape = get_failed_barrios_from_log()
@@ -1132,18 +1207,36 @@ def run_scraper(retry_only: bool = False):
         # FULL MODE: scrape all barrios (NO district-level scraping — saves ~30% requests)
         barrios_to_scrape = BARRIO_URLS
         print(f"\n🏘️ Scraping {len(barrios_to_scrape)} barrios...")
+        if LOW_ACTIVITY_INTERVAL_DAYS > 1:
+            print(f"  💡 Low-activity barrios (≤{LOW_ACTIVITY_MAX_PAGES} pág) → every {LOW_ACTIVITY_INTERVAL_DAYS} days")
 
     # Scrape barrios (venta phase)
     _set_phase('venta')
     for entry in barrios_to_scrape:
         distrito, barrio, url_path = entry[0], entry[1], entry[2]
+        barrio_key = f"{distrito}|{barrio}"
+
+        # Skip low-activity barrios that were scraped recently (cost optimization)
+        if not retry_only and should_skip_low_activity(barrio_key, page_history, low_activity_tracker):
+            skipped_low_activity += 1
+            continue
+
         count, new_count, updated_count = scrape_barrio(
             distrito, barrio, url_path, proxies, active_ids, page_history
         )
         total_listings += count
         total_new += new_count
         total_updated += updated_count
+
+        # Mark this barrio as scraped today in the low-activity tracker
+        low_activity_tracker[barrio_key] = datetime.utcnow().strftime("%Y-%m-%d")
+
         time.sleep(1)  # Rate limiting between barrios
+
+    # Save low-activity tracker
+    _save_low_activity_tracker(low_activity_tracker)
+    if skipped_low_activity > 0:
+        print(f"\n  💡 Skipped {skipped_low_activity} low-activity barrios (scraped recently)")
 
     # Save updated page history
     save_page_history(page_history)

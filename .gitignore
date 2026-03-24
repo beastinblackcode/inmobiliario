@@ -40,6 +40,7 @@ drive_file_id.txt
 # Scraper runtime state (generated automatically, not part of source)
 barrios_scrapeados_hoy.txt
 barrio_page_history.json
+low_activity_last_scraped.json
 current_scraper_urls.txt
 urls_from_web.txt
 model_metadata.json
