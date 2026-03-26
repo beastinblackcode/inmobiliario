@@ -846,9 +846,9 @@ def get_seller_stats() -> Dict:
             SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN seller_type = 'Particular' THEN 1 ELSE 0 END) AS particular,
-                SUM(CASE WHEN seller_type = 'Profesional' THEN 1 ELSE 0 END) AS professional,
+                SUM(CASE WHEN seller_type = 'Agencia' THEN 1 ELSE 0 END) AS professional,
                 SUM(CASE WHEN seller_type IS NULL
-                         OR seller_type NOT IN ('Particular', 'Profesional') THEN 1 ELSE 0 END) AS other
+                         OR seller_type NOT IN ('Particular', 'Agencia') THEN 1 ELSE 0 END) AS other
             FROM listings
             WHERE status = 'active'
         """)
@@ -864,7 +864,7 @@ def get_seller_stats() -> Dict:
                 distrito,
                 COUNT(*) AS total,
                 SUM(CASE WHEN seller_type = 'Particular' THEN 1 ELSE 0 END) AS particular,
-                SUM(CASE WHEN seller_type = 'Profesional' THEN 1 ELSE 0 END) AS professional
+                SUM(CASE WHEN seller_type = 'Agencia' THEN 1 ELSE 0 END) AS professional
             FROM listings
             WHERE status = 'active' AND distrito IS NOT NULL
             GROUP BY distrito
