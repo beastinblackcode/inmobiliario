@@ -1,0 +1,57 @@
+name: Export Public Metrics
+
+on:
+  workflow_dispatch:
+    # Lanzar manualmente desde Actions → Export Public Metrics → Run workflow
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download database from Google Drive
+        env:
+          GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
+        run: |
+          python - <<'EOF'
+          import os, gdown
+          file_id = os.environ["GOOGLE_DRIVE_FILE_ID"]
+          gdown.download(f"https://drive.google.com/uc?id={file_id}", "real_estate.db", quiet=False)
+          import pathlib
+          print(f"Downloaded: {pathlib.Path('real_estate.db').stat().st_size / 1024 / 1024:.1f} MB")
+          EOF
+
+      - name: Export & publish public metrics
+        env:
+          THERMOMETER_PAT: ${{ secrets.THERMOMETER_PAT }}
+        run: |
+          python export_public_metrics.py -o metrics.json
+
+          git clone --depth 1 https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git _thermometer
+
+          cp metrics.json _thermometer/public/metrics.json
+          cd _thermometer
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add public/metrics.json
+          git diff --staged --quiet || {
+            git commit -m "Update metrics $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git push
+          }
+          cd .. && rm -rf _thermometer
