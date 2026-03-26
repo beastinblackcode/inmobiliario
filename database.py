@@ -830,6 +830,68 @@ def get_database_stats() -> Dict:
         }
 
 
+def get_seller_stats() -> Dict:
+    """
+    Get seller type distribution for active listings.
+
+    Returns:
+        Dictionary with total, particular, professional, other counts + pcts,
+        plus by_district breakdown.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        # Global counts
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN seller_type = 'Particular' THEN 1 ELSE 0 END) AS particular,
+                SUM(CASE WHEN seller_type = 'Profesional' THEN 1 ELSE 0 END) AS professional,
+                SUM(CASE WHEN seller_type IS NULL
+                         OR seller_type NOT IN ('Particular', 'Profesional') THEN 1 ELSE 0 END) AS other
+            FROM listings
+            WHERE status = 'active'
+        """)
+        row = cursor.fetchone()
+        total = row[0] or 1
+        particular = row[1] or 0
+        professional = row[2] or 0
+        other = row[3] or 0
+
+        # By district
+        cursor.execute("""
+            SELECT
+                distrito,
+                COUNT(*) AS total,
+                SUM(CASE WHEN seller_type = 'Particular' THEN 1 ELSE 0 END) AS particular,
+                SUM(CASE WHEN seller_type = 'Profesional' THEN 1 ELSE 0 END) AS professional
+            FROM listings
+            WHERE status = 'active' AND distrito IS NOT NULL
+            GROUP BY distrito
+            ORDER BY distrito
+        """)
+        by_district = []
+        for dr in cursor.fetchall():
+            dt = dr[1] or 1
+            by_district.append({
+                "distrito": dr[0],
+                "total": dr[1],
+                "particular_pct": round((dr[2] or 0) / dt * 100, 1),
+                "professional_pct": round((dr[3] or 0) / dt * 100, 1),
+            })
+
+        return {
+            "total": total,
+            "particular": particular,
+            "professional": professional,
+            "other": other,
+            "particular_pct": round(particular / total * 100, 1),
+            "professional_pct": round(professional / total * 100, 1),
+            "other_pct": round(other / total * 100, 1),
+            "by_district": by_district,
+        }
+
+
 def get_scraping_activity(days: int = 30) -> List[Dict]:
     """
     Get daily scraping activity statistics.

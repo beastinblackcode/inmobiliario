@@ -186,6 +186,11 @@ def _load_price_drop_stats() -> Dict:
     return _safe(get_price_drop_stats) or {}
 
 
+def _load_seller_stats() -> Dict:
+    from database import get_seller_stats
+    return _safe(get_seller_stats) or {}
+
+
 # All 139 barrios tracked by the scraper, grouped by district
 _ALL_BARRIOS: list = [
     # Arganzuela
@@ -692,6 +697,7 @@ def build_public_metrics() -> Dict[str, Any]:
     notarial_gap = _load_notarial_gap()
     db_stats = _load_db_stats()
     drop_stats = _load_price_drop_stats()
+    seller_stats = _load_seller_stats()
 
     # 8. Barrio-level data (Fase 2)
     barrios_data = _load_barrio_data(rental_yields)
@@ -768,6 +774,7 @@ def build_public_metrics() -> Dict[str, Any]:
         "barrios": barrios_data,
         "barrio_trends": barrio_trends,
         "price_drop_stats": drop_stats,
+        "seller_stats": seller_stats,
         "db_stats": db_stats,
         "alerts": [
             _sanitise_alert(a) for a in alerts_raw
