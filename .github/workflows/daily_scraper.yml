@@ -55,10 +55,12 @@ jobs:
           BRIGHTDATA_PASS: ${{ secrets.BRIGHTDATA_PASS }}
           BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
         run: python scraper.py
+        continue-on-error: true    # Partial scrapes still provide valuable data
 
       # ── 5b. Pre-compute daily market snapshots ─────────────────────────────
       - name: Compute daily snapshots
         run: python compute_snapshots.py
+        continue-on-error: true
 
       # ── 6. Email diario (opcional) ───────────────────────────────────────────
       - name: Send daily email report

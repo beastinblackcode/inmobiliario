@@ -1251,17 +1251,20 @@ def run_scraper(retry_only: bool = False):
     total_new += retry_new
     total_updated += retry_updated
 
-    # Mark stale listings as sold (not seen in 14+ days, with barrio coverage check)
+    # Mark stale listings as sold using two-tier approach:
+    # Tier 1: 7 days + barrio coverage confirmed → sold
+    # Tier 2: 21 days hard cutoff (no barrio coverage needed) → sold
     if not retry_only:
         print(f"\n🔍 Checking for sold/removed properties...")
-        print(f"  Marking properties not seen in 14+ days as sold (only if barrio was scraped)...")
+        print(f"  Tier 1: properties not seen in 7+ days (barrio scraped recently)")
+        print(f"  Tier 2: properties not seen in 21+ days (hard cutoff)")
 
-        sold_count = mark_stale_as_sold(days_threshold=14)
-        print(f"  ✓ Marked {sold_count} listings as sold/removed (not seen in 14+ days)")
+        sold_count = mark_stale_as_sold(days_threshold=7)
+        print(f"  ✓ Marked {sold_count} listings as sold/removed")
 
         if active_ids:
             print(f"  ℹ️  {len(active_ids)} properties not seen in this scrape")
-            print(f"  ℹ️  These will be marked as sold if not seen again within 14 days")
+            print(f"  ℹ️  These will be marked as sold if not seen within 7-21 days")
 
     # Bright Data usage report
     cost_data = get_brightdata_cost_estimate()

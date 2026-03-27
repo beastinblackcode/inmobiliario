@@ -578,33 +578,40 @@ def mark_as_sold(listing_ids: Set[str]) -> int:
         return 0
 
 
-def mark_stale_as_sold(days_threshold: int = 14) -> int:
+def mark_stale_as_sold(days_threshold: int = 7) -> int:
     """
-    Mark listings as sold if they haven't been seen in N days AND their barrio
-    has been successfully scraped during that window.
-    
-    This prevents false positives from incomplete scrapes by:
-    1. Requiring the property's barrio was scraped at least once in the threshold window
-    2. Using a circuit breaker (max 200 marks per batch) to prevent mass false marks
-    3. Using a 14-day default threshold instead of 7
-    
+    Mark listings as sold/removed using a two-tier approach:
+
+    Tier 1 (days_threshold, default 7 days):
+        Mark as sold if not seen in N days AND their barrio has been
+        successfully scraped during that window (proves the scraper
+        covered that zone and the listing is genuinely gone).
+
+    Tier 2 (hard_cutoff = 21 days):
+        Mark as sold if not seen in 21+ days regardless of barrio
+        coverage. This prevents "ghost listings" from accumulating
+        when a barrio has persistent scraping gaps.
+
+    Circuit breaker: max 1000 marks per batch to prevent runaway
+    false positives from a single bad run.
+
     Args:
-        days_threshold: Number of days without updates before marking as sold (default: 14)
-        
+        days_threshold: Days without updates before marking as sold
+                        when barrio coverage is confirmed (default: 7)
+
     Returns:
         Number of listings marked as sold
     """
-    MAX_BATCH_SIZE = 200  # Circuit breaker: never mark more than 200 at once
-    
+    MAX_BATCH_SIZE = 1000
+    HARD_CUTOFF_DAYS = 21  # Absolute max regardless of barrio coverage
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
             cutoff_date = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d")
-            
-            # Only mark as sold if:
-            # 1. The listing hasn't been seen since cutoff_date
-            # 2. Other listings in the SAME barrio HAVE been seen after cutoff_date
-            #    (proving the scraper covered that barrio recently)
+            hard_cutoff_date = (datetime.now() - timedelta(days=HARD_CUTOFF_DAYS)).strftime("%Y-%m-%d")
+
+            # Tier 1: Not seen in N days + barrio was scraped recently
             cursor.execute("""
                 SELECT listing_id FROM listings
                 WHERE status = 'active'
@@ -616,28 +623,49 @@ def mark_stale_as_sold(days_threshold: int = 14) -> int:
                 )
                 LIMIT ?
             """, (cutoff_date, cutoff_date, MAX_BATCH_SIZE))
-            
-            ids_to_mark = [row[0] for row in cursor.fetchall()]
-            
+            tier1_ids = [row[0] for row in cursor.fetchall()]
+
+            # Tier 2: Not seen in 21+ days (regardless of barrio coverage)
+            remaining = MAX_BATCH_SIZE - len(tier1_ids)
+            tier2_ids = []
+            if remaining > 0:
+                cursor.execute("""
+                    SELECT listing_id FROM listings
+                    WHERE status = 'active'
+                    AND last_seen_date < ?
+                    AND listing_id NOT IN (
+                        SELECT listing_id FROM listings
+                        WHERE status = 'active' AND last_seen_date < ?
+                        AND barrio IN (
+                            SELECT DISTINCT barrio FROM listings
+                            WHERE last_seen_date >= ? AND barrio IS NOT NULL
+                        )
+                    )
+                    LIMIT ?
+                """, (hard_cutoff_date, cutoff_date, cutoff_date, remaining))
+                tier2_ids = [row[0] for row in cursor.fetchall()]
+
+            ids_to_mark = tier1_ids + tier2_ids
+
             if not ids_to_mark:
                 return 0
-            
-            # Apply circuit breaker warning
+
             if len(ids_to_mark) >= MAX_BATCH_SIZE:
                 print(f"⚠️ Circuit breaker: limiting to {MAX_BATCH_SIZE} marks. "
                       f"There may be more stale listings.")
-            
+
             placeholders = ','.join('?' * len(ids_to_mark))
             cursor.execute(f"""
-                UPDATE listings 
+                UPDATE listings
                 SET status = 'sold_removed'
                 WHERE listing_id IN ({placeholders})
             """, tuple(ids_to_mark))
-            
+
             marked = cursor.rowcount
             print(f"📊 Marked {marked} listings as sold_removed "
-                  f"(threshold: {days_threshold} days, cutoff: {cutoff_date})")
-            
+                  f"(tier1={len(tier1_ids)} @{days_threshold}d, "
+                  f"tier2={len(tier2_ids)} @{HARD_CUTOFF_DAYS}d hard cutoff)")
+
             return marked
     except Exception as e:
         print(f"Error marking stale listings as sold: {e}")
