@@ -600,6 +600,19 @@ def send_daily_report() -> bool:
         new_opps = [p for p in new_opps if not p.get("price") or p["price"] <= MAX_PRICE_EMAIL]
         wl_drops = [p for p in wl_drops if not p.get("price") or p["price"] <= MAX_PRICE_EMAIL]
 
+        # Filter new opportunities: only selected districts, exclude ground floor
+        OPPS_DISTRITOS = {"Chamberí", "Moncloa-Aravaca", "Moratalaz", "Arganzuela"}
+        def _is_ground_floor(floor_str: str) -> bool:
+            if not floor_str:
+                return False
+            fl = floor_str.lower()
+            return "bajo" in fl or "planta baja" in fl or fl.strip() in ("b", "pb")
+        new_opps = [
+            p for p in new_opps
+            if p.get("distrito") in OPPS_DISTRITOS
+            and not _is_ground_floor(p.get("floor", ""))
+        ]
+
         # Custom alerts: gather matches for each active alert
         init_alerts_table()
         custom_alerts      = get_alerts()
@@ -675,6 +688,17 @@ if __name__ == "__main__":
             chollos  = get_properties_with_multiple_drops(min_drops=2, min_total_drop_pct=5.0)
             new_opps = get_new_opportunity_listings(hours=24, min_score=70)
             wl_drops = get_watchlist_price_drops(since_days=1)
+            OPPS_DISTRITOS = {"Chamberí", "Moncloa-Aravaca", "Moratalaz", "Arganzuela"}
+            def _is_ground_floor(floor_str: str) -> bool:
+                if not floor_str:
+                    return False
+                fl = floor_str.lower()
+                return "bajo" in fl or "planta baja" in fl or fl.strip() in ("b", "pb")
+            new_opps = [
+                p for p in new_opps
+                if p.get("distrito") in OPPS_DISTRITOS
+                and not _is_ground_floor(p.get("floor", ""))
+            ]
             html     = build_html_report(score, indicators, macro, chollos, alerts,
                                          new_opportunities=new_opps,
                                          watchlist_drops=wl_drops)

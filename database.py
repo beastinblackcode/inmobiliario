@@ -2262,7 +2262,7 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
                     listing_id, url, barrio, distrito,
                     price, size_sqm, rooms,
                     CAST(price AS FLOAT) / NULLIF(size_sqm, 0) AS price_per_sqm,
-                    first_seen_date
+                    first_seen_date, floor
                 FROM listings
                 WHERE status = 'active'
                   AND price  > 0
@@ -2282,7 +2282,7 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
         for row in rows:
             (lid, url, barrio, distrito,
              price, size_sqm, rooms, price_per_sqm,
-             first_seen) = row
+             first_seen, floor) = row
 
             # vs barrio %  (positive = more expensive, negative = cheaper = good)
             barrio_median = None
@@ -2322,6 +2322,7 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
                 "vs_barrio_pct":    round(vs_barrio_pct, 1) if vs_barrio_pct is not None else None,
                 "score_oportunidad": score,
                 "first_seen_date":  first_seen,
+                "floor":            floor,
             })
 
         results.sort(key=lambda x: x["score_oportunidad"], reverse=True)
