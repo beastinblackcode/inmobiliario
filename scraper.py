@@ -114,12 +114,16 @@ LOW_ACTIVITY_TRACKER_FILE = "low_activity_last_scraped.json"
 BRIGHTDATA_REQUEST_BUDGET = int(os.getenv('BRIGHTDATA_REQUEST_BUDGET', '0'))
 
 # ---------------------------------------------------------------------------
-# HYBRID FETCH MODE (cost optimization)
+# FETCH MODE
 # ---------------------------------------------------------------------------
 # 'hybrid'  : try direct (curl_cffi) first, fallback to BrightData on failure
 # 'direct'  : only direct requests (no BrightData at all — risky but free)
-# 'proxy'   : original behavior — all requests via BrightData
-FETCH_MODE = os.getenv('FETCH_MODE', 'hybrid').lower()
+# 'proxy'   : all requests via BrightData (most reliable, ~$0.004/req)
+#
+# Default changed to 'proxy' (2026-03-30): Idealista's anti-bot is now blocking
+# direct requests frequently, causing incomplete scrapes on ~30% of days.
+# Consistent data quality is worth the extra cost (~$2-3/day).
+FETCH_MODE = os.getenv('FETCH_MODE', 'proxy').lower()
 
 # Seconds to wait between direct requests (politeness delay to avoid bans)
 DIRECT_REQUEST_DELAY = float(os.getenv('DIRECT_REQUEST_DELAY', '2.0'))
