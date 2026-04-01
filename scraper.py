@@ -1260,14 +1260,13 @@ def run_scraper(retry_only: bool = False):
         total_new += new_count
         total_updated += updated_count
 
-        # Track coverage per barrio for quality report
-        if count > 0 or idealista_count > 0:
-            coverage_data[barrio_key] = {
-                "distrito": distrito,
-                "barrio": barrio,
-                "scraped": count,
-                "idealista": idealista_count,
-            }
+        # Track coverage per barrio for quality report (always record attempted barrios)
+        coverage_data[barrio_key] = {
+            "distrito": distrito,
+            "barrio": barrio,
+            "scraped": count,
+            "idealista": idealista_count,
+        }
 
         # Mark this barrio as scraped today in the low-activity tracker
         low_activity_tracker[barrio_key] = datetime.utcnow().strftime("%Y-%m-%d")
