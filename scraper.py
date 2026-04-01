@@ -887,7 +887,7 @@ def scrape_barrio(
     distrito: str, barrio: str, url_path: str,
     proxies: Optional[Dict], seen_ids: set,
     page_history: Optional[Dict] = None
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """
     Scrape all pages for a single barrio with optimizations:
     - Smart pagination: uses historical page counts to limit requests
@@ -903,11 +903,13 @@ def scrape_barrio(
         page_history: Dict with historical page counts per barrio (optional)
 
     Returns:
-        Tuple of (total_listings, new_listings, updated_listings)
+        Tuple of (total_listings, new_listings, updated_listings, idealista_total)
+        idealista_total: total count announced by Idealista in <h1> header
     """
     listings_count = 0
     total_new = 0
     total_updated = 0
+    idealista_total = 0       # Total announced by Idealista in <h1>
     page = 1
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -915,12 +917,12 @@ def scrape_barrio(
     barrio_key = f"{distrito}|{barrio}"
     if page_history is not None and was_barrio_scraped_today(page_history, barrio_key):
         print(f"\n⏭️  {distrito} - {barrio}: ya scrapeado hoy — omitiendo")
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     # Budget guard: stop before making more requests if budget is set and hit
     if _budget_exceeded():
         print(f"\n🛑 PRESUPUESTO ALCANZADO ({request_counter['total']:,} req) — omitiendo {barrio}")
-        return 0, 0, 0
+        return 0, 0, 0, 0
 
     print(f"\n📍 Scraping {distrito} - {barrio}...")
 
@@ -952,13 +954,29 @@ def scrape_barrio(
             entry = (distrito, barrio, url_path, status_code)
             if entry not in retry_errors:
                 retry_errors.append(entry)
-            return listings_count, total_new, total_updated
+            return listings_count, total_new, total_updated, idealista_total
 
         if not html:
             print(f"❌ Failed to fetch (Status: {status_code}) - stopping barrio")
             break
 
         soup = BeautifulSoup(html, 'html.parser')
+
+        # On page 1, extract the total count Idealista announces in <h1>
+        # e.g. "1.234 pisos en venta en Sol, Centro" → 1234
+        if page == 1:
+            h1 = soup.find('h1', id='h1-container')
+            if not h1:
+                h1 = soup.find('h1')
+            if h1:
+                h1_text = h1.get_text(strip=True)
+                # Match number at start, with optional thousands separators (dots)
+                m = re.match(r'([\d.]+)', h1_text)
+                if m:
+                    try:
+                        idealista_total = int(m.group(1).replace('.', ''))
+                    except ValueError:
+                        pass
 
         # Find all listing articles
         articles = soup.find_all('article', class_='item')
@@ -1030,8 +1048,11 @@ def scrape_barrio(
     if page_history is not None and actual_pages > 0:
         update_page_history(page_history, barrio_key, actual_pages)
 
-    print(f"  🏁 Finished {distrito} - {barrio}: {listings_count} listings ({total_new} new, {total_updated} updated)")
-    return listings_count, total_new, total_updated
+    if idealista_total > 0:
+        print(f"  🏁 Finished {distrito} - {barrio}: {listings_count}/{idealista_total} listings ({total_new} new, {total_updated} updated)")
+    else:
+        print(f"  🏁 Finished {distrito} - {barrio}: {listings_count} listings ({total_new} new, {total_updated} updated)")
+    return listings_count, total_new, total_updated, idealista_total
 
 
 def retry_failed_barrios(
@@ -1081,7 +1102,7 @@ def retry_failed_barrios(
     retry_errors.clear()
 
     for distrito, barrio, url_path, error_code in barrios_to_retry:
-        count, new_count, updated_count = scrape_barrio(
+        count, new_count, updated_count, _idealista = scrape_barrio(
             distrito, barrio, url_path, proxies, active_ids, page_history
         )
         total_listings += count
@@ -1199,6 +1220,10 @@ def run_scraper(retry_only: bool = False):
     total_new = 0
     total_updated = 0
 
+    # Coverage tracking: per-barrio data for quality report
+    # {barrio_key: {"distrito": str, "barrio": str, "scraped": int, "idealista": int}}
+    coverage_data = {}
+
     # Determine which barrios to scrape
     low_activity_tracker = _load_low_activity_tracker()
     skipped_low_activity = 0
@@ -1228,12 +1253,21 @@ def run_scraper(retry_only: bool = False):
             skipped_low_activity += 1
             continue
 
-        count, new_count, updated_count = scrape_barrio(
+        count, new_count, updated_count, idealista_count = scrape_barrio(
             distrito, barrio, url_path, proxies, active_ids, page_history
         )
         total_listings += count
         total_new += new_count
         total_updated += updated_count
+
+        # Track coverage per barrio for quality report
+        if count > 0 or idealista_count > 0:
+            coverage_data[barrio_key] = {
+                "distrito": distrito,
+                "barrio": barrio,
+                "scraped": count,
+                "idealista": idealista_count,
+            }
 
         # Mark this barrio as scraped today in the low-activity tracker
         low_activity_tracker[barrio_key] = datetime.utcnow().strftime("%Y-%m-%d")
@@ -1400,6 +1434,12 @@ def run_scraper(retry_only: bool = False):
     # 📬  DAILY EMAIL REPORT
     # -------------------------------------------------------------------------
     _send_email_report()
+
+    # -------------------------------------------------------------------------
+    # 📊  SCRAPING QUALITY REPORT EMAIL
+    # -------------------------------------------------------------------------
+    _send_scraping_quality_email(coverage_data, total_listings, total_new, total_updated,
+                                  len(retry_errors), cost_data, start_time, end_time)
 
 
 # ============================================================================
@@ -1628,6 +1668,212 @@ def _send_email_report():
         send_daily_report()
     except Exception as exc:
         print(f"⚠️  Error enviando informe por email: {exc}")
+
+
+def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
+                                  total_new: int, total_updated: int,
+                                  errors_count: int, cost_data: dict,
+                                  start_time, end_time):
+    """
+    Send a scraping quality report email with per-district coverage data.
+    Shows: detected by Idealista vs actually scraped, per barrio and district.
+    """
+    try:
+        from email_report import send_report
+        print("\n")
+        print("╔" + "═" * 58 + "╗")
+        print("║" + "  📊  ENVIANDO INFORME DE CALIDAD DE SCRAPING".center(58) + "║")
+        print("╚" + "═" * 58 + "╝")
+
+        if not coverage_data:
+            print("  ⚠ No hay datos de cobertura — omitiendo email de calidad")
+            return
+
+        # Aggregate by district
+        district_agg = {}
+        for bk, info in coverage_data.items():
+            d = info["distrito"]
+            if d not in district_agg:
+                district_agg[d] = {"idealista": 0, "scraped": 0, "barrios": []}
+            district_agg[d]["idealista"] += info["idealista"]
+            district_agg[d]["scraped"] += info["scraped"]
+            district_agg[d]["barrios"].append(info)
+
+        total_idealista = sum(v["idealista"] for v in district_agg.values())
+        total_scraped_sum = sum(v["scraped"] for v in district_agg.values())
+        coverage_pct = (total_scraped_sum / total_idealista * 100) if total_idealista > 0 else 0
+
+        duration = (end_time - start_time).total_seconds()
+        mins, secs = divmod(int(duration), 60)
+
+        # Determine overall health
+        if coverage_pct >= 90:
+            health_icon = "🟢"
+            health_text = "Excelente"
+        elif coverage_pct >= 70:
+            health_icon = "🟡"
+            health_text = "Aceptable"
+        else:
+            health_icon = "🔴"
+            health_text = "Bajo — revisar"
+
+        # Build HTML email
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px;">
+<div style="max-width: 700px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+
+  <!-- Header -->
+  <div style="background: linear-gradient(135deg, #1a1a2e, #16213e); color: #fff; padding: 24px 30px;">
+    <h1 style="margin: 0; font-size: 22px;">{health_icon} Informe de calidad — Scraping diario</h1>
+    <p style="margin: 8px 0 0; opacity: 0.8; font-size: 14px;">{start_time.strftime('%d/%m/%Y %H:%M')} — Duración: {mins}m {secs}s</p>
+  </div>
+
+  <!-- KPIs -->
+  <div style="padding: 20px 30px;">
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+      <tr>
+        <td style="text-align: center; padding: 12px; background: #f0f4ff; border-radius: 8px; width: 25%;">
+          <div style="font-size: 24px; font-weight: 700; color: #1a1a2e;">{total_idealista:,}</div>
+          <div style="font-size: 12px; color: #666; margin-top: 4px;">Idealista anuncia</div>
+        </td>
+        <td style="width: 8px;"></td>
+        <td style="text-align: center; padding: 12px; background: #f0fff4; border-radius: 8px; width: 25%;">
+          <div style="font-size: 24px; font-weight: 700; color: #16a34a;">{total_scraped_sum:,}</div>
+          <div style="font-size: 12px; color: #666; margin-top: 4px;">Scrapeados</div>
+        </td>
+        <td style="width: 8px;"></td>
+        <td style="text-align: center; padding: 12px; background: {'#f0fff4' if coverage_pct >= 90 else '#fffbeb' if coverage_pct >= 70 else '#fef2f2'}; border-radius: 8px; width: 25%;">
+          <div style="font-size: 24px; font-weight: 700; color: {'#16a34a' if coverage_pct >= 90 else '#d97706' if coverage_pct >= 70 else '#dc2626'};">{coverage_pct:.1f}%</div>
+          <div style="font-size: 12px; color: #666; margin-top: 4px;">Cobertura</div>
+        </td>
+        <td style="width: 8px;"></td>
+        <td style="text-align: center; padding: 12px; background: #faf5ff; border-radius: 8px; width: 25%;">
+          <div style="font-size: 24px; font-weight: 700; color: #7c3aed;">{health_text}</div>
+          <div style="font-size: 12px; color: #666; margin-top: 4px;">Estado</div>
+        </td>
+      </tr>
+    </table>
+
+    <!-- Secondary KPIs -->
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+      <tr>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Nuevos hoy:</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">{total_new:,}</td>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Actualizados:</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">{total_updated:,}</td>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Errores:</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600; color: {'#dc2626' if errors_count > 0 else '#16a34a'};">{errors_count}</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Coste proxy:</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">${cost_data.get('estimated_cost_usd', 0):.4f}</td>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Requests:</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">{cost_data.get('total_requests', 0):,}</td>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Discrepancia:</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600; color: {'#dc2626' if (total_idealista - total_scraped_sum) > 500 else '#d97706'};">{total_idealista - total_scraped_sum:,} pisos</td>
+      </tr>
+    </table>
+
+    <!-- District table -->
+    <h2 style="font-size: 16px; margin: 0 0 12px; color: #1a1a2e;">Cobertura por distrito</h2>
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: #f8fafc;">
+          <th style="text-align: left; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Distrito</th>
+          <th style="text-align: right; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Idealista</th>
+          <th style="text-align: right; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Scrapeados</th>
+          <th style="text-align: right; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Cobertura</th>
+          <th style="text-align: right; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Discrepancia</th>
+        </tr>
+      </thead>
+      <tbody>"""
+
+        # Sort districts by name
+        for distrito in sorted(district_agg.keys()):
+            d = district_agg[distrito]
+            d_pct = (d["scraped"] / d["idealista"] * 100) if d["idealista"] > 0 else 0
+            d_diff = d["idealista"] - d["scraped"]
+
+            if d_pct >= 90:
+                pct_color = "#16a34a"
+                row_bg = "#f0fff4"
+            elif d_pct >= 70:
+                pct_color = "#d97706"
+                row_bg = "#fffbeb"
+            else:
+                pct_color = "#dc2626"
+                row_bg = "#fef2f2"
+
+            html += f"""
+        <tr style="background: {row_bg};">
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; font-weight: 600;">{distrito}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right;">{d['idealista']:,}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right;">{d['scraped']:,}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right; font-weight: 700; color: {pct_color};">{d_pct:.0f}%</td>
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right; color: {'#dc2626' if d_diff > 50 else '#666'};">{d_diff:+,}</td>
+        </tr>"""
+
+        # Total row
+        html += f"""
+        <tr style="background: #f1f5f9; font-weight: 700;">
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1;">TOTAL MADRID</td>
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1; text-align: right;">{total_idealista:,}</td>
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1; text-align: right;">{total_scraped_sum:,}</td>
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1; text-align: right; color: {'#16a34a' if coverage_pct >= 90 else '#d97706' if coverage_pct >= 70 else '#dc2626'};">{coverage_pct:.1f}%</td>
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1; text-align: right;">{total_idealista - total_scraped_sum:+,}</td>
+        </tr>
+      </tbody>
+    </table>"""
+
+        # Barrio detail for districts with low coverage
+        low_districts = {d: v for d, v in district_agg.items()
+                        if v["idealista"] > 0 and (v["scraped"] / v["idealista"] * 100) < 80}
+        if low_districts:
+            html += """
+    <h2 style="font-size: 16px; margin: 24px 0 12px; color: #dc2626;">Detalle barrios con baja cobertura (&lt;80%)</h2>
+    <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
+      <thead>
+        <tr style="background: #fef2f2;">
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #fecaca;">Distrito</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #fecaca;">Barrio</th>
+          <th style="text-align: right; padding: 8px; border-bottom: 1px solid #fecaca;">Idealista</th>
+          <th style="text-align: right; padding: 8px; border-bottom: 1px solid #fecaca;">Scrapeados</th>
+        </tr>
+      </thead>
+      <tbody>"""
+            for distrito in sorted(low_districts.keys()):
+                for b in sorted(low_districts[distrito]["barrios"], key=lambda x: x["barrio"]):
+                    b_pct = (b["scraped"] / b["idealista"] * 100) if b["idealista"] > 0 else 0
+                    html += f"""
+        <tr>
+          <td style="padding: 6px 8px; border-bottom: 1px solid #f1f5f9; color: #666;">{b['distrito']}</td>
+          <td style="padding: 6px 8px; border-bottom: 1px solid #f1f5f9;">{b['barrio']}</td>
+          <td style="padding: 6px 8px; border-bottom: 1px solid #f1f5f9; text-align: right;">{b['idealista']:,}</td>
+          <td style="padding: 6px 8px; border-bottom: 1px solid #f1f5f9; text-align: right;">{b['scraped']:,}</td>
+        </tr>"""
+            html += """
+      </tbody>
+    </table>"""
+
+        html += """
+  </div>
+
+  <!-- Footer -->
+  <div style="background: #f8fafc; padding: 16px 30px; text-align: center; font-size: 12px; color: #94a3b8;">
+    Informe generado automáticamente por el scraper de inmobiliario
+  </div>
+
+</div>
+</body></html>"""
+
+        subject = f"{health_icon} Scraping {start_time.strftime('%d/%m')}: {coverage_pct:.0f}% cobertura — {total_scraped_sum:,}/{total_idealista:,} pisos"
+        send_report(html, subject)
+
+    except Exception as exc:
+        print(f"⚠️  Error enviando informe de calidad: {exc}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
