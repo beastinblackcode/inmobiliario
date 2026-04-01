@@ -443,7 +443,10 @@ def get_proxy_config() -> Optional[Dict]:
         print("  Set BRIGHTDATA_USER, BRIGHTDATA_PASS, BRIGHTDATA_HOST in .env")
         return None
     
-    proxy_url = f'http://{BRIGHTDATA_USER}:{BRIGHTDATA_PASS}@{BRIGHTDATA_HOST}'
+    from urllib.parse import quote
+    user_enc = quote(BRIGHTDATA_USER, safe='')
+    pass_enc = quote(BRIGHTDATA_PASS, safe='')
+    proxy_url = f'http://{user_enc}:{pass_enc}@{BRIGHTDATA_HOST}'
     return {
         'http': proxy_url,
         'https': proxy_url
