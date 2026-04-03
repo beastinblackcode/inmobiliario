@@ -2,8 +2,8 @@ name: Daily Scraper
 
 on:
   schedule:
-    # Runs every day at 07:00 UTC (09:00 Madrid en verano, 08:00 en invierno)
-    - cron: "0 7 * * *"
+    # Runs every day at 06:00 UTC (08:00 Madrid en verano CEST, 07:00 en invierno CET)
+    - cron: "0 6 * * *"
   workflow_dispatch:
     # Permite lanzar manualmente desde la pestaña Actions de GitHub
 
