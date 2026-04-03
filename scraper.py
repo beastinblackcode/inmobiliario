@@ -1021,16 +1021,17 @@ def scrape_barrio(
         total_updated += updated_count
         print(f"({new_count} new, {updated_count} updated)")
 
-        # EARLY EXIT: If on page 1, nearly all listings are updates (not new),
-        # this barrio was likely already scraped today (e.g., after a restart).
-        # Skip remaining pages to save API calls.
+        # EARLY EXIT: Only skip remaining pages if we're certain this barrio
+        # has just 1 page of results (i.e., Idealista says total <= page size).
+        # Previously, this checked "update_ratio >= 80% and new_count == 0" on
+        # page 1 to detect double-runs. However, that killed pagination for ALL
+        # barrios where page 1 listings were already in the DB from yesterday,
+        # freezing coverage at ~30 listings per barrio (29% total coverage).
+        # The was_barrio_scraped_today() guard already handles double-runs.
         if page == 1 and len(articles) > 0:
-            total_on_page = new_count + updated_count
-            if total_on_page > 0:
-                update_ratio = updated_count / total_on_page
-                if update_ratio >= EARLY_EXIT_THRESHOLD and new_count == 0:
-                    print(f"  ⚡ Early exit: {update_ratio:.0%} already seen, 0 new — barrio likely scraped today")
-                    break
+            if idealista_total > 0 and idealista_total <= len(articles):
+                print(f"  ⚡ Early exit: Idealista reports {idealista_total} total ≤ {len(articles)} on page 1 — single page barrio")
+                break
 
         # Check for next page
         next_button = soup.find('a', class_='icon-arrow-right-after')
