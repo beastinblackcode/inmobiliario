@@ -1043,7 +1043,7 @@ def scrape_barrio(
             print(f"  ⚠️ Reached {max_pages} page limit for this barrio")
 
         page += 1
-        time.sleep(1)  # Rate limiting
+        time.sleep(0.3 if FETCH_MODE == 'proxy' else 1)  # Proxy handles rate limiting
 
     # Update page history with actual pages found
     if page_history is not None and actual_pages > 0:
@@ -1109,7 +1109,7 @@ def retry_failed_barrios(
         total_listings += count
         total_new += new_count
         total_updated += updated_count
-        time.sleep(2)  # Extra delay for retries
+        time.sleep(1 if FETCH_MODE == 'proxy' else 2)  # Extra delay for retries
 
     print(f"\n✓ Retry complete. Processed {total_listings} listings ({total_new} new, {total_updated} updated).")
 
@@ -1272,7 +1272,7 @@ def run_scraper(retry_only: bool = False):
         # Mark this barrio as scraped today in the low-activity tracker
         low_activity_tracker[barrio_key] = datetime.utcnow().strftime("%Y-%m-%d")
 
-        time.sleep(1)  # Rate limiting between barrios
+        time.sleep(0.3 if FETCH_MODE == 'proxy' else 1)  # Proxy handles rate limiting
 
     # Save low-activity tracker
     _save_low_activity_tracker(low_activity_tracker)

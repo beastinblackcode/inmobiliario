@@ -13,7 +13,7 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 180         # El scraper puede tardar 1-2h con 139 barrios
+    timeout-minutes: 360         # ~3h venta + alquiler semanal; GitHub max = 360
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
