@@ -67,6 +67,12 @@ BRIGHTDATA_USER = os.getenv('BRIGHTDATA_USER')
 BRIGHTDATA_PASS = os.getenv('BRIGHTDATA_PASS')
 BRIGHTDATA_HOST = os.getenv('BRIGHTDATA_HOST', 'brd.superproxy.io:33335')
 
+# Residential proxy (cheaper, $8/GB) — tried first as primary proxy tier
+# Falls back to Web Unlocker (BRIGHTDATA_HOST, $15/GB) on failure
+BRIGHTDATA_RESIDENTIAL_USER = os.getenv('BRIGHTDATA_RESIDENTIAL_USER', BRIGHTDATA_USER)
+BRIGHTDATA_RESIDENTIAL_PASS = os.getenv('BRIGHTDATA_RESIDENTIAL_PASS', BRIGHTDATA_PASS)
+BRIGHTDATA_RESIDENTIAL_HOST = os.getenv('BRIGHTDATA_RESIDENTIAL_HOST', '')
+
 BASE_URL = "https://www.idealista.com"
 
 # ============================================================================
@@ -431,10 +437,21 @@ BARRIO_URLS = [
 ]
 
 
+def _build_proxy_dict(user: str, password: str, host: str) -> Optional[Dict]:
+    """Build a requests-compatible proxy dict from credentials."""
+    if not all([user, password, host]):
+        return None
+    from urllib.parse import quote
+    user_enc = quote(user, safe='')
+    pass_enc = quote(password, safe='')
+    proxy_url = f'http://{user_enc}:{pass_enc}@{host}'
+    return {'http': proxy_url, 'https': proxy_url}
+
+
 def get_proxy_config() -> Optional[Dict]:
     """
-    Configure Bright Data proxy settings.
-    
+    Configure Bright Data Web Unlocker proxy (expensive fallback tier, $15/GB).
+
     Returns:
         Proxy configuration dict or None if credentials missing
     """
@@ -442,18 +459,29 @@ def get_proxy_config() -> Optional[Dict]:
         print("⚠ Warning: Bright Data credentials not configured")
         print("  Set BRIGHTDATA_USER, BRIGHTDATA_PASS, BRIGHTDATA_HOST in .env")
         return None
-    
-    from urllib.parse import quote
-    user_enc = quote(BRIGHTDATA_USER, safe='')
-    pass_enc = quote(BRIGHTDATA_PASS, safe='')
-    proxy_url = f'http://{user_enc}:{pass_enc}@{BRIGHTDATA_HOST}'
-    return {
-        'http': proxy_url,
-        'https': proxy_url
-    }
+    return _build_proxy_dict(BRIGHTDATA_USER, BRIGHTDATA_PASS, BRIGHTDATA_HOST)
 
-# Global request counter for Bright Data usage tracking
+
+def get_residential_proxy_config() -> Optional[Dict]:
+    """
+    Configure Bright Data residential proxy (cheap primary tier, $8/GB).
+
+    Returns:
+        Proxy configuration dict or None if not configured
+    """
+    if not BRIGHTDATA_RESIDENTIAL_HOST:
+        return None
+    return _build_proxy_dict(
+        BRIGHTDATA_RESIDENTIAL_USER,
+        BRIGHTDATA_RESIDENTIAL_PASS,
+        BRIGHTDATA_RESIDENTIAL_HOST,
+    )
+
+# Global request counter for Bright Data Web Unlocker usage tracking
 request_counter = {'successful': 0, 'failed': 0, 'total': 0}
+
+# Residential proxy request counters (cheaper tier)
+residential_counter = {'successful': 0, 'failed': 0, 'total': 0}
 
 # Direct (free) request counters
 direct_counter = {'successful': 0, 'failed': 0, 'total': 0}
@@ -478,37 +506,61 @@ def _set_phase(phase: str) -> None:
 
 
 def _budget_exceeded() -> bool:
-    """Return True if the configured request budget has been hit."""
+    """Return True if the configured request budget has been hit (all paid tiers)."""
     if BRIGHTDATA_REQUEST_BUDGET <= 0:
         return False
-    return request_counter['total'] >= BRIGHTDATA_REQUEST_BUDGET
+    paid_total = request_counter['total'] + residential_counter['total']
+    return paid_total >= BRIGHTDATA_REQUEST_BUDGET
 
 def get_brightdata_cost_estimate():
     """
-    Calculate estimated Bright Data cost and show hybrid savings.
-    Bright Data Web Unlocker pricing: ~$3-5 per 1000 requests (varies by plan)
-    Using conservative estimate of $4 per 1000 requests.
+    Calculate estimated Bright Data cost across all proxy tiers.
+
+    Pricing (per GB of bandwidth):
+    - Residential proxy:  $8/GB  (primary tier)
+    - Web Unlocker:       $15/GB (fallback tier)
+    - Direct (curl_cffi): free
+
+    NOTE: Actual cost depends on bandwidth, not request count.
+    We estimate ~200KB per request as average page size for Idealista listings.
     """
-    proxy_requests = request_counter['total']
+    AVG_PAGE_SIZE_KB = 200  # Approximate HTML size per Idealista listing page
+
+    residential_requests = residential_counter['total']
+    unlocker_requests = request_counter['total']
     direct_requests = direct_counter['total']
-    total_all = proxy_requests + direct_requests
-    cost_per_1k = 4.0  # USD per 1000 requests
-    actual_cost = (proxy_requests / 1000) * cost_per_1k
-    would_have_cost = (total_all / 1000) * cost_per_1k
+    total_all = residential_requests + unlocker_requests + direct_requests
+
+    # Estimate bandwidth in GB
+    residential_gb = (residential_requests * AVG_PAGE_SIZE_KB) / (1024 * 1024)
+    unlocker_gb = (unlocker_requests * AVG_PAGE_SIZE_KB) / (1024 * 1024)
+
+    # Cost by tier
+    residential_cost = residential_gb * 8.0    # $8/GB
+    unlocker_cost = unlocker_gb * 15.0         # $15/GB
+    actual_cost = residential_cost + unlocker_cost
+
+    # What it would have cost if ALL requests went through Web Unlocker
+    all_unlocker_gb = (total_all * AVG_PAGE_SIZE_KB) / (1024 * 1024)
+    would_have_cost = all_unlocker_gb * 15.0
     savings = would_have_cost - actual_cost
 
     return {
         'total_requests': total_all,
         'direct_requests': direct_requests,
         'direct_successful': direct_counter['successful'],
-        'proxy_requests': proxy_requests,
-        'proxy_successful': request_counter['successful'],
-        'failed_requests': request_counter['failed'] + direct_counter['failed'],
-        'estimated_cost_usd': round(actual_cost, 2),
-        'savings_usd': round(savings, 2),
+        'residential_requests': residential_requests,
+        'residential_successful': residential_counter['successful'],
+        'unlocker_requests': unlocker_requests,
+        'unlocker_successful': request_counter['successful'],
+        'failed_requests': request_counter['failed'] + residential_counter['failed'] + direct_counter['failed'],
+        'estimated_cost_usd': round(actual_cost, 4),
+        'residential_cost_usd': round(residential_cost, 4),
+        'unlocker_cost_usd': round(unlocker_cost, 4),
+        'savings_usd': round(savings, 4),
         'savings_pct': round((savings / would_have_cost * 100) if would_have_cost > 0 else 0, 1),
-        'cost_per_request': round(cost_per_1k / 1000, 4),
         'fetch_mode': FETCH_MODE,
+        'residential_configured': bool(BRIGHTDATA_RESIDENTIAL_HOST),
     }
 
 
@@ -600,19 +652,29 @@ def _fetch_via_proxy(
     proxies: Optional[Dict],
     retries: int = 3,
     silent_404: bool = False,
+    counter: Optional[Dict] = None,
+    tier_label: str = "proxy",
 ) -> tuple:
     """
-    Fetch via Bright Data proxy (original method, costs ~$0.004/request).
+    Fetch via Bright Data proxy.
 
+    Works with any proxy tier (residential, web unlocker, etc.).
     Only retries on transient errors (timeouts, connection errors).
     Returns immediately on definitive errors (404, 502) to save API calls.
+
+    Args:
+        counter:    Dict with 'successful', 'failed', 'total' keys for tracking.
+                    Defaults to request_counter (Web Unlocker).
+        tier_label: Human-readable label for log messages (e.g. "residential", "unlocker").
     """
+    if counter is None:
+        counter = request_counter
     headers = _get_random_headers()
     DEFINITIVE_ERRORS = {404, 403, 410, 502}
 
     for attempt in range(retries):
         try:
-            request_counter['total'] += 1
+            counter['total'] += 1
             phase_counters[_current_phase] = phase_counters.get(_current_phase, 0) + 1
 
             response = requests.get(
@@ -624,29 +686,29 @@ def _fetch_via_proxy(
             )
 
             if response.status_code == 200:
-                request_counter['successful'] += 1
+                counter['successful'] += 1
                 return response.text, 200
             elif response.status_code in DEFINITIVE_ERRORS:
-                request_counter['failed'] += 1
+                counter['failed'] += 1
                 if response.status_code == 404:
                     if not silent_404:
                         with open('404_errors.log', 'a') as f:
                             f.write(f"{url}\n")
-                        print(f"  ⚠ HTTP 404 Not Found - logged (no retry)")
+                        print(f"  ⚠ HTTP 404 Not Found [{tier_label}] - logged (no retry)")
                 else:
-                    print(f"  ⚠ HTTP {response.status_code} - definitive error (no retry)")
+                    print(f"  ⚠ HTTP {response.status_code} [{tier_label}] - definitive error (no retry)")
                 return None, response.status_code
             else:
-                request_counter['failed'] += 1
-                print(f"  ⚠ HTTP {response.status_code} for {url} (attempt {attempt + 1}/{retries})")
+                counter['failed'] += 1
+                print(f"  ⚠ HTTP {response.status_code} [{tier_label}] for {url} (attempt {attempt + 1}/{retries})")
                 if attempt < retries - 1:
                     time.sleep(2 ** attempt)
                 else:
                     return None, response.status_code
 
         except requests.exceptions.RequestException as e:
-            request_counter['failed'] += 1
-            print(f"  ⚠ Proxy request error (attempt {attempt + 1}/{retries}): {e}")
+            counter['failed'] += 1
+            print(f"  ⚠ [{tier_label}] request error (attempt {attempt + 1}/{retries}): {e}")
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
 
@@ -660,20 +722,22 @@ def fetch_page(
     silent_404: bool = False,
 ) -> tuple:
     """
-    Fetch HTML content with hybrid strategy (direct → proxy fallback).
+    Fetch HTML content with tiered strategy:
+
+        direct (free) → residential proxy ($8/GB) → web unlocker ($15/GB)
 
     Strategy depends on FETCH_MODE:
-    - 'hybrid':  try direct first (free), fallback to proxy on failure
+    - 'hybrid':  try direct first (free), then residential, then web unlocker
     - 'direct':  only direct requests (free but risky)
-    - 'proxy':   only Bright Data proxy (original behavior)
+    - 'proxy':   skip direct, go residential → web unlocker
 
-    Auto-switches to proxy-only if DIRECT_FAIL_THRESHOLD consecutive
+    Auto-switches past direct if DIRECT_FAIL_THRESHOLD consecutive
     direct failures are detected (likely IP ban).
 
     Args:
         url:         Target URL
-        proxies:     Proxy configuration
-        retries:     Number of retry attempts (only for proxy/transient errors)
+        proxies:     Proxy configuration (web unlocker). If None, auto-configured.
+        retries:     Number of retry attempts per tier
         silent_404:  If True, suppress 404 log file writes.
 
     Returns:
@@ -687,7 +751,7 @@ def fetch_page(
             print(f"  ⚠ {DIRECT_FAIL_THRESHOLD} consecutive direct failures — auto-switching to proxy-only")
         mode = 'proxy'
 
-    # ----- DIRECT attempt (free) -----
+    # ----- TIER 0: DIRECT attempt (free) -----
     if mode in ('hybrid', 'direct') and HAS_CURL_CFFI:
         # Politeness delay to reduce chance of IP ban
         time.sleep(DIRECT_REQUEST_DELAY + random.uniform(0, 1.0))
@@ -704,17 +768,36 @@ def fetch_page(
                 print(f"  ⚠ HTTP 404 Not Found (direct) - logged")
             return html, status
 
-        # hybrid mode: direct failed, try proxy
-        print(f"  ↻ Direct blocked (HTTP {status}) — falling back to BrightData proxy")
+        # hybrid mode: direct failed, try proxies
+        print(f"  ↻ Direct blocked (HTTP {status}) — falling back to proxy")
 
-    # ----- PROXY attempt (paid) -----
+    # ----- TIER 1: RESIDENTIAL PROXY ($8/GB — cheap) -----
+    residential_proxies = get_residential_proxy_config()
+    if residential_proxies is not None:
+        html, status = _fetch_via_proxy(
+            url, residential_proxies, retries=1, silent_404=silent_404,
+            counter=residential_counter, tier_label="residential",
+        )
+        if status == 200:
+            return html, 200
+        # 404 is definitive — don't escalate to web unlocker
+        if status == 404:
+            return None, 404
+        # Other errors: escalate to web unlocker
+        print(f"  ↻ Residential failed (HTTP {status}) — escalating to Web Unlocker")
+
+    # ----- TIER 2: WEB UNLOCKER ($15/GB — expensive fallback) -----
     if proxies is None:
         proxies = get_proxy_config()
     if proxies is None:
-        print("  ✗ No proxy configured and direct request failed")
+        if residential_proxies is None:
+            print("  ✗ No proxy configured and direct request failed")
         return None, 0
 
-    return _fetch_via_proxy(url, proxies, retries=retries, silent_404=silent_404)
+    return _fetch_via_proxy(
+        url, proxies, retries=retries, silent_404=silent_404,
+        counter=request_counter, tier_label="unlocker",
+    )
 
 
 def extract_number(text: str) -> Optional[int]:
@@ -1341,21 +1424,26 @@ def run_scraper(retry_only: bool = False):
     # -------------------------------------------------------------------------
     # 💰 COST REPORT  (venta + retry phases, before rental)
     # -------------------------------------------------------------------------
-    total_req    = cost_data['total_requests']
-    direct_req   = cost_data['direct_requests']
-    direct_ok    = cost_data['direct_successful']
-    proxy_req    = cost_data['proxy_requests']
-    proxy_ok     = cost_data['proxy_successful']
-    fail_req     = cost_data['failed_requests']
-    cost_usd     = cost_data['estimated_cost_usd']
-    savings_usd  = cost_data['savings_usd']
-    savings_pct  = cost_data['savings_pct']
-    fetch_mode   = cost_data['fetch_mode']
-    duration     = (end_time - start_time).total_seconds()
+    total_req       = cost_data['total_requests']
+    direct_req      = cost_data['direct_requests']
+    direct_ok       = cost_data['direct_successful']
+    residential_req = cost_data.get('residential_requests', 0)
+    residential_ok  = cost_data.get('residential_successful', 0)
+    unlocker_req    = cost_data.get('unlocker_requests', 0)
+    unlocker_ok     = cost_data.get('unlocker_successful', 0)
+    fail_req        = cost_data['failed_requests']
+    cost_usd        = cost_data['estimated_cost_usd']
+    res_cost        = cost_data.get('residential_cost_usd', 0)
+    unl_cost        = cost_data.get('unlocker_cost_usd', 0)
+    savings_usd     = cost_data['savings_usd']
+    savings_pct     = cost_data['savings_pct']
+    fetch_mode      = cost_data['fetch_mode']
+    duration        = (end_time - start_time).total_seconds()
 
     # Budget warning if cap was reached
-    if BRIGHTDATA_REQUEST_BUDGET > 0 and proxy_req >= BRIGHTDATA_REQUEST_BUDGET:
-        print(f"\n⚠️  PRESUPUESTO ALCANZADO: {proxy_req:,} / {BRIGHTDATA_REQUEST_BUDGET:,} requests de proxy")
+    paid_req = residential_req + unlocker_req
+    if BRIGHTDATA_REQUEST_BUDGET > 0 and paid_req >= BRIGHTDATA_REQUEST_BUDGET:
+        print(f"\n⚠️  PRESUPUESTO ALCANZADO: {paid_req:,} / {BRIGHTDATA_REQUEST_BUDGET:,} requests de proxy")
         print(f"   Aumenta BRIGHTDATA_REQUEST_BUDGET en .env o en GitHub Secrets si necesitas más.")
 
     print("\n")
@@ -1365,15 +1453,19 @@ def run_scraper(retry_only: bool = False):
     print("╠" + "═" * 62 + "╣")
 
     if total_req > 0:
-        # Direct (free) vs Proxy (paid) breakdown
+        # Tier breakdown
         if direct_req > 0:
-            d_rate = direct_ok / direct_req * 100 if direct_req > 0 else 0
-            print(f"║  {'Requests directas (gratis):':<30} {direct_req:>8,}                   ║")
+            d_rate = direct_ok / direct_req * 100
+            print(f"║  {'Tier 0 — directas (gratis):':<30} {direct_req:>8,}                   ║")
             print(f"║  {'  ✓ Exitosas:':<30} {direct_ok:>8,}  ({d_rate:4.1f}%)         ║")
-        if proxy_req > 0:
-            p_rate = proxy_ok / proxy_req * 100 if proxy_req > 0 else 0
-            print(f"║  {'Requests proxy (BrightData):':<30} {proxy_req:>8,}                   ║")
-            print(f"║  {'  ✓ Exitosas:':<30} {proxy_ok:>8,}  ({p_rate:4.1f}%)         ║")
+        if residential_req > 0:
+            r_rate = residential_ok / residential_req * 100
+            print(f"║  {'Tier 1 — residential ($8/GB):':<30} {residential_req:>8,}                   ║")
+            print(f"║  {'  ✓ Exitosas:':<30} {residential_ok:>8,}  ({r_rate:4.1f}%)         ║")
+        if unlocker_req > 0:
+            u_rate = unlocker_ok / unlocker_req * 100
+            print(f"║  {'Tier 2 — unlocker ($15/GB):':<30} {unlocker_req:>8,}                   ║")
+            print(f"║  {'  ✓ Exitosas:':<30} {unlocker_ok:>8,}  ({u_rate:4.1f}%)         ║")
         print(f"║  {'Requests totales:':<30} {total_req:>8,}                   ║")
         print(f"║  {'  ✗ Fallidas (total):':<30} {fail_req:>8,}                   ║")
         print("╠" + "─" * 62 + "╣")
@@ -1386,12 +1478,13 @@ def run_scraper(retry_only: bool = False):
         print(f"║  {'Por fase — alquiler:':<30} {'(ver abajo)':>12}               ║")
         print("╠" + "─" * 62 + "╣")
 
-        # Cost
-        cost_per_req     = cost_usd / proxy_req if proxy_req > 0 else 0
+        # Cost by tier
         cost_per_listing = cost_usd / total_listings if total_listings > 0 else 0
-        print(f"║  {'Coste real (solo proxy):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
+        print(f"║  {'Coste residential:':<30} {'$' + f'{res_cost:.4f}':>10} USD         ║")
+        print(f"║  {'Coste web unlocker:':<30} {'$' + f'{unl_cost:.4f}':>10} USD         ║")
+        print(f"║  {'Coste total (estimado):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
         if savings_usd > 0:
-            print(f"║  {'Ahorro vs proxy-only:':<30} {'$' + f'{savings_usd:.4f}':>10} USD ({savings_pct:.0f}%)  ║")
+            print(f"║  {'Ahorro vs solo unlocker:':<30} {'$' + f'{savings_usd:.4f}':>10} USD ({savings_pct:.0f}%)  ║")
         if total_listings > 0:
             print(f"║  {'Coste por anuncio:':<30} {'$' + f'{cost_per_listing:.5f}':>10} USD         ║")
         print("╠" + "─" * 62 + "╣")

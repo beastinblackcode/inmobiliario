@@ -54,6 +54,9 @@ jobs:
           BRIGHTDATA_USER: ${{ secrets.BRIGHTDATA_USER }}
           BRIGHTDATA_PASS: ${{ secrets.BRIGHTDATA_PASS }}
           BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
+          BRIGHTDATA_RESIDENTIAL_HOST: ${{ secrets.BRIGHTDATA_RESIDENTIAL_HOST }}
+          BRIGHTDATA_RESIDENTIAL_USER: ${{ secrets.BRIGHTDATA_RESIDENTIAL_USER }}
+          BRIGHTDATA_RESIDENTIAL_PASS: ${{ secrets.BRIGHTDATA_RESIDENTIAL_PASS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python scraper.py
         continue-on-error: true    # Partial scrapes still provide valuable data
