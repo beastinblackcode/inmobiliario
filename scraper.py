@@ -771,27 +771,13 @@ def fetch_page(
         # hybrid mode: direct failed, try proxies
         print(f"  ↻ Direct blocked (HTTP {status}) — falling back to proxy")
 
-    # ----- TIER 1: RESIDENTIAL PROXY ($8/GB — cheap) -----
-    residential_proxies = get_residential_proxy_config()
-    if residential_proxies is not None:
-        html, status = _fetch_via_proxy(
-            url, residential_proxies, retries=1, silent_404=silent_404,
-            counter=residential_counter, tier_label="residential",
-        )
-        if status == 200:
-            return html, 200
-        # 404 is definitive — don't escalate to web unlocker
-        if status == 404:
-            return None, 404
-        # Other errors: escalate to web unlocker
-        print(f"  ↻ Residential failed (HTTP {status}) — escalating to Web Unlocker")
-
-    # ----- TIER 2: WEB UNLOCKER ($15/GB — expensive fallback) -----
+    # ----- PROXY: WEB UNLOCKER ($15/GB) -----
+    # NOTE: Residential proxy disabled — Idealista blocks it (99% failure rate).
+    # All requests go directly to Web Unlocker which handles CAPTCHAs/challenges.
     if proxies is None:
         proxies = get_proxy_config()
     if proxies is None:
-        if residential_proxies is None:
-            print("  ✗ No proxy configured and direct request failed")
+        print("  ✗ No proxy configured and direct request failed")
         return None, 0
 
     return _fetch_via_proxy(
