@@ -2661,13 +2661,20 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
         return []
 
 
-def get_market_summary_trend() -> List[Dict]:
+def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
     """
-    Weekly market price trend based on last_seen_date.
+    Weekly market price trend using first_seen_date as the time axis.
 
-    Groups active listings by the week the scraper last checked them, giving a
-    rolling snapshot of the market price each week (rather than grouping by
-    first_seen_date which stagnates once the initial bulk load is complete).
+    Groups listings by when they first appeared on Idealista (entry price),
+    not by when the scraper last visited them (last_seen_date).  The old
+    last_seen_date approach caused expensive long-lived listings (e.g. luxury
+    Salamanca flats that stay active for months) to be continuously
+    re-assigned to the current week, inflating the trend every week the
+    scraper touched them.  Switching to first_seen_date mirrors the same
+    approach already used by get_price_trend_by_district().
+
+    An additional price/m² cap of 25 000 €/m² filters out obvious data
+    errors or extreme outliers that would skew the weekly average.
     """
     try:
         with get_connection() as conn:
@@ -2675,18 +2682,21 @@ def get_market_summary_trend() -> List[Dict]:
             cur = conn.cursor()
             cur.execute("""
                 SELECT
-                    strftime('%Y-%W', last_seen_date)            AS week,
-                    date(last_seen_date, 'weekday 1', '-7 days') AS week_start,
+                    strftime('%Y-%W', first_seen_date)            AS week,
+                    date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
                     ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
                     ROUND(AVG(price), 0)                          AS avg_price,
                     COUNT(*)                                       AS n_listings
                 FROM listings
                 WHERE size_sqm > 20
                   AND price > 50000
-                  AND last_seen_date IS NOT NULL
+                  AND CAST(price AS FLOAT) / NULLIF(size_sqm, 0) < 25000
+                  AND first_seen_date IS NOT NULL
+                  AND first_seen_date >= date('now', ? || ' days')
                 GROUP BY week
+                HAVING n_listings >= 5
                 ORDER BY week
-            """)
+            """, (f"-{weeks * 7}",))
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
         print(f"Error getting market summary trend: {exc}")
