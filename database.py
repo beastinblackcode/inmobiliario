@@ -2663,44 +2663,106 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
 
 def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
     """
-    Weekly market price trend using first_seen_date as the time axis.
+    Weekly market price trend (median, IQR-filtered) using first_seen_date.
 
-    Groups listings by when they first appeared on Idealista (entry price),
-    not by when the scraper last visited them (last_seen_date).  The old
-    last_seen_date approach caused expensive long-lived listings (e.g. luxury
-    Salamanca flats that stay active for months) to be continuously
-    re-assigned to the current week, inflating the trend every week the
-    scraper touched them.  Switching to first_seen_date mirrors the same
-    approach already used by get_price_trend_by_district().
+    Groups listings by when they first appeared on Idealista (entry price).
+    Each week's central tendency is computed in Python using statistics.median()
+    after removing outliers with the same IQR fence method already used in
+    market_indicators.get_weekly_price_evolution().  This replaces the old
+    SQL AVG() approach which was sensitive to expensive one-off listings
+    (e.g. a €5M penthouse distorting an entire week's average).
 
-    An additional price/m² cap of 25 000 €/m² filters out obvious data
-    errors or extreme outliers that would skew the weekly average.
+    A bulk-import guard drops any week whose listing count exceeds 3× the
+    median weekly count — these weeks represent data loads, not real market
+    activity, and would otherwise skew week-over-week comparisons.
+
+    Output keys (avg_sqm, avg_price, n_listings) are kept unchanged so that
+    the PriceTrendChart frontend component requires no modification.
+    The values are medians, not means — the field names are intentionally
+    left as-is to minimise blast radius.
     """
+    import statistics as _stats
+    from collections import defaultdict
+
+    def _iqr_filter(values: list, factor: float = 1.5) -> list:
+        """Drop values outside [Q1 - factor*IQR, Q3 + factor*IQR].
+        Returns the original list unchanged if fewer than 20 values."""
+        if len(values) < 20:
+            return values
+        q1 = _stats.quantiles(values, n=4)[0]
+        q3 = _stats.quantiles(values, n=4)[2]
+        iqr = q3 - q1
+        lo, hi = q1 - factor * iqr, q3 + factor * iqr
+        filtered = [v for v in values if lo <= v <= hi]
+        # Safety: never discard more than 20 % of the sample
+        return filtered if len(filtered) >= len(values) * 0.8 else values
+
     try:
         with get_connection() as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+            # Fetch one row per listing; grouping + median happen in Python
             cur.execute("""
                 SELECT
                     strftime('%Y-%W', first_seen_date)            AS week,
                     date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
-                    ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
-                    ROUND(AVG(price), 0)                          AS avg_price,
-                    COUNT(*)                                       AS n_listings
+                    price,
+                    CAST(price AS FLOAT) / NULLIF(size_sqm, 0)    AS price_sqm
                 FROM listings
                 WHERE size_sqm > 20
                   AND price > 50000
                   AND CAST(price AS FLOAT) / NULLIF(size_sqm, 0) < 25000
                   AND first_seen_date IS NOT NULL
                   AND first_seen_date >= date('now', ? || ' days')
-                GROUP BY week
-                HAVING n_listings >= 5
                 ORDER BY week
             """, (f"-{weeks * 7}",))
-            return [dict(r) for r in cur.fetchall()]
+            rows = cur.fetchall()
     except Exception as exc:
         print(f"Error getting market summary trend: {exc}")
         return []
+
+    # --- Group by week ---------------------------------------------------
+    week_prices: dict  = defaultdict(list)
+    week_sqm: dict     = defaultdict(list)
+    week_starts: dict  = {}
+
+    for row in rows:
+        w = row["week"]
+        if not w:
+            continue
+        week_starts[w] = row["week_start"]
+        if row["price"]:
+            week_prices[w].append(float(row["price"]))
+        if row["price_sqm"]:
+            week_sqm[w].append(float(row["price_sqm"]))
+
+    # --- Median + IQR per week ------------------------------------------
+    result = []
+    for week in sorted(week_prices.keys()):
+        prices  = week_prices[week]
+        sqm_vals = week_sqm[week]
+
+        if len(prices) < 5:
+            continue
+
+        prices_clean  = _iqr_filter(prices)
+        sqm_clean     = _iqr_filter(sqm_vals) if sqm_vals else sqm_vals
+
+        result.append({
+            "week":       week,
+            "week_start": week_starts.get(week),
+            "avg_sqm":    round(_stats.median(sqm_clean))   if sqm_clean    else None,
+            "avg_price":  round(_stats.median(prices_clean)),
+            "n_listings": len(prices_clean),
+        })
+
+    # --- Bulk-import guard: drop weeks >3× median count -----------------
+    if len(result) >= 3:
+        counts       = sorted(pt["n_listings"] for pt in result)
+        median_count = counts[len(counts) // 2]
+        result       = [pt for pt in result if pt["n_listings"] <= median_count * 3]
+
+    return result
 
 
 # ---------------------------------------------------------------------------
