@@ -16,6 +16,8 @@ from database import (
     get_connection,
     get_listing_by_url,
     get_property_price_stats,
+    get_stale_listings_count,
+    purge_stale_listings,
 )
 from analytics import get_property_evolution_dataframe
 
@@ -296,6 +298,72 @@ def render_admin_tab(df: pd.DataFrame) -> None:
             )
     else:
         st.info("No hay datos de propiedades nuevas en los últimos 30 días.")
+
+    # =========================================================================
+    # Ghost Listing Purge
+    # =========================================================================
+    st.markdown("---")
+    st.subheader("🧹 Limpieza de Listings Fantasma")
+    st.caption(
+        "Anuncios marcados como *activos* en la BD que ya no aparecen en Idealista. "
+        "El scraper los elimina automáticamente en cada ejecución (máx. 1 000/batch). "
+        "Usa el botón de purga para limpiar todos de golpe."
+    )
+
+    stale = get_stale_listings_count(days_threshold=7)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Tier 1 — seguros (7d + barrio cubierto)",
+        f"{stale['tier1']:,}",
+        help="No vistos en 7+ días Y su barrio fue scrapeado recientemente → casi seguro que han desaparecido de Idealista.",
+    )
+    c2.metric(
+        "Tier 2 — hard cutoff (21d)",
+        f"{stale['tier2']:,}",
+        help="No vistos en 21+ días independientemente de la cobertura del barrio.",
+    )
+    c3.metric(
+        "Total a limpiar",
+        f"{stale['total']:,}",
+        help="Unión de Tier 1 y Tier 2.",
+    )
+
+    if stale["total"] == 0:
+        st.success("✅ No hay listings fantasma pendientes de limpiar.")
+    else:
+        st.warning(
+            f"⚠️ Hay **{stale['total']:,} listings fantasma** en la base de datos. "
+            "Pulsa el botón para purgarlos todos."
+        )
+        confirm = st.checkbox(
+            f"Confirmo que quiero marcar {stale['total']:,} anuncios como vendido/retirado",
+            key="purge_confirm",
+        )
+        if st.button(
+            "🧹 Purgar ahora",
+            disabled=not confirm,
+            type="primary",
+            key="purge_btn",
+        ):
+            with st.spinner("Purgando listings fantasma… puede tardar unos segundos."):
+                result = purge_stale_listings(days_threshold=7)
+
+            if result["total_marked"] == 0:
+                st.info("ℹ️ No se encontraron listings para purgar.")
+            elif result["complete"]:
+                st.success(
+                    f"✅ Purga completada: **{result['total_marked']:,} listings** "
+                    f"marcados en {result['iterations']} ronda(s)."
+                )
+            else:
+                st.warning(
+                    f"⚠️ Límite de iteraciones alcanzado. "
+                    f"Se purgaron **{result['total_marked']:,} listings** "
+                    f"en {result['iterations']} rondas. "
+                    "Vuelve a pulsar el botón para continuar."
+                )
+            st.rerun()
 
     # =========================================================================
     # Property Lookup

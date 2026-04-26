@@ -672,6 +672,102 @@ def mark_stale_as_sold(days_threshold: int = 7) -> int:
         return 0
 
 
+def get_stale_listings_count(days_threshold: int = 7) -> Dict:
+    """
+    Return counts of active listings that have not been seen recently.
+
+    Used by the admin panel to give a preview before triggering a purge.
+
+    Returns:
+        Dict with:
+          - tier1: active listings not seen in days_threshold days
+                   AND whose barrio was scraped recently (safe to purge)
+          - tier2: active listings not seen in 21+ days regardless of
+                   barrio coverage (hard cutoff)
+          - total: tier1 + tier2 (with overlap removed)
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            from datetime import datetime, timedelta
+            cutoff      = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d")
+            hard_cutoff = (datetime.now() - timedelta(days=21)).strftime("%Y-%m-%d")
+
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'active'
+                  AND last_seen_date < ?
+                  AND barrio IN (
+                      SELECT DISTINCT barrio FROM listings
+                      WHERE last_seen_date >= ? AND barrio IS NOT NULL
+                  )
+            """, (cutoff, cutoff))
+            tier1 = cursor.fetchone()[0]
+
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'active'
+                  AND last_seen_date < ?
+            """, (hard_cutoff,))
+            tier2 = cursor.fetchone()[0]
+
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'active'
+                  AND (
+                      (last_seen_date < ? AND barrio IN (
+                          SELECT DISTINCT barrio FROM listings
+                          WHERE last_seen_date >= ? AND barrio IS NOT NULL
+                      ))
+                      OR last_seen_date < ?
+                  )
+            """, (cutoff, cutoff, hard_cutoff))
+            total = cursor.fetchone()[0]
+
+            return {"tier1": tier1, "tier2": tier2, "total": total}
+    except Exception as exc:
+        print(f"Error counting stale listings: {exc}")
+        return {"tier1": 0, "tier2": 0, "total": 0}
+
+
+def purge_stale_listings(days_threshold: int = 7, max_iterations: int = 20) -> Dict:
+    """
+    Run mark_stale_as_sold() in a loop until no more stale listings remain.
+
+    The regular scraper call runs mark_stale_as_sold() once per execution
+    (capped at MAX_BATCH_SIZE = 1000).  If thousands of ghost listings have
+    accumulated, that single call is insufficient.  This function iterates
+    until the job is done or max_iterations is reached (safety cap).
+
+    Args:
+        days_threshold:  Days without updates before marking as sold (default 7).
+        max_iterations:  Maximum loop iterations — prevents runaway loops.
+                         Default 20 allows up to 20 × 1000 = 20 000 marks.
+
+    Returns:
+        Dict with:
+          - total_marked: total listings marked across all iterations
+          - iterations:   number of loop rounds executed
+          - complete:     True if loop ended because 0 were marked (fully done),
+                          False if it hit max_iterations (may still have more)
+    """
+    total      = 0
+    iterations = 0
+
+    for _ in range(max_iterations):
+        iterations += 1
+        marked     = mark_stale_as_sold(days_threshold=days_threshold)
+        total     += marked
+        if marked == 0:
+            break
+
+    return {
+        "total_marked": total,
+        "iterations":   iterations,
+        "complete":     iterations < max_iterations or total == 0,
+    }
+
+
 def get_listings(
     status: Optional[str] = None,
     distrito: Optional[List[str]] = None,
