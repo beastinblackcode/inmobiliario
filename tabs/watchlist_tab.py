@@ -29,9 +29,6 @@ def render_watchlist_tab():
     # Ensure table exists on older DBs
     migrate_create_watchlist_table()
 
-    st.title("⭐ Mi Watchlist")
-    st.markdown("Propiedades guardadas para seguimiento de precio y alertas.")
-
     entries = get_watchlist(include_sold=True)
 
     # Pre-fetch NLP signals for all watchlist entries
