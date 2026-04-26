@@ -166,17 +166,14 @@ def main():
     # Only the selected page runs — no more rendering all 8 tabs.
     # ------------------------------------------------------------------
     pages = {
-        "Análisis": [
+        "🏠 Caza": [
             st.Page("pages/oportunidades.py", title="🎯 Oportunidades", default=True),
             st.Page("pages/bajadas.py",       title="📉 Bajadas de Precio"),
-        ],
-        "Mi Espacio": [
             st.Page("pages/busqueda.py",      title="🔍 Búsqueda"),
-            st.Page("pages/alertas.py",       title="🔔 Alertas"),
-            st.Page("pages/watchlist.py",     title="📌 Watchlist"),
-            st.Page("pages/detalle.py",       title="🔍 Detalle"),
+            st.Page("pages/seguimientos.py",  title="🔔 Mis Seguimientos"),
+            st.Page("pages/detalle.py",       title="🔎 Detalle de Anuncio"),
         ],
-        "Admin": [
+        "⚙️ Operaciones": [
             st.Page("pages/admin.py",         title="⚙️ Administración"),
             st.Page("pages/vigilancia.py",    title="🛡️ Vigilancia"),
         ],
