@@ -47,6 +47,11 @@ jobs:
           print(f"Downloaded: {size:.1f} MB")
           EOF
 
+      # ── 4b. Backfill missing initial price_history rows (idempotent) ──────────
+      - name: Backfill price history
+        run: python migration_backfill_initial_history.py
+        continue-on-error: true    # Never block scraping if migration fails
+
       # ── 5. Scraping ──────────────────────────────────────────────────────────
       - name: Run scraper
         env:
