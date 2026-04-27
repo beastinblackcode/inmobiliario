@@ -2772,10 +2772,10 @@ def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
     median weekly count — these weeks represent data loads, not real market
     activity, and would otherwise skew week-over-week comparisons.
 
-    Output keys (avg_sqm, avg_price, n_listings) are kept unchanged so that
-    the PriceTrendChart frontend component requires no modification.
-    The values are medians, not means — the field names are intentionally
-    left as-is to minimise blast radius.
+    Output keys: median_sqm, median_price, n_listings, week, week_start.
+    NOTE: previously named avg_sqm/avg_price — renamed in April 2026 to
+    reflect the actual computation (median, not mean).  PriceTrendChart
+    and lib/types.ts were updated simultaneously.
     """
     import statistics as _stats
     from collections import defaultdict
@@ -2847,9 +2847,9 @@ def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
         result.append({
             "week":       week,
             "week_start": week_starts.get(week),
-            "avg_sqm":    round(_stats.median(sqm_clean))   if sqm_clean    else None,
-            "avg_price":  round(_stats.median(prices_clean)),
-            "n_listings": len(prices_clean),
+            "median_sqm":   round(_stats.median(sqm_clean))   if sqm_clean    else None,
+            "median_price": round(_stats.median(prices_clean)),
+            "n_listings":   len(prices_clean),
         })
 
     # --- Bulk-import guard: drop weeks >3× median count -----------------
