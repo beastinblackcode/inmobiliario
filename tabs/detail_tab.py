@@ -118,6 +118,7 @@ def _format_result_label(r: dict) -> str:
 
 
 def _get_price_history(listing_id: str) -> list:
+    """Raw price_history entries (only price changes are stored)."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -127,6 +128,86 @@ def _get_price_history(listing_id: str) -> list:
             (listing_id,),
         )
         return [dict(r) for r in cursor.fetchall()]
+
+
+def _build_chart_series(history: list, listing: dict) -> tuple[list, str]:
+    """
+    Always produce a usable price series for the chart, regardless of how
+    many entries are stored in price_history.
+
+    Strategy
+    --------
+    • Start point: first stored entry, or `first_seen_date` + current price
+      if the price history is empty (bug-tolerant: ~54 % of legacy listings
+      lack the initial insert).
+    • End point: `last_seen_date` at the listing's current price — extends
+      the line so the user can see how long the listing has held its price.
+    • Inflection points: any actual changes from price_history sit between.
+
+    Returns
+    -------
+    (series, kind):
+        series — list of {date, price, change_amount, change_percent}
+        kind   — "flat" | "single_change" | "multi_change"
+    """
+    first_seen = listing.get("first_seen_date")
+    last_seen  = listing.get("last_seen_date")
+    cur_price  = listing.get("price")
+
+    # Normalise dates to YYYY-MM-DD (strip any time component)
+    if first_seen and len(first_seen) > 10:
+        first_seen = first_seen[:10]
+    if last_seen and len(last_seen) > 10:
+        last_seen = last_seen[:10]
+
+    series: list = []
+
+    # Anchor: start point
+    if history:
+        # Use stored first entry, but normalise its date format
+        first_entry = dict(history[0])
+        if first_entry.get("date_recorded") and len(first_entry["date_recorded"]) > 10:
+            first_entry["date_recorded"] = first_entry["date_recorded"][:10]
+        series.append(first_entry)
+        # Add intermediate changes (everything past index 0)
+        for h in history[1:]:
+            entry = dict(h)
+            if entry.get("date_recorded") and len(entry["date_recorded"]) > 10:
+                entry["date_recorded"] = entry["date_recorded"][:10]
+            series.append(entry)
+    elif first_seen and cur_price:
+        # Synthesise initial point from listing metadata
+        series.append({
+            "date_recorded":  first_seen,
+            "price":          cur_price,
+            "change_amount":  None,
+            "change_percent": None,
+        })
+
+    # Anchor: end point at last_seen (extends a flat line)
+    if last_seen and cur_price and series:
+        last_in_series = series[-1]
+        # Only add the trailing point if the existing last entry isn't already at last_seen
+        if last_in_series["date_recorded"] != last_seen:
+            series.append({
+                "date_recorded":  last_seen,
+                "price":          cur_price,
+                "change_amount":  0,
+                "change_percent": 0.0,
+            })
+
+    # Classify the trajectory
+    real_changes = sum(
+        1 for h in history if h.get("change_amount") not in (None, 0)
+    )
+    if real_changes == 0:
+        kind = "flat"
+    elif real_changes == 1:
+        kind = "single_change"
+    else:
+        kind = "multi_change"
+
+    return series, kind
 
 
 def _get_similar(listing: dict, exclude_id: str, limit: int = 5) -> list:
@@ -333,25 +414,47 @@ def render_detail_tab() -> None:
     # ── Historial de precios ───────────────────────────────────────────────────
     st.subheader("📈 Histórico de Precios")
 
-    if history:
-        stats = get_property_price_stats(listing["listing_id"])
-        if stats:
-            h1, h2, h3, h4 = st.columns(4)
-            h1.metric("Precio inicial", f"€{stats['initial_price']:,}")
-            h2.metric("Precio actual",  f"€{stats['current_price']:,}")
-            delta_color = "inverse" if stats["total_change"] < 0 else "normal"
-            h3.metric("Variación total",
-                      f"€{abs(stats['total_change']):,}",
-                      f"{stats['total_change_pct']:+.1f}%",
-                      delta_color=delta_color)
-            h4.metric("Cambios registrados", stats["num_changes"])
+    series, kind = _build_chart_series(history, listing)
 
-        df_hist = pd.DataFrame(history)
+    # KPIs (always shown when we have any anchor data)
+    if series:
+        initial_price = series[0]["price"]
+        current_price = listing["price"]
+        total_change  = current_price - initial_price
+        total_pct     = (total_change / initial_price * 100) if initial_price else 0
+        real_changes  = sum(1 for h in history if h.get("change_amount") not in (None, 0))
+
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Precio inicial", f"€{initial_price:,}")
+        h2.metric("Precio actual",  f"€{current_price:,}")
+        delta_color = "inverse" if total_change < 0 else "normal"
+        h3.metric(
+            "Variación total",
+            f"€{abs(total_change):,}",
+            f"{total_pct:+.1f}%" if initial_price else "—",
+            delta_color=delta_color,
+        )
+        h4.metric("Cambios registrados", real_changes)
+
+        # Status banner reflecting the trajectory kind
+        if kind == "flat":
+            st.caption(
+                f"➡️ Precio sin cambios desde **{series[0]['date_recorded']}** "
+                f"(visto por última vez **{listing.get('last_seen_date', '')[:10]}**)."
+            )
+        elif kind == "single_change":
+            st.caption("📉 Una bajada/subida registrada — la línea conecta los puntos clave.")
+        else:
+            st.caption(f"🔄 {real_changes} cambios de precio registrados.")
+
+        # Build the chart
+        df_hist = pd.DataFrame(series)
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=df_hist["date_recorded"], y=df_hist["price"],
             mode="lines+markers", name="Precio",
-            line=dict(color="#3498db", width=3), marker=dict(size=10),
+            line=dict(color="#3498db", width=3),
+            marker=dict(size=10),
             text=[f"€{p:,.0f}" for p in df_hist["price"]],
             hovertemplate="<b>%{x}</b><br>Precio: %{text}<extra></extra>",
         ))
@@ -385,7 +488,10 @@ def render_detail_tab() -> None:
                 },
             )
     else:
-        st.info("Este piso aún no tiene cambios de precio registrados.")
+        st.info(
+            "No hay datos suficientes para mostrar el histórico de este piso "
+            "(faltan first_seen_date o precio)."
+        )
 
     st.markdown("---")
 
