@@ -121,7 +121,17 @@ def _load_zone_prices() -> list:
 
 
 def _load_zone_speed() -> list:
-    """Direct query for days-on-market by district."""
+    """
+    Median days-on-market per district, derived from sold/removed listings.
+
+    Warmup filter: excludes listings whose first_seen_date falls within the
+    first 28 days of scraper operation (MIN(first_seen_date) + 28 days).
+    The bulk import on 2026-01-14 set first_seen_date = that date for ~14 k
+    listings; many were marked sold_removed a few days later, producing
+    artificially low durations (3–6 days) that pulled the median down.
+    The subquery is dynamic — it adjusts automatically if the DB is ever
+    reset and re-imported.
+    """
     import statistics
     from collections import defaultdict
     from database import get_connection
@@ -130,11 +140,18 @@ def _load_zone_speed() -> list:
             cur = conn.cursor()
             cur.execute("""
                 SELECT distrito,
-                       julianday(COALESCE(last_seen_date, date('now'))) - julianday(first_seen_date) AS days
+                       julianday(COALESCE(last_seen_date, date('now')))
+                           - julianday(first_seen_date) AS days
                 FROM listings
                 WHERE status = 'sold_removed'
-                  AND distrito IS NOT NULL AND distrito != ''
+                  AND distrito  IS NOT NULL AND distrito != ''
                   AND first_seen_date IS NOT NULL
+                  AND first_seen_date >= (
+                      -- skip the first 28 days (scraper warmup / bulk-import window)
+                      SELECT date(MIN(first_seen_date), '+28 days')
+                      FROM   listings
+                      WHERE  first_seen_date IS NOT NULL
+                  )
             """)
             rows = cur.fetchall()
         zone_days: dict = defaultdict(list)
