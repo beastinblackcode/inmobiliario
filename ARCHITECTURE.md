@@ -1,6 +1,6 @@
 # Arquitectura del Sistema: Madrid Real Estate Tracker
 
-> **Última actualización:** Febrero 2026
+> **Última actualización:** abril 2026
 
 ## 📋 Índice
 
@@ -90,16 +90,33 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
 | `database.py` | 1,209 | Toda la capa de acceso a datos (CRUD, stats, historial) |
 | `analytics.py` | 559 | Análisis avanzado: chollos, velocidad, evolución de propiedades |
 
-### Tabs del Dashboard (`tabs/`)
+### Páginas del Dashboard (`pages/`)
 
-| Archivo | Líneas | Función |
-|---------|--------|---------|
-| `tabs/__init__.py` | 0 | Marca el directorio como paquete Python |
-| `tabs/dashboard_tab.py` | 941 | KPIs, gráficas de precios, analytics avanzado, histórico |
-| `tabs/map_tab.py` | 89 | Mapa interactivo Folium con heat layer por precio |
-| `tabs/prediction_tab.py` | 316 | Valuación con IA (Random Forest) e intervalos de confianza |
-| `tabs/search_tab.py` | 212 | Búsquedas personalizadas con seguimiento de precios |
-| `tabs/admin_tab.py` | 544 | Actividad scraping, costes, estadísticas distrito, buscador |
+Streamlit multipage. Cada archivo es una página independiente accesible desde el sidebar.
+
+| Archivo | Función |
+|---------|---------|
+| `pages/admin.py` | Actividad scraping, costes, estadísticas, purga manual de listings fantasma |
+| `pages/bajadas.py` | Ranking de bajadas de precio por barrio + overview |
+| `pages/busqueda.py` | Búsquedas personalizadas con guardado y seguimiento |
+| `pages/detalle.py` | Ficha de propiedad: histórico de precios, KPIs, comparables |
+| `pages/oportunidades.py` | Top oportunidades con score calidad-precio + NLP |
+| `pages/seguimientos.py` | Watchlist y alertas del usuario |
+| `pages/vigilancia.py` | Semáforo del mercado, indicadores internos + macro |
+
+### Componentes reutilizables (`tabs/`)
+
+Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son tabs físicas).
+
+| Archivo | Función |
+|---------|---------|
+| `tabs/admin_tab.py` | Render del panel admin (incluye purga de stale listings) |
+| `tabs/alerts_tab.py` | Render de alertas del usuario |
+| `tabs/detail_tab.py` | Render del detalle con `_build_chart_series()` defensivo |
+| `tabs/opportunities_tab.py` | Render de oportunidades + scoring |
+| `tabs/price_drops_tab.py` | Render de bajadas de precio |
+| `tabs/search_tab.py` | Render de búsquedas guardadas |
+| `tabs/watchlist_tab.py` | Render de propiedades seguidas |
 
 ### Vigilancia de Mercado
 
@@ -116,12 +133,19 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
 | `predictive_model.py` | Random Forest para valuación de propiedades |
 | `model_metadata.json` | Metadatos del modelo entrenado (generado en runtime) |
 
-### Scraper
+### Scraper y pipeline diario
 
 | Archivo | Función |
 |---------|---------|
-| `scraper.py` | Scraping principal de 184 barrios vía Bright Data |
+| `scraper.py` | Scraping principal de 139 barrios vía Bright Data Web Unlocker |
 | `retry_scraper.py` | Reintento de barrios fallidos |
+| `compute_snapshots.py` | Pre-cálculo de KPIs diarios → tabla `market_snapshots` |
+| `nlp_analyzer.py` | Extracción de señales NLP de descripciones (urgencia, directo, negociable) |
+| `email_report.py` | Resumen diario por email |
+| `tweet_daily.py` | Tweet automático diario con headline del mercado |
+| `export_public_metrics.py` | Genera `metrics.json` para el frontend público |
+| `ci_drive_upload.py` / `upload_to_drive.py` | Sube `real_estate.db` a Google Drive |
+| `migration_backfill_initial_history.py` | Backfill idempotente de `price_history` (corre en CI) |
 
 ### Utilidades de Visualización
 
@@ -161,14 +185,12 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
 
 | Archivo | Contenido |
 |---------|-----------|
-| `ARCHITECTURE.md` | Este documento |
-| `README.md` | Guía general |
-| `AUTH_SETUP.md` | Configuración de autenticación |
-| `MULTI_USER_AUTH.md` | Multi-usuario |
-| `DATA_MODEL.md` | Modelo de datos detallado |
-| `DEPLOYMENT.md` | Guía de despliegue |
-| `QUICKSTART.md` | Inicio rápido |
-| `Arquitectura.docx` | Versión Word de este documento |
+| `README.md` | Punto de entrada y guía rápida |
+| `ARCHITECTURE.md` | Este documento — cómo funciona el sistema hoy |
+| `DATA_MODEL.md` | Esquema detallado de la BD |
+| `DEPLOYMENT.md` | Despliegue en Streamlit Cloud |
+| `AUTH.md` | Configuración de auth multi-usuario |
+| `ROADMAP.md` | Próximos pasos: features pendientes + plan arquitectónico (Fase 1/2/3) |
 
 ### ⚠️ Archivos a Limpiar
 
