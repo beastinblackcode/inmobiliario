@@ -453,7 +453,220 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
                 result["trend"] = "down"  # Excess demand (fast absorption)
             else:
                 result["trend"] = "stable"
-    
+
+    return result
+
+
+# ============================================================================
+# Absorption Rate (sold last 30d / active inventory)
+# ============================================================================
+
+# mark_stale_as_sold() lag: a property's last_seen_date stays as the day
+# the scraper last saw it active.  We only learn it has gone ~14 days later.
+# Any window over sold_removed listings must therefore be shifted back 14
+# days to reflect "what was sold during this calendar window".
+_STALE_LAG_DAYS = 14
+
+
+def _weekly_anchors(cursor, weeks: int) -> list:
+    """Return up to *weeks* Monday dates (chronological) that we have data
+    for, plus the most recent observation if it isn't already a Monday.
+    Reused by absorption rate, months of supply, etc."""
+    cursor.execute("""
+        SELECT DISTINCT last_seen_date FROM listings
+        WHERE last_seen_date IS NOT NULL
+        ORDER BY last_seen_date
+    """)
+    all_dates = [r[0] for r in cursor.fetchall()]
+    sampled: list = []
+    for d in all_dates:
+        try:
+            if datetime.strptime(d, "%Y-%m-%d").weekday() == 0:  # Monday
+                sampled.append(d)
+        except (ValueError, TypeError):
+            continue
+    if all_dates and (not sampled or sampled[-1] != all_dates[-1]):
+        sampled.append(all_dates[-1])
+    return sampled[-weeks:]
+
+
+def get_absorption_rate(window_days: int = 30, weeks: int = 8) -> Dict:
+    """
+    Absorption Rate = sold in last N days ÷ active inventory × 100
+
+    Standard real-estate market-tightness indicator:
+        > 20 %   seller's market   (hot)
+        15-20 %  balanced
+        < 15 %   buyer's market    (cold)
+
+    Per-week the rate is computed at week-end W as:
+        active_at_W   = listings whose first_seen_date <= W and which were
+                        either still active or last seen on/after W
+        sold_at_W     = sold_removed whose last_seen_date falls inside
+                        [W - LAG - window_days, W - LAG]   (LAG = 14 days)
+        absorption    = sold_at_W / active_at_W × 100
+
+    Args:
+        window_days: size of the absorption window (default 30 — monthly).
+        weeks: number of weekly snapshots to return in `series`.
+    """
+    result = {
+        "name": "Tasa de Absorción",
+        "unit": "%",
+        "series": [],
+        "current": None,
+        "previous": None,
+        "change": None,
+        "trend": "stable",
+        "window_days": window_days,
+        "active": None,
+        "sold_window": None,
+    }
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        for week_end in _weekly_anchors(cursor, weeks):
+            # Active at week_end
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE first_seen_date <= ?
+                  AND (last_seen_date >= ? OR status = 'active')
+            """, (week_end, week_end))
+            active = cursor.fetchone()[0]
+
+            # Sold during window [week_end - LAG - N, week_end - LAG]
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'sold_removed'
+                  AND last_seen_date >= date(?, ?)
+                  AND last_seen_date <  date(?, ?)
+            """, (
+                week_end, f"-{_STALE_LAG_DAYS + window_days} days",
+                week_end, f"-{_STALE_LAG_DAYS} days",
+            ))
+            sold = cursor.fetchone()[0]
+
+            if active > 0:
+                result["series"].append({
+                    "week_end": week_end,
+                    "active": active,
+                    "sold_window": sold,
+                    "absorption_pct": round(sold / active * 100, 2),
+                })
+
+        if len(result["series"]) >= 2:
+            current = result["series"][-1]
+            previous = result["series"][-2]
+            result["current"] = current["absorption_pct"]
+            result["previous"] = previous["absorption_pct"]
+            result["change"] = round(result["current"] - result["previous"], 2)
+            result["active"] = current["active"]
+            result["sold_window"] = current["sold_window"]
+
+            # Higher absorption = hotter market = "up" (positive trend)
+            if result["change"] > 1:
+                result["trend"] = "up"
+            elif result["change"] < -1:
+                result["trend"] = "down"
+            else:
+                result["trend"] = "stable"
+
+    return result
+
+
+# ============================================================================
+# Months of Supply (inventory ÷ monthly sales rate)
+# ============================================================================
+
+def get_months_of_supply(lookback_months: int = 3, weeks: int = 8) -> Dict:
+    """
+    Months of Supply = active inventory ÷ avg monthly sales (last K months)
+
+    The international benchmark for real-estate market temperature:
+        < 4 months   very hot
+        4-6 months   balanced
+        > 6 months   cold market
+
+    Per-week, computed at week-end W as:
+        active_at_W   = listings active at W (same definition as absorption)
+        sold_window   = sold_removed with last_seen_date in
+                        [W - LAG - 30·K, W - LAG]
+        monthly_rate  = sold_window / lookback_months
+        months_supply = active_at_W / monthly_rate     (∞ if no sales)
+
+    Args:
+        lookback_months: window for the sales-rate denominator.
+        weeks: number of weekly snapshots in `series`.
+    """
+    MAX_MONTHS = 36.0  # cap to avoid ∞ in charts
+
+    result = {
+        "name": "Meses de Stock",
+        "unit": "meses",
+        "series": [],
+        "current": None,
+        "previous": None,
+        "change": None,
+        "trend": "stable",
+        "lookback_months": lookback_months,
+        "active": None,
+        "sold_window": None,
+    }
+
+    window_days = 30 * lookback_months
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        for week_end in _weekly_anchors(cursor, weeks):
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE first_seen_date <= ?
+                  AND (last_seen_date >= ? OR status = 'active')
+            """, (week_end, week_end))
+            active = cursor.fetchone()[0]
+
+            cursor.execute("""
+                SELECT COUNT(*) FROM listings
+                WHERE status = 'sold_removed'
+                  AND last_seen_date >= date(?, ?)
+                  AND last_seen_date <  date(?, ?)
+            """, (
+                week_end, f"-{_STALE_LAG_DAYS + window_days} days",
+                week_end, f"-{_STALE_LAG_DAYS} days",
+            ))
+            sold = cursor.fetchone()[0]
+
+            if active > 0:
+                if sold > 0:
+                    monthly_rate = sold / lookback_months
+                    months = round(min(active / monthly_rate, MAX_MONTHS), 1)
+                else:
+                    months = MAX_MONTHS
+                result["series"].append({
+                    "week_end": week_end,
+                    "active": active,
+                    "sold_window": sold,
+                    "months_of_supply": months,
+                    "capped": sold == 0,
+                })
+
+        if len(result["series"]) >= 2:
+            current = result["series"][-1]
+            previous = result["series"][-2]
+            result["current"] = current["months_of_supply"]
+            result["previous"] = previous["months_of_supply"]
+            result["change"] = round(result["current"] - result["previous"], 2)
+            result["active"] = current["active"]
+            result["sold_window"] = current["sold_window"]
+
+            # More months of supply = colder market = "down" (negative trend)
+            if result["change"] > 0.5:
+                result["trend"] = "down"
+            elif result["change"] < -0.5:
+                result["trend"] = "up"
+            else:
+                result["trend"] = "stable"
+
     return result
 
 
@@ -2107,19 +2320,21 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
                       If None, a conservative 3.5 % fallback is used.
     """
     indicators = {
-        "price_trend":      get_weekly_price_evolution(),
-        "sales_speed":      get_weekly_sales_speed(),
-        "supply_demand":    get_supply_demand_ratio(),
-        "inventory":        get_inventory_evolution(),
-        "rotation":         get_rotation_rate(),
-        "dispersion":       get_price_dispersion(),
-        "affordability":    get_affordability_index(euribor_rate=euribor_rate),
-        "price_drop_ratio": get_price_drop_ratio(),
-        "rental_yield":     get_rental_yield(),
-        "notarial_gap":     get_notarial_gap_indicator(),
-        "rent_burden":      get_rent_burden(),
-        "lanzamientos":     get_lanzamientos_indicator(),
-        "morosidad":        get_morosidad_indicator(),
+        "price_trend":       get_weekly_price_evolution(),
+        "sales_speed":       get_weekly_sales_speed(),
+        "supply_demand":     get_supply_demand_ratio(),
+        "inventory":         get_inventory_evolution(),
+        "rotation":          get_rotation_rate(),
+        "absorption_rate":   get_absorption_rate(),
+        "months_of_supply":  get_months_of_supply(),
+        "dispersion":        get_price_dispersion(),
+        "affordability":     get_affordability_index(euribor_rate=euribor_rate),
+        "price_drop_ratio":  get_price_drop_ratio(),
+        "rental_yield":      get_rental_yield(),
+        "notarial_gap":      get_notarial_gap_indicator(),
+        "rent_burden":       get_rent_burden(),
+        "lanzamientos":      get_lanzamientos_indicator(),
+        "morosidad":         get_morosidad_indicator(),
     }
     return indicators
 

@@ -22,6 +22,10 @@ Metric catalogue:
     avg_price_sqm       mean €/m²
     active_count        number of active listings
     sold_count          sold/removed in last 7 days
+    sold_count_30d      sold/removed in last 30 days   (lag-shifted by 14 d)
+    sold_count_90d      sold/removed in last 90 days   (lag-shifted by 14 d)
+    absorption_rate     sold_count_30d / active_count × 100   (%, monthly)
+    months_of_supply    active_count / (sold_count_90d / 3)   (months, 3-mo avg)
     new_listings        first_seen_date == today
     avg_days_on_market  mean days since first seen
     price_drops_count   listings with ≥1 price drop in last 7 days
@@ -135,26 +139,65 @@ def _compute_scope_metrics(
         _upsert_snapshot(conn, date_str, scope_type, scope_value, "median_size_sqm", vals[len(vals) // 2])
         count += 1
 
-    # ── Sold count (last 7 days) ─────────────────────────────────────────
+    # ── Sold counts (lag-shifted by 14 d) ────────────────────────────────
     # mark_stale_as_sold() uses a 14-day threshold and does NOT update
     # last_seen_date when marking sold, so the effective detection date is
-    # last_seen_date + 14 days. We shift the window back 14 days to count
-    # properties that were detected as sold this week.
-    sold_window_end = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=14)).strftime("%Y-%m-%d")
-    sold_window_start = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=7 + 14)).strftime("%Y-%m-%d")
-    sold_row = conn.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM listings
-        WHERE status = 'sold_removed'
-          AND last_seen_date >= ? AND last_seen_date < ?
-          AND {where_clause}
-        """,
-        [sold_window_start, sold_window_end] + params,
-    ).fetchone()
-    if sold_row:
-        _upsert_snapshot(conn, date_str, scope_type, scope_value, "sold_count", sold_row[0])
+    # last_seen_date + 14 days. We shift each window back 14 days to count
+    # properties that were detected as sold within that window.
+    base = datetime.strptime(date_str, "%Y-%m-%d")
+    LAG = 14
+
+    def _sold_in_window(window_days: int) -> int | None:
+        win_end   = (base - timedelta(days=LAG)).strftime("%Y-%m-%d")
+        win_start = (base - timedelta(days=LAG + window_days)).strftime("%Y-%m-%d")
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM listings
+            WHERE status = 'sold_removed'
+              AND last_seen_date >= ? AND last_seen_date < ?
+              AND {where_clause}
+            """,
+            [win_start, win_end] + params,
+        ).fetchone()
+        return row[0] if row else None
+
+    sold_7d  = _sold_in_window(7)
+    sold_30d = _sold_in_window(30)
+    sold_90d = _sold_in_window(90)
+
+    if sold_7d is not None:
+        _upsert_snapshot(conn, date_str, scope_type, scope_value, "sold_count", sold_7d)
         count += 1
+    if sold_30d is not None:
+        _upsert_snapshot(conn, date_str, scope_type, scope_value, "sold_count_30d", sold_30d)
+        count += 1
+    if sold_90d is not None:
+        _upsert_snapshot(conn, date_str, scope_type, scope_value, "sold_count_90d", sold_90d)
+        count += 1
+
+    # Absorption rate (monthly) and months of supply (3-month avg).
+    # `row[0]` is active_count from the active-listings query above.
+    # Conventions match market_indicators.get_absorption_rate() and
+    # get_months_of_supply(lookback_months=3).
+    if row and row[0]:
+        active_count = row[0]
+        if active_count > 0 and sold_30d is not None:
+            absorption = round(sold_30d / active_count * 100, 2)
+            _upsert_snapshot(
+                conn, date_str, scope_type, scope_value,
+                "absorption_rate", absorption,
+            )
+            count += 1
+        if active_count > 0 and sold_90d and sold_90d > 0:
+            # 3-month average monthly sales rate
+            monthly_rate = sold_90d / 3.0
+            months = round(min(active_count / monthly_rate, 36.0), 1)
+            _upsert_snapshot(
+                conn, date_str, scope_type, scope_value,
+                "months_of_supply", months,
+            )
+            count += 1
 
     # ── New listings (first_seen == today) ────────────────────────────────
     new_row = conn.execute(
