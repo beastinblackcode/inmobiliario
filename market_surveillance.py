@@ -409,6 +409,62 @@ def _render_internal_kpis(indicators: dict):
                 help="Requiere datos del Portal del Notariado importados en BD."
             )
 
+    # Fourth row — absorption metrics (added April 2026 — issue #3 of roadmap)
+    col13, col14, _, _ = st.columns(4)
+
+    # 13. Absorption rate (sold last 30 days / active inventory)
+    ar = indicators.get("absorption_rate", {})
+    with col13:
+        ar_val = ar.get("current")
+        ar_change = ar.get("change")
+        if ar_val is not None:
+            # Industry thresholds:  >20 % = seller's market (hot)
+            #                        15-20 % = balanced
+            #                        <15 % = buyer's market (cold)
+            badge = "🔥" if ar_val >= 20 else ("⚖️" if ar_val >= 15 else "❄️")
+            st.metric(
+                label=f"📈 Tasa Absorción {badge}",
+                value=f"{ar_val:.1f}%",
+                delta=f"{ar_change:+.2f}pp" if ar_change is not None else None,
+                help=(f"Vendidos últimos 30 días ÷ inventario activo × 100. "
+                      f"{ar.get('sold_window', 0):,} ventas sobre "
+                      f"{ar.get('active', 0):,} activos. "
+                      f">20% = mercado caliente · <15% = mercado frío.")
+            )
+        else:
+            st.metric(
+                label="📈 Tasa Absorción",
+                value="Sin datos",
+                help="Necesita ≥ 2 semanas con ventas registradas."
+            )
+
+    # 14. Months of supply (active inventory / 3-month avg monthly sales)
+    mos = indicators.get("months_of_supply", {})
+    with col14:
+        mos_val = mos.get("current")
+        mos_change = mos.get("change")
+        if mos_val is not None:
+            # Industry thresholds:  <4 months = very hot
+            #                        4-6 = balanced
+            #                        >6 = cold
+            badge = "🔥" if mos_val < 4 else ("⚖️" if mos_val <= 6 else "❄️")
+            st.metric(
+                label=f"⏳ Meses de Stock {badge}",
+                value=f"{mos_val:.1f} meses",
+                delta=f"{mos_change:+.2f}" if mos_change is not None else None,
+                delta_color="inverse",  # more months = colder = bad
+                help=(f"Inventario activo ÷ ritmo medio de ventas mensual (3m). "
+                      f"{mos.get('active', 0):,} activos al ritmo de "
+                      f"{(mos.get('sold_window', 0) or 0) / 3:.0f} ventas/mes. "
+                      f"<4 meses = muy caliente · >6 = mercado frío.")
+            )
+        else:
+            st.metric(
+                label="⏳ Meses de Stock",
+                value="Sin datos",
+                help="Necesita ≥ 2 semanas con ventas en los últimos 3 meses."
+            )
+
 
 def _render_macro_kpis(macro: dict):
     """Render macro economic indicator KPIs."""

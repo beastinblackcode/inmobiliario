@@ -637,8 +637,8 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         "avg_gap_pct", "max_gap_district", "min_gap_district",
         # price drop ratio
         "drop_ratio", "total_active", "with_drops",
-        # rotation
-        "rate",
+        # rotation / absorption / months of supply
+        "rate", "active", "sold_window", "window_days", "lookback_months",
         # rent burden
         "monthly_income_ref", "median_rent", "severity", "by_district",
         # lanzamientos CGPJ
