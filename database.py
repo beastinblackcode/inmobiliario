@@ -578,14 +578,24 @@ def mark_as_sold(listing_ids: Set[str]) -> int:
         return 0
 
 
-def mark_stale_as_sold(days_threshold: int = 7) -> int:
+def mark_stale_as_sold(days_threshold: int = 14) -> int:
     """
     Mark listings as sold/removed using a two-tier approach:
 
-    Tier 1 (days_threshold, default 7 days):
+    Tier 1 (days_threshold, default 14 days):
         Mark as sold if not seen in N days AND their barrio has been
         successfully scraped during that window (proves the scraper
         covered that zone and the listing is genuinely gone).
+
+        Why 14 days (raised from 7 in April 2026): the scraper runs
+        every 3 days (Mon/Thu).  With a 7-day threshold, a listing
+        missed in just two consecutive scrapes (e.g. one bad page-
+        break + one rate-limit) was wrongly marked sold, producing
+        the structural ~7-day floor on `days_to_sell` reported by
+        the audit.  14 days = "missed in ~4-5 consecutive scrapes",
+        which is much more confident the listing is genuinely gone.
+        downstream consumers (compute_snapshots.py, market_indicators)
+        already assumed a 14-day lag when computing weekly windows.
 
     Tier 2 (hard_cutoff = 21 days):
         Mark as sold if not seen in 21+ days regardless of barrio
@@ -597,7 +607,7 @@ def mark_stale_as_sold(days_threshold: int = 7) -> int:
 
     Args:
         days_threshold: Days without updates before marking as sold
-                        when barrio coverage is confirmed (default: 7)
+                        when barrio coverage is confirmed (default: 14)
 
     Returns:
         Number of listings marked as sold
@@ -672,7 +682,7 @@ def mark_stale_as_sold(days_threshold: int = 7) -> int:
         return 0
 
 
-def get_stale_listings_count(days_threshold: int = 7) -> Dict:
+def get_stale_listings_count(days_threshold: int = 14) -> Dict:
     """
     Return counts of active listings that have not been seen recently.
 
@@ -730,7 +740,7 @@ def get_stale_listings_count(days_threshold: int = 7) -> Dict:
         return {"tier1": 0, "tier2": 0, "total": 0}
 
 
-def purge_stale_listings(days_threshold: int = 7, max_iterations: int = 20) -> Dict:
+def purge_stale_listings(days_threshold: int = 14, max_iterations: int = 20) -> Dict:
     """
     Run mark_stale_as_sold() in a loop until no more stale listings remain.
 
@@ -740,7 +750,7 @@ def purge_stale_listings(days_threshold: int = 7, max_iterations: int = 20) -> D
     until the job is done or max_iterations is reached (safety cap).
 
     Args:
-        days_threshold:  Days without updates before marking as sold (default 7).
+        days_threshold:  Days without updates before marking as sold (default 14).
         max_iterations:  Maximum loop iterations — prevents runaway loops.
                          Default 20 allows up to 20 × 1000 = 20 000 marks.
 

@@ -310,13 +310,13 @@ def render_admin_tab(df: pd.DataFrame) -> None:
         "Usa el botón de purga para limpiar todos de golpe."
     )
 
-    stale = get_stale_listings_count(days_threshold=7)
+    stale = get_stale_listings_count(days_threshold=14)
 
     c1, c2, c3 = st.columns(3)
     c1.metric(
-        "Tier 1 — seguros (7d + barrio cubierto)",
+        "Tier 1 — seguros (14d + barrio cubierto)",
         f"{stale['tier1']:,}",
-        help="No vistos en 7+ días Y su barrio fue scrapeado recientemente → casi seguro que han desaparecido de Idealista.",
+        help="No vistos en 14+ días Y su barrio fue scrapeado recientemente → casi seguro que han desaparecido de Idealista.",
     )
     c2.metric(
         "Tier 2 — hard cutoff (21d)",
@@ -347,7 +347,7 @@ def render_admin_tab(df: pd.DataFrame) -> None:
             key="purge_btn",
         ):
             with st.spinner("Purgando listings fantasma… puede tardar unos segundos."):
-                result = purge_stale_listings(days_threshold=7)
+                result = purge_stale_listings(days_threshold=14)
 
             if result["total_marked"] == 0:
                 st.info("ℹ️ No se encontraron listings para purgar.")
