@@ -1,6 +1,7 @@
 """
-Test script for the new 7-day sold detection logic.
-Tests that mark_stale_as_sold() only marks properties as sold after 7 days.
+Test script for the 14-day sold detection logic.
+Tests that mark_stale_as_sold() only marks properties as sold after 14 days
+(threshold raised from 7 → 14 in April 2026 — see database.py).
 """
 
 import sqlite3
@@ -35,32 +36,32 @@ def insert_test_data():
         """, ('TEST001', 'Test Property 1 - Recent', 'http://test.com/1', 300000, 
               'Centro', 'Sol', today, today, 'active'))
         
-        # Test property 2: Seen 5 days ago (should NOT be marked as sold - within 7 days)
-        date_5_days_ago = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+        # Test property 2: Seen 12 days ago (should NOT be marked as sold - within 14 days)
+        date_12_days_ago = (datetime.now() - timedelta(days=12)).strftime('%Y-%m-%d')
         cursor.execute("""
-            INSERT INTO listings 
+            INSERT INTO listings
             (listing_id, title, url, price, distrito, barrio, first_seen_date, last_seen_date, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, ('TEST002', 'Test Property 2 - 5 days old', 'http://test.com/2', 400000, 
-              'Salamanca', 'Goya', date_5_days_ago, date_5_days_ago, 'active'))
-        
-        # Test property 3: Seen exactly 7 days ago (should NOT be marked - boundary case)
-        date_7_days_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        """, ('TEST002', 'Test Property 2 - 12 days old', 'http://test.com/2', 400000,
+              'Salamanca', 'Goya', date_12_days_ago, date_12_days_ago, 'active'))
+
+        # Test property 3: Seen exactly 14 days ago (should NOT be marked - boundary case)
+        date_14_days_ago = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
         cursor.execute("""
-            INSERT INTO listings 
+            INSERT INTO listings
             (listing_id, title, url, price, distrito, barrio, first_seen_date, last_seen_date, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, ('TEST003', 'Test Property 3 - Exactly 7 days', 'http://test.com/3', 500000, 
-              'Chamberí', 'Almagro', date_7_days_ago, date_7_days_ago, 'active'))
-        
-        # Test property 4: Seen 8 days ago (SHOULD be marked as sold)
-        date_8_days_ago = (datetime.now() - timedelta(days=8)).strftime('%Y-%m-%d')
+        """, ('TEST003', 'Test Property 3 - Exactly 14 days', 'http://test.com/3', 500000,
+              'Chamberí', 'Almagro', date_14_days_ago, date_14_days_ago, 'active'))
+
+        # Test property 4: Seen 15 days ago (SHOULD be marked as sold)
+        date_15_days_ago = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
         cursor.execute("""
-            INSERT INTO listings 
+            INSERT INTO listings
             (listing_id, title, url, price, distrito, barrio, first_seen_date, last_seen_date, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, ('TEST004', 'Test Property 4 - 8 days old', 'http://test.com/4', 600000, 
-              'Retiro', 'Ibiza', date_8_days_ago, date_8_days_ago, 'active'))
+        """, ('TEST004', 'Test Property 4 - 15 days old', 'http://test.com/4', 600000,
+              'Retiro', 'Ibiza', date_15_days_ago, date_15_days_ago, 'active'))
         
         # Test property 5: Seen 30 days ago (SHOULD be marked as sold)
         date_30_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
@@ -108,7 +109,7 @@ def verify_results():
             # Determine expected status
             if listing_id == 'TEST006':
                 expected = 'sold_removed'  # Already sold
-            elif days_ago > 7:
+            elif days_ago > 14:
                 expected = 'sold_removed'  # Should be marked as sold
             else:
                 expected = 'active'  # Should still be active
@@ -129,7 +130,7 @@ def verify_results():
 def run_tests():
     """Run the complete test suite."""
     print("=" * 80)
-    print("TESTING: 7-Day Sold Detection Logic")
+    print("TESTING: 14-Day Sold Detection Logic")
     print("=" * 80)
     print()
     
@@ -150,8 +151,8 @@ def run_tests():
     print()
     
     # Run the function
-    print("4. Running mark_stale_as_sold(days_threshold=7)...")
-    marked_count = mark_stale_as_sold(days_threshold=7)
+    print("4. Running mark_stale_as_sold(days_threshold=14)...")
+    marked_count = mark_stale_as_sold(days_threshold=14)
     print(f"✓ Marked {marked_count} properties as sold")
     print()
     

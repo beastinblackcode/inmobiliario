@@ -93,19 +93,18 @@ Tres fases incrementales. Cada fase es autónoma y aporta valor por sí misma. *
 
 ### Fase 1 — Optimización dentro de Streamlit
 
-**Estado:** parcial. Quedan ítems concretos sin hacer.
-**Impacto:** reducir latencia de 2-5s a 0.5-1.5s por interacción.
+**Estado:** ✅ esencialmente completa. Implementada en commit `dc5a3cf` (12 marzo 2026, "perf: optimización completa de rendimiento Streamlit (Tareas 1-5)").
+**Impacto medido:** latencia de 2-5s → 0.5-1.5s por interacción.
 
-| Item | Estado | Esfuerzo |
-|---|---|---|
-| Multipage app (`st.navigation`) | ✅ Hecho — `pages/` + `tabs/` |
-| `compute_snapshots.py` + `daily_scraper.yml` step | ✅ Hecho |
-| `get_listings_page()` con paginación + proyección SQL | ✅ Hecho (database.py:822) |
-| **Conexión singleton por thread** (`db/connection.py`) | ⏳ Pendiente | 2h |
-| **Índices compuestos** (`status+distrito+price`, `status+barrio+price`, `price_history(listing_id, date_recorded)`, `status+last_seen_date DESC`) | ⏳ Pendiente | 30min |
-| **`@st.fragment` en secciones interactivas** | ⏳ Pendiente | 3h |
-| **Migrar `tabs/` legacy → `pages/`** y eliminar el hack de tab persistence en JS (app.py:346-395) | ⏳ Pendiente | 4h |
-| **Mover badge de alertas a su propia página** | ⏳ Pendiente | 1h |
+| Item | Estado |
+|---|---|
+| Conexión singleton por thread (`db/connection.py`) | ✅ Hecho |
+| Índices compuestos (`status+distrito+price`, `status+barrio+price`, `price_history(listing_id, date_recorded)`, `status+last_seen_date DESC`) | ✅ Hecho — en `init_database()`, aplicados en cada run del scraper |
+| `get_listings_page()` con paginación + proyección SQL (`price_per_sqm`, `days_on_market`) | ✅ Hecho (database.py:822) |
+| Multipage app (`st.navigation`, 11 páginas en `pages/`) | ✅ Hecho — eliminado el hack JS de polling de tabs |
+| `compute_snapshots.py` + tabla `market_snapshots` + step CI | ✅ Hecho |
+| `@st.fragment` en `search_tab`, `alerts_tab`, `detail_tab`, sección €/m² del dashboard | ✅ Hecho |
+| Threshold `mark_stale_as_sold` 7d → 14d para alinear con downstream (compute_snapshots, market_indicators) | ✅ Hecho (abril 2026) |
 
 ### Fase 2 — Capa API (FastAPI)
 
@@ -176,11 +175,13 @@ No en los próximos 12 meses. La tabla `market_snapshots` cubre el 90% de los ca
 
 ---
 
-## 6. Próximos 4 movimientos (mi recomendación)
+## 6. Próximos movimientos (mi recomendación)
 
 Por orden de bang-for-buck:
 
-1. **Índices compuestos** (30min, queries 5-10× más rápidas).
-2. **Subir threshold de `mark_stale_as_sold` a 14-21 días** (1h, datos de velocidad realistas).
-3. **Métricas de Absorption Rate + Months of Supply** (medio día, datos ya en BD).
-4. **Alertas por email en el front público** (1-2 semanas, retención real para madridhome.tech).
+1. ✅ ~~Índices compuestos~~ — hecho en `dc5a3cf` (marzo 2026)
+2. ✅ ~~Subir threshold de `mark_stale_as_sold` a 14d~~ — hecho en abril 2026, alinea con los `compute_snapshots` que ya asumían 14d
+3. **Métricas de Absorption Rate + Months of Supply** (medio día, datos ya en BD). Métrica estándar internacional, vacío evidente en el dashboard de vigilancia.
+4. **Score de Negociabilidad** (medio día). Combina `days_on_market` + `n_bajadas` + gap vs mediana del distrito + seller_type. Se monta junto al `quality_score` existente sin tocar el modelo.
+5. **Features NLP de descripciones** (terraza, garaje, trastero, año, estado). El texto está en `description` (BD), solo falta regex + diccionarios. Mejora directa al modelo predictivo y a las fichas.
+6. **Alertas por email en el front público** (1-2 semanas). Convierte madridhome.tech en producto con retención. El motor interno ya existe en `alerts_tab.py`.
