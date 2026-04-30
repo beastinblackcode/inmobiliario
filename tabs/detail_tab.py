@@ -17,6 +17,8 @@ from analytics import (
     calculate_distrito_stats,
     calculate_barrio_stats,
     calculate_days_on_market,
+    calculate_negotiability_score,
+    negotiability_label,
     explain_score,
     estimate_fair_price,
 )
@@ -408,6 +410,129 @@ def render_detail_tab() -> None:
 
     except Exception as e:
         st.warning(f"No se pudo calcular el score: {e}")
+
+    # ── Score de Negociabilidad ──────────────────────────────────────────────
+    # Reuses the same score_row, distrito_stats and barrio_stats computed
+    # above for the quality score — no extra queries.
+    st.markdown("---")
+    st.subheader("🤝 Score de Negociabilidad")
+    st.caption(
+        "Estima cuánto margen tienes para ofertar **por debajo** del precio "
+        "publicado. Complementa el score de calidad: una propiedad de calidad "
+        "alta y negociabilidad alta es donde se cierra la oportunidad real."
+    )
+
+    try:
+        n_score = calculate_negotiability_score(score_row, distrito_stats, barrio_stats)
+        n_badge, n_label = negotiability_label(n_score)
+
+        if n_score >= 70:
+            n_color = "#2ecc71"
+        elif n_score >= 45:
+            n_color = "#3498db"
+        elif n_score >= 20:
+            n_color = "#f39c12"
+        else:
+            n_color = "#95a5a6"
+
+        # Component breakdown (mirrors the calculate_negotiability_score weights)
+        dom = score_row.get("days_on_market", 0) or 0
+        if dom >= 120:   days_pts = 35
+        elif dom >= 90:  days_pts = 28
+        elif dom >= 60:  days_pts = 20
+        elif dom >= 30:  days_pts = 10
+        elif dom >= 14:  days_pts = 5
+        else:            days_pts = 0
+
+        nd = score_row.get("num_drops", 0) or 0
+        td = abs(score_row.get("total_drop_pct", 0) or 0)
+        drops_pts = (18 if nd >= 3 else 12 if nd == 2 else 6 if nd == 1 else 0)
+        drops_pts += (12 if td >= 15 else 8 if td >= 8 else 4 if td >= 4 else 0)
+        drops_pts = min(30, drops_pts)
+
+        gap_pct = score_row.get("vs_distrito_avg")
+        if gap_pct is None and price_sqm and listing.get("distrito") in distrito_stats:
+            avg = distrito_stats[listing["distrito"]].get("avg_price_sqm", 0)
+            gap_pct = (price_sqm / avg - 1) * 100 if avg > 0 else 0
+        gap_pct = gap_pct or 0
+        if gap_pct >= 20:   gap_pts = 20
+        elif gap_pct >= 10: gap_pts = 12
+        elif gap_pct >= 5:  gap_pts = 6
+        elif gap_pct >= 0:  gap_pts = 2
+        else:               gap_pts = 0
+
+        seller = score_row.get("seller_type", "")
+        if seller == "Particular":
+            seller_pts = 15
+        elif seller in ("Profesional", "Agencia"):
+            seller_pts = 4
+        else:
+            seller_pts = 8
+
+        n_factors = [
+            {
+                "label": "Días en mercado",
+                "description": f"{dom:.0f} días" + (
+                    " — vendedor probablemente cansado" if dom >= 90
+                    else " — todavía fresco" if dom < 30 else ""
+                ),
+                "points": days_pts, "max_points": 35,
+            },
+            {
+                "label": "Historial de bajadas",
+                "description": f"{nd} bajadas · {td:.1f}% acumulado" if nd > 0
+                              else "sin bajadas registradas",
+                "points": drops_pts, "max_points": 30,
+            },
+            {
+                "label": "Sobreprecio vs distrito",
+                "description": f"{gap_pct:+.1f}%" + (
+                    " — claramente por encima" if gap_pct >= 10
+                    else " — a precio de mercado" if gap_pct >= -5
+                    else " — ya por debajo, poco margen"
+                ),
+                "points": gap_pts, "max_points": 20,
+            },
+            {
+                "label": "Tipo de vendedor",
+                "description": (
+                    f"{seller} — más flexible" if seller == "Particular"
+                    else f"{seller} — menos flexible" if seller in ("Profesional", "Agencia")
+                    else "Desconocido"
+                ),
+                "points": seller_pts, "max_points": 15,
+            },
+        ]
+
+        nc1, nc2 = st.columns([1, 3])
+        with nc1:
+            st.markdown(
+                f"""<div style='text-align:center;background:{n_color};border-radius:12px;
+                    padding:20px;color:white;'>
+                    <div style='font-size:48px;font-weight:900;'>{n_score:.0f}</div>
+                    <div style='font-size:13px;margin-top:4px;'>{n_badge} {n_label}</div>
+                    </div>""",
+                unsafe_allow_html=True,
+            )
+        with nc2:
+            for f in n_factors:
+                pct = f["points"] / f["max_points"] if f["max_points"] > 0 else 0
+                bar_color = "#3498db" if f["points"] > 0 else "#ddd"
+                st.markdown(
+                    f"""<div style='margin-bottom:10px;'>
+                        <div style='display:flex;justify-content:space-between;font-size:13px;'>
+                          <span><b>{f['label']}</b> — {f['description']}</span>
+                          <span style='color:{bar_color};font-weight:700;'>{f['points']:.0f} / {f['max_points']}</span>
+                        </div>
+                        <div style='background:#eee;border-radius:4px;height:8px;margin-top:4px;'>
+                          <div style='background:{bar_color};width:{pct*100:.0f}%;height:8px;border-radius:4px;'></div>
+                        </div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+    except Exception as e:
+        st.warning(f"No se pudo calcular el score de negociabilidad: {e}")
 
     st.markdown("---")
 

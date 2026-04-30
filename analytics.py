@@ -343,6 +343,106 @@ def calculate_quality_score(
     return min(100.0, max(0.0, score))
 
 
+def calculate_negotiability_score(
+    row, distrito_stats: Dict, barrio_stats: Optional[Dict] = None
+) -> float:
+    """
+    Negotiability score (0-100). Higher = more room for the buyer to make
+    an offer below the asking price. Complements `quality_score`:
+
+        quality_score      → "is this a good deal vs comparables?"
+        negotiability_score → "how flexible is the seller likely to be?"
+
+    Components (weights sum to 100):
+      - Days on market           35  (longer = more seller fatigue)
+      - Price-drop history       30  (drops + cumulative magnitude)
+      - Gap above distrito median 20 (overpriced ⇒ structural margin)
+      - Seller type              15  (particulares are more flexible)
+
+    Each component is clamped at its weight, so the total never exceeds 100
+    even if individual signals stack.
+    """
+    # ── 1. Days on market (35 pts max) ────────────────────────────────────
+    dom = row.get('days_on_market', 0) or 0
+    if dom >= 120:
+        days_score = 35
+    elif dom >= 90:
+        days_score = 28
+    elif dom >= 60:
+        days_score = 20
+    elif dom >= 30:
+        days_score = 10
+    elif dom >= 14:
+        days_score = 5
+    else:
+        days_score = 0
+
+    # ── 2. Price-drop history (30 pts max) ────────────────────────────────
+    num_drops = row.get('num_drops', 0) or 0
+    total_drop_pct = abs(row.get('total_drop_pct', 0) or 0)
+
+    if num_drops >= 3:
+        drops_score = 18
+    elif num_drops == 2:
+        drops_score = 12
+    elif num_drops == 1:
+        drops_score = 6
+    else:
+        drops_score = 0
+
+    # Magnitude bonus
+    if total_drop_pct >= 15:
+        drops_score += 12
+    elif total_drop_pct >= 8:
+        drops_score += 8
+    elif total_drop_pct >= 4:
+        drops_score += 4
+
+    drops_score = min(30, drops_score)
+
+    # ── 3. Gap above distrito median (20 pts max) ─────────────────────────
+    # Only OVERPRICED listings get points here.  An already-cheap property
+    # has little structural room to negotiate down further.
+    sqm = row.get('price_per_sqm')
+    distrito = row.get('distrito')
+    gap_score = 0.0
+    if pd.notna(sqm) and distrito in distrito_stats:
+        avg = distrito_stats[distrito].get('avg_price_sqm', 0)
+        if avg > 0:
+            gap_pct = (sqm / avg - 1) * 100
+            if gap_pct >= 20:
+                gap_score = 20
+            elif gap_pct >= 10:
+                gap_score = 12
+            elif gap_pct >= 5:
+                gap_score = 6
+            elif gap_pct >= 0:
+                gap_score = 2
+
+    # ── 4. Seller type (15 pts max) ───────────────────────────────────────
+    seller = row.get('seller_type', '')
+    if seller == 'Particular':
+        seller_score = 15
+    elif seller in ('Profesional', 'Agencia'):
+        seller_score = 4
+    else:
+        seller_score = 8  # unknown / mixed → neutral
+
+    total = days_score + drops_score + gap_score + seller_score
+    return float(min(100.0, max(0.0, total)))
+
+
+def negotiability_label(score: float) -> tuple:
+    """Map a 0-100 negotiability score to (badge_emoji, label)."""
+    if score >= 70:
+        return "🎯", "Margen alto"
+    if score >= 45:
+        return "⚖️", "Margen normal"
+    if score >= 20:
+        return "🔒", "Vendedor firme"
+    return "🛡️", "Sin margen"
+
+
 def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
     """
     Rank properties by opportunity score (0-100).
@@ -421,9 +521,13 @@ def rank_opportunities(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         pass
 
-    # ── Score ─────────────────────────────────────────────────────────────────
+    # ── Scores ────────────────────────────────────────────────────────────────
     df_copy['quality_score'] = df_copy.apply(
         lambda row: calculate_quality_score(row, distrito_stats, barrio_stats, notarial_stats),
+        axis=1,
+    )
+    df_copy['negotiability_score'] = df_copy.apply(
+        lambda row: calculate_negotiability_score(row, distrito_stats, barrio_stats),
         axis=1,
     )
 
