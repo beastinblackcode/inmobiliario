@@ -20,6 +20,7 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
         rank_opportunities,
         identify_bargains,
         get_desperate_sellers_dataframe,
+        negotiability_label,
     )
 
     active_df = df[df["status"] == "active"]
@@ -64,10 +65,69 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
                     st.metric("📍 Distrito", row["distrito"])
                     st.metric("🏘️ Barrio", row["barrio"])
                     st.metric("👤 Vendedor", row["seller_type"])
-                    st.metric("🌅 Orientación", row["orientation"] if pd.notna(row["orientation"]) else "N/A")
+                    n_score = row.get("negotiability_score", 0)
+                    n_badge, n_label = negotiability_label(n_score)
+                    st.metric(
+                        f"🤝 Margen {n_badge}",
+                        f"{n_score:.0f}/100",
+                        help=f"Negociabilidad: {n_label}. "
+                             f"Combina días en mercado, bajadas, gap vs distrito y tipo de vendedor.",
+                    )
                 st.markdown(f"[🔗 Ver en Idealista]({row['url']})")
     else:
         st.warning("No hay propiedades activas para analizar.")
+
+    st.markdown("---")
+
+    # ── Top 20 con Mayor Margen de Negociación ───────────────────────────────
+    st.subheader("🤝 Top 20 con Mayor Margen de Negociación")
+    st.info(
+        "**Score de Negociabilidad (0-100):** mide cuánto margen tienes para "
+        "ofertar por debajo del precio publicado. "
+        "Días en mercado (35%) · Bajadas previas (30%) · "
+        "Sobreprecio vs distrito (20%) · Vendedor particular (15%). "
+        "Complementa el score de calidad: alta negociabilidad **+** alta calidad = oportunidad real."
+    )
+
+    if not df_ranked.empty:
+        top_neg = df_ranked.sort_values(
+            "negotiability_score", ascending=False
+        ).head(20)
+
+        neg_display = top_neg[[
+            "title", "distrito", "barrio", "price", "price_per_sqm",
+            "vs_distrito_avg", "days_on_market", "num_drops",
+            "seller_type", "negotiability_score", "quality_score", "url",
+        ]].copy()
+        neg_display.columns = [
+            "Título", "Distrito", "Barrio", "Precio", "€/m²",
+            "% vs Distrito", "Días Mercado", "Bajadas",
+            "Vendedor", "Negociabilidad", "Calidad", "Link",
+        ]
+        st.dataframe(
+            neg_display, hide_index=True, use_container_width=True, height=500,
+            column_config={
+                "Precio":         st.column_config.NumberColumn("Precio", format="€%d"),
+                "€/m²":           st.column_config.NumberColumn("€/m²", format="€%d"),
+                "% vs Distrito":  st.column_config.NumberColumn("% vs Distrito", format="%+.1f%%"),
+                "Días Mercado":   st.column_config.NumberColumn("Días", format="%d"),
+                "Bajadas":        st.column_config.NumberColumn("Bajadas", format="%d"),
+                "Negociabilidad": st.column_config.ProgressColumn(
+                    "Negociabilidad", format="%d", min_value=0, max_value=100
+                ),
+                "Calidad":        st.column_config.ProgressColumn(
+                    "Calidad", format="%d", min_value=0, max_value=100
+                ),
+                "Link":           st.column_config.LinkColumn("Idealista", display_text="🔗 Ver"),
+            },
+        )
+        st.caption(
+            "💡 La columna *Calidad* indica si el piso es objetivamente buen precio "
+            "vs comparables. La columna *Negociabilidad* indica cuánto margen "
+            "tiene el vendedor para aceptar una oferta inferior."
+        )
+    else:
+        st.info("Sin datos suficientes para calcular el ranking.")
 
     st.markdown("---")
 
