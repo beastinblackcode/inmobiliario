@@ -630,6 +630,8 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         "trend", "unit", "description",
         # affordability extras
         "monthly_payment", "annual_cost", "price_to_income",
+        "payment_to_income_pct", "reference_income_annual",
+        "reference_income_monthly", "median_price", "loan_amount", "rate_used",
         "affordable", "median_salary",
         # rental yield extras
         "avg_yield", "top_barrios",

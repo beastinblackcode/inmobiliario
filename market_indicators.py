@@ -889,13 +889,17 @@ def get_affordability_index(euribor_rate: float = None) -> Dict:
     result = {
         "name": "Índice de Asequibilidad",
         "unit": "€/mes",
-        "current": None,           # monthly payment
+        "current": None,                   # monthly payment (€/month) — kept as the primary KPI value
+        "monthly_payment": None,           # explicit alias of `current`
         "annual_cost": None,
         "median_price": None,
         "loan_amount": None,
         "rate_used": None,
-        "price_to_income": None,   # years of gross income to buy
-        "affordable": None,        # True if monthly < 33% gross monthly income
+        "reference_income_annual": REFERENCE_INCOME,
+        "reference_income_monthly": round(REFERENCE_INCOME / 12),
+        "price_to_income": None,           # YEARS of gross income to buy (price ÷ annual income)
+        "payment_to_income_pct": None,     # % of monthly gross income consumed by the mortgage
+        "affordable": None,                # True if monthly < 33 % gross monthly income
         "trend": "stable"
     }
 
@@ -958,13 +962,15 @@ def get_affordability_index(euribor_rate: float = None) -> Dict:
         monthly = loan / n  # zero-interest edge case
 
     result["current"] = round(monthly)
+    result["monthly_payment"] = round(monthly)
     result["annual_cost"] = round(monthly * 12)
 
-    # Price-to-income (gross years of income needed)
+    # Price-to-income (years of gross income needed to buy the median property)
     result["price_to_income"] = round(median_price / REFERENCE_INCOME, 1)
 
-    # Affordability threshold: monthly payment ≤ 33 % of gross monthly income
+    # Affordability: % of gross monthly income consumed by the mortgage
     gross_monthly = REFERENCE_INCOME / 12
+    result["payment_to_income_pct"] = round(monthly / gross_monthly * 100, 1)
     result["affordable"] = monthly <= gross_monthly * 0.33
 
     # Trend: compare payment threshold
