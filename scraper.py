@@ -1498,8 +1498,9 @@ def run_scraper(retry_only: bool = False):
         from nlp_analyzer import run_nlp_batch
         nlp_stats = run_nlp_batch(force_reanalyze=False)
         print(
-            f"🔍 NLP: {nlp_stats['processed']:,} nuevas descripciones analizadas, "
-            f"{nlp_stats['with_signals']:,} con señales"
+            f"🔍 NLP: {nlp_stats['processed']:,} descripciones analizadas — "
+            f"{nlp_stats['with_signals']:,} con señales · "
+            f"{nlp_stats.get('with_amenities', 0):,} con amenities"
         )
     except Exception as exc:
         print(f"⚠️  NLP analysis skipped: {exc}")

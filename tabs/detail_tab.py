@@ -324,6 +324,49 @@ def render_detail_tab() -> None:
     k9.metric("📅 Visto por primera vez", listing.get("first_seen_date", "N/A")[:10])
     k10.metric("🔄 Última actualización", listing.get("last_seen_date", "N/A")[:10])
 
+    # ── Características y entorno (NLP) ───────────────────────────────────────
+    try:
+        from nlp_analyzer import (
+            get_amenities_for_listings, extract_amenities, amenities_to_badges,
+        )
+        amenities = get_amenities_for_listings([listing["listing_id"]]).get(
+            listing["listing_id"]
+        )
+        # Fallback: compute on the fly for listings not yet in the table
+        if amenities is None and listing.get("description"):
+            amenities = extract_amenities(listing["description"])
+
+        if amenities:
+            badges = amenities_to_badges(amenities)
+            year = amenities.get("construction_year")
+            if badges or year:
+                st.markdown("**🏷️ Características detectadas en la descripción**")
+                cols = st.columns([1, 4])
+                with cols[0]:
+                    if year:
+                        st.metric("📅 Año construcción", str(year))
+                with cols[1]:
+                    if badges:
+                        # Render badges as a compact pill row
+                        st.markdown(
+                            " ".join(
+                                f"<span style='background:#1e293b;color:#e2e8f0;"
+                                f"padding:4px 10px;border-radius:14px;margin-right:6px;"
+                                f"display:inline-block;margin-bottom:6px;font-size:13px;'>"
+                                f"{b}</span>"
+                                for b in badges
+                            ),
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Sin amenities específicos detectados.")
+                st.caption(
+                    f"Detectadas {amenities['amenities_count']} características automáticamente "
+                    "del texto del anuncio (regex + diccionarios)."
+                )
+    except Exception as e:
+        st.caption(f"⚠️ Análisis de características no disponible: {e}")
+
     # ── Descripción ───────────────────────────────────────────────────────────
     if listing.get("description"):
         with st.expander("📄 Descripción del anuncio"):

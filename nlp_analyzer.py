@@ -1,24 +1,40 @@
 """
-NLP Analyzer — keyword-based signal detection for property descriptions.
+NLP Analyzer — keyword-based extraction from property descriptions.
 
-Detects 5 categories of signals from Spanish listing descriptions:
+Two parallel extractors run on the same description text:
 
-    🔴 urgency      — seller motivation / time pressure  (+15 bonus)
-    💼 direct       — direct owner, no agency fee        (+10 bonus)
-    🟡 negotiable   — price negotiable or reduced        (+10 bonus)
-    🟢 renovated    — recently renovated / move-in ready (+5 bonus)
-    🔧 needs_work   — needs reform (risk / discount opp) (+5 bonus)
+  1. SELLER SIGNALS (table: listing_signals)
 
-Each category returns matched keywords and a boolean.
-A combined nlp_bonus (0-35) is added to the opportunity score.
+       🔴 urgency      — seller motivation / time pressure  (+15 bonus)
+       💼 direct       — direct owner, no agency fee        (+10 bonus)
+       🟡 negotiable   — price negotiable or reduced        (+10 bonus)
+       🟢 renovated    — recently renovated / move-in ready (+5 bonus)
+       🔧 needs_work   — needs reform (risk / discount opp) (+5 bonus)
+
+     Used by the opportunity-scoring pipeline.
+
+  2. PHYSICAL AMENITIES (table: listing_amenities)
+
+       Booleans:        has_terraza, has_balcon, has_garaje, has_trastero,
+                        has_piscina, has_ascensor, has_portero,
+                        has_aire_acondicionado, has_calefaccion,
+                        has_armarios_empotrados
+       Proximity:       near_metro, near_parque, near_colegio, near_hospital
+       Year (nullable): construction_year   (1800-2030)
+
+     Negative-mention support for the most-often-negated amenities
+     (`sin ascensor`, `sin garaje`, `no dispone de calefacción`, …) so
+     that "sin ascensor" returns has_ascensor = False, not True.
+
+     Used by detail_tab and (later) the predictive model as features.
 
 Usage:
-    from nlp_analyzer import analyze_description, run_nlp_batch
+    from nlp_analyzer import analyze_description, extract_amenities, run_nlp_batch
 
-    signals = analyze_description("Venta urgente, propietario directo, precio negociable")
-    # → { "urgency": True, "direct": True, "negotiable": True, ... , "nlp_bonus": 35 }
-
-    run_nlp_batch()   # processes all listings missing NLP signals in DB
+    signals   = analyze_description("Venta urgente, propietario directo")
+    amenities = extract_amenities("Piso reformado con terraza y plaza de garaje")
+    run_nlp_batch()        # both signals AND amenities for missing listings
+    run_nlp_batch(force_reanalyze=True)   # re-run on the whole table
 """
 
 import re
@@ -116,6 +132,148 @@ CATEGORY_BONUS = {
 }
 
 
+# ── Amenity dictionaries ──────────────────────────────────────────────────────
+# Each amenity has:
+#   pos:  positive patterns — match means "has it"
+#   neg:  negative patterns (optional) — match means "explicitly does not have it",
+#         and overrides any positive match.
+#
+# Ordered loosely by how common explicit negation is in Spanish listings.
+
+AMENITIES: Dict[str, Dict[str, List[str]]] = {
+    # ── Physical features ──────────────────────────────────────────────────
+    "has_terraza": {
+        "pos": [
+            r"\bterrazas?\b",
+            r"\bterraza\s+de\s+\d+",
+        ],
+        "neg": [r"\bsin\s+terrazas?\b"],
+    },
+    "has_balcon": {
+        "pos": [r"\bbalc[oó]n(es)?\b"],
+        "neg": [r"\bsin\s+balc[oó]n\b"],
+    },
+    "has_garaje": {
+        "pos": [
+            r"\bgaraje\b",
+            r"\bplaza\s+de\s+(garaje|aparcamiento|parking)\b",
+            r"\bparking\b",
+            r"\bcochera\b",
+        ],
+        "neg": [
+            r"\bsin\s+garaje\b",
+            r"\bno\s+(tiene|dispone\s+de|incluye|hay)\s+garaje\b",
+            r"\bsin\s+plaza\s+de\s+(garaje|aparcamiento)\b",
+        ],
+    },
+    "has_trastero": {
+        "pos": [r"\btrastero\b"],
+        "neg": [r"\bsin\s+trastero\b"],
+    },
+    "has_piscina": {
+        "pos": [r"\bpiscinas?\b"],
+        "neg": [r"\bsin\s+piscina\b"],
+    },
+    "has_ascensor": {
+        "pos": [r"\bascensor(es)?\b", r"\bcon\s+ascensor\b"],
+        "neg": [
+            r"\bsin\s+ascensor\b",
+            r"\bno\s+(tiene|dispone\s+de|cuenta\s+con|hay)\s+ascensor\b",
+        ],
+    },
+    "has_portero": {
+        "pos": [r"\bportero\s+autom[aá]tico\b", r"\bportero\b", r"\bportería\b", r"\bconserje\b"],
+        "neg": [r"\bsin\s+portero\b"],
+    },
+    "has_aire_acondicionado": {
+        "pos": [
+            r"\baire\s+acondicionado\b",
+            r"\bclimatizaci[oó]n\b",
+            r"\bbomba\s+de\s+calor\b",
+        ],
+        "neg": [r"\bsin\s+aire\s+acondicionado\b"],
+    },
+    "has_calefaccion": {
+        "pos": [
+            r"\bcalefacci[oó]n\b",
+            r"\bcaldera\s+de\s+gas\b",
+            r"\bsuelo\s+radiante\b",
+        ],
+        "neg": [
+            r"\bsin\s+calefacci[oó]n\b",
+            r"\bno\s+(tiene|dispone\s+de)\s+calefacci[oó]n\b",
+        ],
+    },
+    "has_armarios_empotrados": {
+        "pos": [r"\barmarios?\s+empotrad[oa]s?\b"],
+        "neg": [],
+    },
+    # ── Proximity (must be specific enough to avoid false positives) ───────
+    "near_metro": {
+        "pos": [
+            r"\b(estaci[oó]n|parada)\s+de\s+metro\b",
+            r"\bmetro\s+(L\d|línea\s+\d+)\b",
+            r"\b(cerca|junto|próxim[oa]|al\s+lado)\s+(de|del|al)\s+metro\b",
+            r"\bmetro\s+(cercan[oa]|próxim[oa])\b",
+            r"\ba\s+\d+\s+min(uto)?s?\s+(del|en)\s+metro\b",
+        ],
+        "neg": [],
+    },
+    "near_parque": {
+        "pos": [
+            r"\b(parque\s+de(l)?)\s+\w+",  # e.g. "parque del Retiro"
+            r"\b(junto|cerca|próxim[oa]|frente|al\s+lado)\s+(de|del|al)\s+parque\b",
+            r"\bvistas?\s+al\s+parque\b",
+            r"\bparques?\s+cercanos?\b",
+        ],
+        "neg": [],
+    },
+    "near_colegio": {
+        "pos": [
+            r"\bcolegios?\s+(cercanos?|próxim[oa]s?|al\s+lado)\b",
+            r"\b(cerca|junto|próxim[oa])\s+(de|al|a)\s+colegios?\b",
+            r"\bzona\s+de\s+colegios?\b",
+        ],
+        "neg": [],
+    },
+    "near_hospital": {
+        "pos": [
+            r"\b(cerca|junto|próxim[oa])\s+(de|del|al)\s+hospital\b",
+            r"\bhospital\s+(cercano|próxim[oa])\b",
+        ],
+        "neg": [],
+    },
+}
+
+
+# Construction year — accept several common phrasings.  Validate the
+# captured year is in [1800, 2030] (Madrid's oldest residential buildings
+# are mid-19th century; everything earlier is almost certainly an OCR
+# artefact or a postal code mistakenly captured).
+YEAR_PATTERNS = [
+    re.compile(
+        r"\b(?:construid[oa]|edificad[oa]|levantad[oa])\s+(?:en\s+(?:el\s+)?(?:a[ñn]o\s+)?)?(\d{4})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:año|fecha)\s+(?:de\s+)?construcci[oó]n\s*[:\-]?\s*(\d{4})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bedificio\s+(?:del?\s+)?(?:a[ñn]o\s+)?(\d{4})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bvivienda\s+(?:del?\s+)?(?:a[ñn]o\s+)?(\d{4})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bconstrucci[oó]n\s*[:\-]?\s*(\d{4})\b",
+        re.IGNORECASE,
+    ),
+]
+
+
 # ── Core analysis ──────────────────────────────────────────────────────────────
 
 def analyze_description(text: Optional[str]) -> Dict:
@@ -173,6 +331,77 @@ def signals_to_badges(signals: Dict) -> str:
     return "  ·  ".join(badges)
 
 
+# ── Amenity extraction ────────────────────────────────────────────────────────
+
+def extract_amenities(text: Optional[str]) -> Dict:
+    """
+    Extract physical amenities, proximity flags and construction year from
+    a Spanish listing description.
+
+    Returns a dict of:
+      - 14 boolean flags  (has_*, near_*)
+      - construction_year:  int | None  (1800-2030)
+      - amenities_count:    int — how many of the boolean flags are True
+    """
+    result = {name: False for name in AMENITIES}
+    result["construction_year"] = None
+    result["amenities_count"] = 0
+
+    if not text or not isinstance(text, str):
+        return result
+
+    text_lower = text.lower()
+
+    for name, patterns in AMENITIES.items():
+        # Negative patterns win — explicit "sin X" or "no tiene X" overrides.
+        if any(re.search(p, text_lower) for p in patterns.get("neg", [])):
+            result[name] = False
+            continue
+        result[name] = any(re.search(p, text_lower) for p in patterns["pos"])
+
+    # Construction year — first valid match wins
+    for pat in YEAR_PATTERNS:
+        m = pat.search(text)
+        if m:
+            try:
+                year = int(m.group(1))
+                if 1800 <= year <= 2030:
+                    result["construction_year"] = year
+                    break
+            except (ValueError, IndexError):
+                pass
+
+    result["amenities_count"] = sum(
+        1 for k, v in result.items() if k.startswith(("has_", "near_")) and v
+    )
+
+    return result
+
+
+# Pretty-display helpers
+_AMENITY_LABELS = [
+    ("has_terraza",            "🌅 Terraza"),
+    ("has_balcon",             "🪟 Balcón"),
+    ("has_garaje",             "🚗 Garaje"),
+    ("has_trastero",           "📦 Trastero"),
+    ("has_piscina",            "🏊 Piscina"),
+    ("has_ascensor",           "🛗 Ascensor"),
+    ("has_portero",            "🛎️ Portero"),
+    ("has_aire_acondicionado", "❄️ A/C"),
+    ("has_calefaccion",        "🔥 Calefacción"),
+    ("has_armarios_empotrados","🚪 Armarios empotrados"),
+    ("near_metro",             "🚇 Metro cerca"),
+    ("near_parque",            "🌳 Parque cerca"),
+    ("near_colegio",           "🏫 Colegios cerca"),
+    ("near_hospital",          "🏥 Hospital cerca"),
+]
+
+
+def amenities_to_badges(amenities: Dict) -> List[str]:
+    """Return a list of emoji+label strings ready to render as Streamlit pills."""
+    return [label for key, label in _AMENITY_LABELS if amenities.get(key)]
+
+
 # ── Database storage ───────────────────────────────────────────────────────────
 
 def _get_connection():
@@ -199,6 +428,45 @@ def init_signals_table():
         """)
         conn.commit()
     print("✓ listing_signals table ready")
+
+
+def init_amenities_table():
+    """Create listing_amenities table if it doesn't exist."""
+    with _get_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS listing_amenities (
+                listing_id              TEXT PRIMARY KEY,
+                has_terraza             INTEGER NOT NULL DEFAULT 0,
+                has_balcon              INTEGER NOT NULL DEFAULT 0,
+                has_garaje              INTEGER NOT NULL DEFAULT 0,
+                has_trastero            INTEGER NOT NULL DEFAULT 0,
+                has_piscina             INTEGER NOT NULL DEFAULT 0,
+                has_ascensor            INTEGER NOT NULL DEFAULT 0,
+                has_portero             INTEGER NOT NULL DEFAULT 0,
+                has_aire_acondicionado  INTEGER NOT NULL DEFAULT 0,
+                has_calefaccion         INTEGER NOT NULL DEFAULT 0,
+                has_armarios_empotrados INTEGER NOT NULL DEFAULT 0,
+                near_metro              INTEGER NOT NULL DEFAULT 0,
+                near_parque             INTEGER NOT NULL DEFAULT 0,
+                near_colegio            INTEGER NOT NULL DEFAULT 0,
+                near_hospital           INTEGER NOT NULL DEFAULT 0,
+                construction_year       INTEGER,
+                amenities_count         INTEGER NOT NULL DEFAULT 0,
+                analyzed_at             TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """)
+        # Useful for "find me listings with garage AND elevator"-type queries
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_amenities_count
+            ON listing_amenities(amenities_count DESC)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_amenities_year
+            ON listing_amenities(construction_year)
+            WHERE construction_year IS NOT NULL
+        """)
+        conn.commit()
+    print("✓ listing_amenities table ready")
 
 
 def upsert_signals(listing_id: str, signals: Dict) -> None:
@@ -261,20 +529,74 @@ def get_signals_for_listings(listing_ids: List[str]) -> Dict[str, Dict]:
     return result
 
 
+_AMENITY_BOOL_KEYS = [name for name in AMENITIES]
+
+
+def upsert_amenities(listing_id: str, amenities: Dict) -> None:
+    """Insert or replace amenity flags for a listing."""
+    cols = _AMENITY_BOOL_KEYS + ["construction_year", "amenities_count"]
+    values = [int(amenities.get(k, False)) for k in _AMENITY_BOOL_KEYS]
+    values += [amenities.get("construction_year"), amenities.get("amenities_count", 0)]
+
+    set_clause = ", ".join(f"{c} = excluded.{c}" for c in cols)
+    placeholders = ", ".join("?" * (len(cols) + 1))  # +1 for listing_id
+
+    with _get_connection() as conn:
+        conn.execute(f"""
+            INSERT INTO listing_amenities
+                (listing_id, {", ".join(cols)}, analyzed_at)
+            VALUES ({placeholders}, datetime('now'))
+            ON CONFLICT(listing_id) DO UPDATE SET
+                {set_clause},
+                analyzed_at = datetime('now')
+        """, (listing_id, *values))
+        conn.commit()
+
+
+def get_amenities_for_listings(listing_ids: List[str]) -> Dict[str, Dict]:
+    """Return amenity dict keyed by listing_id for a list of IDs."""
+    if not listing_ids:
+        return {}
+    placeholders = ",".join("?" * len(listing_ids))
+    cols = _AMENITY_BOOL_KEYS + ["construction_year", "amenities_count"]
+    select_cols = "listing_id, " + ", ".join(cols)
+    with _get_connection() as conn:
+        rows = conn.execute(f"""
+            SELECT {select_cols}
+            FROM listing_amenities
+            WHERE listing_id IN ({placeholders})
+        """, tuple(listing_ids)).fetchall()
+
+    result = {}
+    for row in rows:
+        d = {k: bool(row[k]) for k in _AMENITY_BOOL_KEYS}
+        d["construction_year"] = row["construction_year"]
+        d["amenities_count"] = row["amenities_count"]
+        result[row["listing_id"]] = d
+    return result
+
+
 # ── Batch processing ───────────────────────────────────────────────────────────
 
 def run_nlp_batch(force_reanalyze: bool = False, batch_size: int = 500) -> Dict:
     """
-    Analyze all listings with descriptions that haven't been processed yet.
+    Analyze all listings with descriptions that haven't been processed yet,
+    populating BOTH listing_signals (seller signals) and listing_amenities
+    (physical features + proximity + construction year) in a single pass.
+
+    A listing is considered "to process" if it lacks a row in EITHER table —
+    so adding amenities later automatically picks up listings that already
+    have signals from a previous run.
 
     Args:
         force_reanalyze: If True, reprocess all listings (even already analyzed).
         batch_size:      Number of listings to process per DB round-trip.
 
     Returns:
-        { "processed": int, "with_signals": int, "skipped": int }
+        { processed, with_signals, with_amenities, skipped }
     """
     init_signals_table()
+    init_amenities_table()
 
     with _get_connection() as conn:
         if force_reanalyze:
@@ -283,37 +605,54 @@ def run_nlp_batch(force_reanalyze: bool = False, batch_size: int = 500) -> Dict:
                 WHERE description IS NOT NULL AND description != ''
             """).fetchall()
         else:
+            # Pick up any listing missing EITHER signals OR amenities — this
+            # is what lets a fresh deployment with the new amenities table
+            # backfill cleanly without --force on listings already in
+            # listing_signals.
             rows = conn.execute("""
                 SELECT l.listing_id, l.description
                 FROM listings l
-                LEFT JOIN listing_signals s ON s.listing_id = l.listing_id
+                LEFT JOIN listing_signals  s ON s.listing_id = l.listing_id
+                LEFT JOIN listing_amenities a ON a.listing_id = l.listing_id
                 WHERE l.description IS NOT NULL
                   AND l.description != ''
-                  AND s.listing_id IS NULL
+                  AND (s.listing_id IS NULL OR a.listing_id IS NULL)
             """).fetchall()
 
     if not rows:
         print("✓ No new descriptions to analyze")
-        return {"processed": 0, "with_signals": 0, "skipped": 0}
+        return {"processed": 0, "with_signals": 0, "with_amenities": 0, "skipped": 0}
 
-    print(f"🔍 Analyzing {len(rows):,} descriptions...")
+    print(f"🔍 Analyzing {len(rows):,} descriptions (signals + amenities)...")
     processed = 0
     with_signals = 0
+    with_amenities = 0
 
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
         for row in batch:
-            signals = analyze_description(row["description"])
+            desc = row["description"]
+            signals   = analyze_description(desc)
+            amenities = extract_amenities(desc)
             upsert_signals(row["listing_id"], signals)
+            upsert_amenities(row["listing_id"], amenities)
             processed += 1
             if signals["signal_count"] > 0:
                 with_signals += 1
+            if amenities["amenities_count"] > 0 or amenities["construction_year"]:
+                with_amenities += 1
 
         pct = min(100, round((i + len(batch)) / len(rows) * 100))
         print(f"  [{pct:>3}%] {i + len(batch):,}/{len(rows):,} procesados", end="\r")
 
-    print(f"\n✅ NLP completo: {processed:,} analizados, {with_signals:,} con señales")
-    return {"processed": processed, "with_signals": with_signals, "skipped": 0}
+    print(f"\n✅ NLP completo: {processed:,} analizados — "
+          f"{with_signals:,} con señales · {with_amenities:,} con amenities")
+    return {
+        "processed":      processed,
+        "with_signals":   with_signals,
+        "with_amenities": with_amenities,
+        "skipped":        0,
+    }
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
