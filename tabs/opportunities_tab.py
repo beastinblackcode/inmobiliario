@@ -23,6 +23,17 @@ def _quality_badge(score: float) -> tuple:
     return "🟠", "Regular"
 
 
+def _urgency_badge(score: float) -> tuple:
+    """Return (emoji, label) for a 0-100 urgency / negotiability score."""
+    if score >= 80:
+        return "🔥", "Urgente"
+    if score >= 60:
+        return "⚡", "Alto"
+    if score >= 40:
+        return "🟡", "Medio"
+    return "⚪", "Bajo"
+
+
 def _render_opportunity_expander(row) -> None:
     """Render one ranked-opportunity row as a Streamlit expander.
 
@@ -75,6 +86,99 @@ def _render_opportunity_expander(row) -> None:
                 ),
             )
         st.markdown(f"[🔗 Ver en Idealista]({row['url']})")
+
+
+def _render_negotiability_expander(row) -> None:
+    """Render one row from df_ranked as a negotiability-focused expander."""
+    from analytics import negotiability_label  # local import: avoids cycle
+
+    n_score = row.get("negotiability_score", 0)
+    q_score = row.get("quality_score", 0)
+    n_badge, n_label = _urgency_badge(n_score)
+    q_badge, q_label = _quality_badge(q_score)
+    title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
+
+    with st.expander(f"{n_badge} **{n_score:.0f}/100** ({n_label}) — {title_preview}"):
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            st.metric("💰 Precio", f"€{row['price']:,}")
+            st.metric(
+                "💵 €/m²",
+                f"€{row['price_per_sqm']:,.0f}" if pd.notna(row["price_per_sqm"]) else "N/A",
+            )
+            st.metric(
+                "⏱️ Días en mercado",
+                f"{row['days_on_market']:.0f}" if pd.notna(row["days_on_market"]) else "N/A",
+            )
+        with rc2:
+            st.metric(
+                "📉 Bajadas",
+                int(row["num_drops"]) if pd.notna(row["num_drops"]) else 0,
+            )
+            st.metric(
+                "📊 Gap vs Distrito",
+                f"{row['vs_distrito_avg']:+.1f}%" if pd.notna(row["vs_distrito_avg"]) else "N/A",
+            )
+            st.metric("👤 Vendedor", row["seller_type"])
+        with rc3:
+            st.metric(
+                f"{q_badge} Calidad",
+                f"{q_score:.0f}/100",
+                help=f"Score de calidad: {q_label}. Un score alto de negociabilidad junto a calidad alta = oportunidad real.",
+            )
+            st.metric(
+                "📐 m²",
+                f"{row['size_sqm']:.0f}" if pd.notna(row["size_sqm"]) else "N/A",
+            )
+            st.metric(
+                "🛏️ Hab.",
+                int(row["rooms"]) if pd.notna(row["rooms"]) else "N/A",
+            )
+        st.markdown(f"[🔗 Ver en Idealista]({row['url']})")
+
+
+def _render_desperate_expander(row) -> None:
+    """Render one desperate-seller row as a Streamlit expander."""
+    score = row.get("urgency_score", 0)
+    badge, label = _urgency_badge(score)
+    title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
+    num_drops = int(row["num_drops"]) if pd.notna(row.get("num_drops")) else 0
+
+    with st.expander(
+        f"{badge} **{score:.0f}/100** ({label}) — {title_preview} "
+        f"<span style='color:#ef4444;font-size:13px;'>▼{num_drops} bajadas</span>",
+        expanded=False,
+    ):
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            st.metric("💰 Precio Actual", f"€{row['current_price']:,}")
+            st.metric("🏷️ Precio Inicial", f"€{row['initial_price']:,}")
+        with rc2:
+            st.metric(
+                "📉 Bajada (€)",
+                f"−€{row['total_drop']:,.0f}" if pd.notna(row.get("total_drop")) else "N/A",
+            )
+            st.metric(
+                "📉 Bajada (%)",
+                f"−{row['total_drop_pct']:.1f}%" if pd.notna(row.get("total_drop_pct")) else "N/A",
+            )
+            st.metric("🔁 Nº Bajadas", num_drops)
+        with rc3:
+            st.metric(
+                "💵 €/m² actual",
+                f"€{row['current_price_sqm']:,.0f}" if pd.notna(row.get("current_price_sqm")) else "N/A",
+            )
+            st.metric(
+                "📐 m²",
+                f"{row['size_sqm']:.0f}" if pd.notna(row.get("size_sqm")) else "N/A",
+            )
+            st.metric(
+                "🛏️ Hab.",
+                int(row["rooms"]) if pd.notna(row.get("rooms")) else "N/A",
+            )
+        url = row.get("url", "")
+        if url:
+            st.markdown(f"[🔗 Ver en Idealista]({url})")
 
 
 def render_opportunities_tab(df: pd.DataFrame) -> None:
@@ -164,8 +268,8 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
 
     st.markdown("---")
 
-    # ── Top 20 con Mayor Margen de Negociación ───────────────────────────────
-    st.subheader("🤝 Top 20 con Mayor Margen de Negociación")
+    # ── Mayor Margen de Negociación por Distrito ─────────────────────────────
+    st.subheader("🤝 Mayor Margen de Negociación por Distrito")
     st.info(
         "**Score de Negociabilidad (0-100):** mide cuánto margen tienes para "
         "ofertar por debajo del precio publicado. "
@@ -175,41 +279,61 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
     )
 
     if not df_ranked.empty:
-        top_neg = df_ranked.sort_values(
-            "negotiability_score", ascending=False
-        ).head(20)
+        neg_ctl1, neg_ctl2 = st.columns([1, 1])
+        with neg_ctl1:
+            neg_per_distrito = st.slider(
+                "Top por distrito",
+                min_value=1, max_value=10, value=3, step=1,
+                key="neg_topN_per_distrito",
+                help="Cuántas propiedades mostrar por distrito.",
+            )
+        with neg_ctl2:
+            min_neg_score = st.slider(
+                "Negociabilidad mínima",
+                min_value=0, max_value=100, value=0, step=5,
+                key="neg_min_score",
+                help="Filtra pisos con score de negociabilidad inferior al umbral.",
+            )
 
-        neg_display = top_neg[[
-            "title", "distrito", "barrio", "price", "price_per_sqm",
-            "vs_distrito_avg", "days_on_market", "num_drops",
-            "seller_type", "negotiability_score", "quality_score", "url",
-        ]].copy()
-        neg_display.columns = [
-            "Título", "Distrito", "Barrio", "Precio", "€/m²",
-            "% vs Distrito", "Días Mercado", "Bajadas",
-            "Vendedor", "Negociabilidad", "Calidad", "Link",
-        ]
-        st.dataframe(
-            neg_display, hide_index=True, use_container_width=True, height=500,
-            column_config={
-                "Precio":         st.column_config.NumberColumn("Precio", format="€%d"),
-                "€/m²":           st.column_config.NumberColumn("€/m²", format="€%d"),
-                "% vs Distrito":  st.column_config.NumberColumn("% vs Distrito", format="%+.1f%%"),
-                "Días Mercado":   st.column_config.NumberColumn("Días", format="%d"),
-                "Bajadas":        st.column_config.NumberColumn("Bajadas", format="%d"),
-                "Negociabilidad": st.column_config.ProgressColumn(
-                    "Negociabilidad", format="%d", min_value=0, max_value=100
-                ),
-                "Calidad":        st.column_config.ProgressColumn(
-                    "Calidad", format="%d", min_value=0, max_value=100
-                ),
-                "Link":           st.column_config.LinkColumn("Idealista", display_text="🔗 Ver"),
-            },
+        neg_sorted = df_ranked.sort_values("negotiability_score", ascending=False)
+        neg_grouped = (
+            neg_sorted[neg_sorted["negotiability_score"] >= min_neg_score]
+            .groupby("distrito", sort=False, dropna=True)
+            .head(neg_per_distrito)
         )
+
+        if neg_grouped.empty:
+            st.warning(f"Ningún distrito tiene pisos con negociabilidad ≥ {min_neg_score}.")
+        else:
+            neg_distrito_stats = (
+                neg_grouped.groupby("distrito")["negotiability_score"]
+                .agg(best="max", media="mean", count="count")
+                .sort_values(by=["best", "count"], ascending=[False, False])
+            )
+            neg_total = int(neg_distrito_stats["count"].sum())
+            st.caption(
+                f"🤝 {len(neg_distrito_stats)} distritos · {neg_total} propiedades en total"
+            )
+
+            for distrito, stats in neg_distrito_stats.iterrows():
+                d_rows = neg_grouped[neg_grouped["distrito"] == distrito]
+                st.markdown(
+                    f"#### 📍 {distrito} "
+                    f"<span style='color:#94a3b8;font-size:14px;font-weight:400;'>"
+                    f"· {int(stats['count'])} pisos "
+                    f"· mejor {stats['best']:.0f}/100 "
+                    f"· media {stats['media']:.0f}/100"
+                    f"</span>",
+                    unsafe_allow_html=True,
+                )
+                for _, row in d_rows.iterrows():
+                    _render_negotiability_expander(row)
+                st.write("")  # spacer
+
         st.caption(
-            "💡 La columna *Calidad* indica si el piso es objetivamente buen precio "
-            "vs comparables. La columna *Negociabilidad* indica cuánto margen "
-            "tiene el vendedor para aceptar una oferta inferior."
+            "💡 *Negociabilidad* = cuánto margen tiene el vendedor. "
+            "*Calidad* = si es objetivamente buen precio vs comparables. "
+            "El combo de ambos altos es la oportunidad real."
         )
     else:
         st.info("Sin datos suficientes para calcular el ranking.")
@@ -263,14 +387,21 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
     st.markdown("---")
 
     # ── Vendedores Desesperados ───────────────────────────────────────────────
-    st.subheader("🔥 Vendedores Desesperados (Múltiples Bajadas)")
+    st.subheader("🔥 Vendedores Desesperados por Distrito")
     st.caption("Propiedades con varias bajadas de precio acumuladas — máximo margen de negociación.")
 
-    col1, col2 = st.columns(2)
-    with col1:
+    desp_ctl1, desp_ctl2, desp_ctl3 = st.columns(3)
+    with desp_ctl1:
         min_drops_filter = st.slider("Mínimo de bajadas", 2, 5, 2, 1, key="opp_min_drops")
-    with col2:
+    with desp_ctl2:
         min_total_drop = st.slider("Bajada total mínima (%)", 5.0, 30.0, 10.0, 5.0, key="opp_min_total")
+    with desp_ctl3:
+        desp_per_distrito = st.slider(
+            "Top por distrito",
+            min_value=1, max_value=10, value=3, step=1,
+            key="desp_topN_per_distrito",
+            help="Cuántas propiedades mostrar por distrito.",
+        )
 
     desperate_df = get_desperate_sellers_dataframe(
         min_drops=min_drops_filter, min_total_drop_pct=min_total_drop
@@ -279,30 +410,42 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
         desperate_df = desperate_df[desperate_df["current_price"] < 500_000]
 
     if not desperate_df.empty:
-        st.success(f"✅ {len(desperate_df)} propiedades con múltiples bajadas")
-
-        disp_df = desperate_df[[
-            "title", "distrito", "barrio", "initial_price", "current_price",
-            "total_drop", "total_drop_pct", "num_drops", "urgency_score", "rooms", "size_sqm",
-        ]].head(20).copy()
-        disp_df.columns = [
-            "Título", "Distrito", "Barrio", "Precio Inicial", "Precio Actual",
-            "Bajada (€)", "Bajada (%)", "Nº Bajadas", "Score Urgencia", "Hab.", "m²",
-        ]
-        st.dataframe(
-            disp_df, hide_index=True, use_container_width=True, height=500,
-            column_config={
-                "Precio Inicial":  st.column_config.NumberColumn("Precio Inicial", format="€%d"),
-                "Precio Actual":   st.column_config.NumberColumn("Precio Actual", format="€%d"),
-                "Bajada (€)":      st.column_config.NumberColumn("Bajada (€)", format="€%d"),
-                "Bajada (%)":      st.column_config.NumberColumn("Bajada (%)", format="%.1f%%"),
-                "Score Urgencia":  st.column_config.ProgressColumn("Score Urgencia", format="%d", min_value=0, max_value=100),
-                "m²":              st.column_config.NumberColumn("m²", format="%d m²"),
-            },
+        # Group by distrito, top N per distrito ordered by urgency_score
+        desp_grouped = (
+            desperate_df  # already sorted by urgency_score DESC from analytics
+            .groupby("distrito", sort=False, dropna=True)
+            .head(desp_per_distrito)
         )
+
+        desp_distrito_stats = (
+            desp_grouped.groupby("distrito")["urgency_score"]
+            .agg(best="max", media="mean", count="count")
+            .sort_values(by=["best", "count"], ascending=[False, False])
+        )
+        desp_total = int(desp_distrito_stats["count"].sum())
+        st.success(
+            f"🔥 {len(desperate_df)} propiedades con múltiples bajadas "
+            f"· mostrando {desp_total} en {len(desp_distrito_stats)} distritos"
+        )
+
+        for distrito, stats in desp_distrito_stats.iterrows():
+            d_rows = desp_grouped[desp_grouped["distrito"] == distrito]
+            st.markdown(
+                f"#### 📍 {distrito} "
+                f"<span style='color:#94a3b8;font-size:14px;font-weight:400;'>"
+                f"· {int(stats['count'])} pisos "
+                f"· mayor urgencia {stats['best']:.0f}/100 "
+                f"· media {stats['media']:.0f}/100"
+                f"</span>",
+                unsafe_allow_html=True,
+            )
+            for _, row in d_rows.iterrows():
+                _render_desperate_expander(row)
+            st.write("")  # spacer
+
         csv = desperate_df.to_csv(index=False)
         st.download_button(
-            "📥 Descargar CSV", data=csv,
+            "📥 Descargar CSV completo", data=csv,
             file_name=f"vendedores_desesperados_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv",
         )
