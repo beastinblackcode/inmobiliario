@@ -12,6 +12,71 @@ from datetime import datetime
 from data_utils import load_data
 
 
+def _quality_badge(score: float) -> tuple:
+    """Return (emoji, label) for a 0-100 quality score."""
+    if score >= 80:
+        return "🟢", "Excelente"
+    if score >= 70:
+        return "🔵", "Muy Bueno"
+    if score >= 60:
+        return "🟡", "Bueno"
+    return "🟠", "Regular"
+
+
+def _render_opportunity_expander(row) -> None:
+    """Render one ranked-opportunity row as a Streamlit expander.
+
+    Extracted from the Top-N section so the same layout can be reused
+    inside the per-distrito grouping without code duplication.
+    """
+    from analytics import negotiability_label   # local import: avoids cycle
+
+    score = row["quality_score"]
+    badge, label = _quality_badge(score)
+    title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
+
+    with st.expander(f"{badge} **{score:.0f}/100** ({label}) — {title_preview}"):
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            st.metric("💰 Precio", f"€{row['price']:,}")
+            st.metric(
+                "📐 Tamaño",
+                f"{row['size_sqm']:.0f} m²" if pd.notna(row["size_sqm"]) else "N/A",
+            )
+            st.metric(
+                "🛏️ Habitaciones",
+                int(row["rooms"]) if pd.notna(row["rooms"]) else "N/A",
+            )
+        with rc2:
+            st.metric(
+                "💵 €/m²",
+                f"€{row['price_per_sqm']:,.0f}" if pd.notna(row["price_per_sqm"]) else "N/A",
+            )
+            st.metric(
+                "📊 vs Distrito",
+                f"{row['vs_distrito_avg']:+.1f}%" if pd.notna(row["vs_distrito_avg"]) else "N/A",
+            )
+            st.metric(
+                "⏱️ Días en mercado",
+                f"{row['days_on_market']:.0f}" if pd.notna(row["days_on_market"]) else "N/A",
+            )
+        with rc3:
+            st.metric("📍 Distrito", row["distrito"])
+            st.metric("🏘️ Barrio", row["barrio"])
+            st.metric("👤 Vendedor", row["seller_type"])
+            n_score = row.get("negotiability_score", 0)
+            n_badge, n_label = negotiability_label(n_score)
+            st.metric(
+                f"🤝 Margen {n_badge}",
+                f"{n_score:.0f}/100",
+                help=(
+                    f"Negociabilidad: {n_label}. "
+                    "Combina días en mercado, bajadas, gap vs distrito y tipo de vendedor."
+                ),
+            )
+        st.markdown(f"[🔗 Ver en Idealista]({row['url']})")
+
+
 def render_opportunities_tab(df: pd.DataFrame) -> None:
     st.header("🎯 Oportunidades")
     st.markdown("Propiedades con mayor potencial de negociación o mejor relación calidad-precio.")
@@ -25,8 +90,8 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
 
     active_df = df[df["status"] == "active"]
 
-    # ── Top 20 Mejores Oportunidades ──────────────────────────────────────────
-    st.subheader("🏆 Top 20 Mejores Oportunidades (Score Calidad-Precio)")
+    # ── Mejores Oportunidades por Distrito ────────────────────────────────────
+    st.subheader("🏆 Mejores Oportunidades (Score Calidad-Precio)")
     st.info(
         "**Score de Oportunidad (0-100):** "
         "€/m² vs media del barrio (35%) · "
@@ -38,44 +103,64 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
 
     df_ranked = rank_opportunities(active_df[active_df["price"] < 500_000])
 
-    if not df_ranked.empty:
-        for _, row in df_ranked.head(20).iterrows():
-            score = row["quality_score"]
-            if score >= 80:
-                badge, label = "🟢", "Excelente"
-            elif score >= 70:
-                badge, label = "🔵", "Muy Bueno"
-            elif score >= 60:
-                badge, label = "🟡", "Bueno"
-            else:
-                badge, label = "🟠", "Regular"
-
-            title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
-            with st.expander(f"{badge} **{score:.0f}/100** ({label}) — {title_preview}"):
-                rc1, rc2, rc3 = st.columns(3)
-                with rc1:
-                    st.metric("💰 Precio", f"€{row['price']:,}")
-                    st.metric("📐 Tamaño", f"{row['size_sqm']:.0f} m²" if pd.notna(row["size_sqm"]) else "N/A")
-                    st.metric("🛏️ Habitaciones", int(row["rooms"]) if pd.notna(row["rooms"]) else "N/A")
-                with rc2:
-                    st.metric("💵 €/m²", f"€{row['price_per_sqm']:,.0f}" if pd.notna(row["price_per_sqm"]) else "N/A")
-                    st.metric("📊 vs Distrito", f"{row['vs_distrito_avg']:+.1f}%" if pd.notna(row["vs_distrito_avg"]) else "N/A")
-                    st.metric("⏱️ Días en mercado", f"{row['days_on_market']:.0f}" if pd.notna(row["days_on_market"]) else "N/A")
-                with rc3:
-                    st.metric("📍 Distrito", row["distrito"])
-                    st.metric("🏘️ Barrio", row["barrio"])
-                    st.metric("👤 Vendedor", row["seller_type"])
-                    n_score = row.get("negotiability_score", 0)
-                    n_badge, n_label = negotiability_label(n_score)
-                    st.metric(
-                        f"🤝 Margen {n_badge}",
-                        f"{n_score:.0f}/100",
-                        help=f"Negociabilidad: {n_label}. "
-                             f"Combina días en mercado, bajadas, gap vs distrito y tipo de vendedor.",
-                    )
-                st.markdown(f"[🔗 Ver en Idealista]({row['url']})")
-    else:
+    if df_ranked.empty:
         st.warning("No hay propiedades activas para analizar.")
+    else:
+        # Controls — let the user tune how dense the per-distrito grouping is
+        ctl1, ctl2 = st.columns([1, 1])
+        with ctl1:
+            n_per_distrito = st.slider(
+                "Top por distrito",
+                min_value=1, max_value=10, value=3, step=1,
+                key="opp_topN_per_distrito",
+                help="Cuántas propiedades mostrar por distrito.",
+            )
+        with ctl2:
+            min_score = st.slider(
+                "Score mínimo",
+                min_value=0, max_value=100, value=0, step=5,
+                key="opp_min_quality",
+                help="Filtra distritos sin ninguna propiedad por encima del umbral.",
+            )
+
+        # df_ranked is already sorted by quality_score DESC → groupby().head(N)
+        # naturally returns the top-N per distrito ordered by score.
+        grouped = (
+            df_ranked[df_ranked["quality_score"] >= min_score]
+            .groupby("distrito", sort=False, dropna=True)
+            .head(n_per_distrito)
+        )
+
+        if grouped.empty:
+            st.warning(f"Ningún distrito tiene oportunidades con score ≥ {min_score}.")
+        else:
+            # Order distritos by their best score (then by group size as tie-break)
+            distrito_stats = (
+                grouped.groupby("distrito")["quality_score"]
+                .agg(best="max", media="mean", count="count")
+                .sort_values(by=["best", "count"], ascending=[False, False])
+            )
+            total_shown = int(distrito_stats["count"].sum())
+            st.caption(
+                f"📍 {len(distrito_stats)} distritos · {total_shown} oportunidades en total"
+            )
+
+            for distrito, stats in distrito_stats.iterrows():
+                d_rows = grouped[grouped["distrito"] == distrito]
+                st.markdown(
+                    f"#### 📍 {distrito} "
+                    f"<span style='color:#94a3b8;font-size:14px;font-weight:400;'>"
+                    f"· {int(stats['count'])} pisos "
+                    f"· mejor {stats['best']:.0f}/100 "
+                    f"· media {stats['media']:.0f}/100"
+                    f"</span>",
+                    unsafe_allow_html=True,
+                )
+
+                for _, row in d_rows.iterrows():
+                    _render_opportunity_expander(row)
+
+                st.write("")  # small spacer between distritos
 
     st.markdown("---")
 
