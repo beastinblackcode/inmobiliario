@@ -68,6 +68,23 @@ def render_search_tab() -> None:
         "Vicálvaro", "Villa de Vallecas", "Villaverde",
     ]
 
+    AMENITY_OPTIONS = {
+        "has_terraza":            "🌅 Terraza",
+        "has_balcon":             "🪟 Balcón",
+        "has_garaje":             "🚗 Garaje",
+        "has_trastero":           "📦 Trastero",
+        "has_piscina":            "🏊 Piscina",
+        "has_ascensor":           "🛗 Ascensor",
+        "has_portero":            "🧑‍💼 Portero",
+        "has_aire_acondicionado": "🌬️ Aire acond.",
+        "has_calefaccion":        "🔥 Calefacción",
+        "has_armarios":           "🚪 Armarios emp.",
+        "has_near_metro":         "🚇 Cerca metro",
+        "has_near_parque":        "🌳 Cerca parque",
+        "has_near_colegio":       "🏫 Cerca colegio",
+        "has_near_hospital":      "🏥 Cerca hospital",
+    }
+
     # ── Configurable filters ──────────────────────────────────────────────────
     with st.expander("⚙️ Filtros de Búsqueda", expanded=True):
         fc1, fc2 = st.columns(2)
@@ -127,6 +144,35 @@ def render_search_tab() -> None:
             }[x],
         )
 
+        st.markdown("---")
+        st.markdown(
+            "**🏷️ Características requeridas** "
+            "<span style='color:#94a3b8;font-size:12px;'>"
+            "el piso debe tener TODAS las seleccionadas</span>",
+            unsafe_allow_html=True,
+        )
+        am_col1, am_col2 = st.columns([4, 1])
+        with am_col1:
+            required_amenities = st.multiselect(
+                "Amenities",
+                options=list(AMENITY_OPTIONS.keys()),
+                format_func=lambda k: AMENITY_OPTIONS[k],
+                default=[],
+                label_visibility="collapsed",
+                placeholder="Sin filtro — muestra todos",
+                help=(
+                    "Filtra pisos que tengan TODAS las características seleccionadas. "
+                    "Datos extraídos automáticamente de las descripciones (NLP). "
+                    "Pisos sin descripción analizada quedan excluidos si se aplica algún filtro."
+                ),
+            )
+        with am_col2:
+            min_year = st.number_input(
+                "📅 Año constr. mín.",
+                min_value=0, max_value=2025, value=0, step=5, format="%d",
+                help="0 = sin filtro. Solo aplica a pisos con año de construcción detectado en la descripción.",
+            )
+
     # ── Load & filter ─────────────────────────────────────────────────────────
     from database import (
         get_listings as get_listings_db,
@@ -174,6 +220,37 @@ def render_search_tab() -> None:
         not_sin   = ~df["description"].str.contains("sin ascensor", case=False, na=False)
         not_no    = ~df["description"].str.contains("no dispone de ascensor", case=False, na=False)
         df = df[has_lift & not_sin & not_no]
+
+    # ── Amenity filter (listing_amenities table + text fallback) ──────────────
+    if required_amenities or min_year > 0:
+        try:
+            from nlp_analyzer import get_amenities_for_listings, extract_amenities
+            _amenities_cache = get_amenities_for_listings(df["listing_id"].tolist())
+        except Exception:
+            _amenities_cache = {}
+
+        def _get_amenities(row):
+            lid = row["listing_id"]
+            amen = _amenities_cache.get(lid)
+            if amen is None and row.get("description"):
+                try:
+                    from nlp_analyzer import extract_amenities
+                    amen = extract_amenities(row["description"])
+                except Exception:
+                    amen = {}
+            return amen or {}
+
+        def _passes_amenity_filter(row):
+            amen = _get_amenities(row)
+            if required_amenities and not all(amen.get(k, False) for k in required_amenities):
+                return False
+            if min_year > 0:
+                cy = amen.get("construction_year")
+                if cy is None or cy < min_year:
+                    return False
+            return True
+
+        df = df[df.apply(_passes_amenity_filter, axis=1)]
 
     if df.empty:
         st.warning("No hay resultados con los filtros aplicados. Prueba a ampliar el rango.")
@@ -224,6 +301,21 @@ def render_search_tab() -> None:
         lambda lid: signals_to_badges(nlp_signals.get(lid, {})) if nlp_signals else ""
     )
 
+    # ── Amenity badges ────────────────────────────────────────────────────────
+    try:
+        from nlp_analyzer import get_amenities_for_listings, amenities_to_badges
+        # Reuse the already-built cache if the amenity filter ran; otherwise load now
+        _am_map = (
+            _amenities_cache                                    # pylint: disable=used-before-assignment
+            if (required_amenities or min_year > 0)
+            else get_amenities_for_listings(listing_ids)
+        )
+        df["amenity_badges"] = df["listing_id"].map(
+            lambda lid: " ".join(amenities_to_badges(_am_map.get(lid, {})))
+        )
+    except Exception:
+        df["amenity_badges"] = ""
+
     def _score(row):
         vs, days, drops = row["vs_barrio_pct"], row["dias_mercado"], row["bajadas"]
         if vs is None or days is None:
@@ -272,7 +364,7 @@ def render_search_tab() -> None:
         "barrio_median_sqm", "vs_barrio_pct",
         "distrito", "barrio", "size_sqm", "rooms",
         "dias_mercado", "bajadas", "score_oportunidad",
-        "nlp_badges", "floor", "seller_type", "url",
+        "amenity_badges", "nlp_badges", "floor", "seller_type", "url",
     ]].copy()
 
     display_df["score_oportunidad"] = display_df["score_oportunidad"].apply(
@@ -303,8 +395,10 @@ def render_search_tab() -> None:
                                      help="Score de oportunidad 0-100"),
             "floor":             st.column_config.TextColumn("Planta"),
             "seller_type":       st.column_config.TextColumn("Vendedor"),
+            "amenity_badges":     st.column_config.TextColumn("🏷️ Amenities",
+                                     help="Características detectadas en la descripción (NLP)"),
             "nlp_badges":        st.column_config.TextColumn("🔍 Señales",
-                                     help="Señales NLP detectadas en la descripción"),
+                                     help="Señales del vendedor detectadas en la descripción"),
             "url":               st.column_config.LinkColumn("Enlace"),
         },
         hide_index=True,
