@@ -42,16 +42,18 @@ jobs:
           THERMOMETER_PAT: ${{ secrets.THERMOMETER_PAT }}
         run: |
           python export_public_metrics.py -o metrics.json
+          python export_barrio_profiles.py -o barrios_profiles.json
 
           git clone --depth 1 https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git _thermometer
 
-          cp metrics.json _thermometer/public/metrics.json
+          cp metrics.json           _thermometer/public/metrics.json
+          cp barrios_profiles.json  _thermometer/public/barrios_profiles.json
           cd _thermometer
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
-          git add public/metrics.json
+          git add public/metrics.json public/barrios_profiles.json
           git diff --staged --quiet || {
-            git commit -m "Update metrics $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Update metrics + barrio profiles $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
           }
           cd .. && rm -rf _thermometer
