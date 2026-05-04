@@ -110,14 +110,35 @@ git status | grep -E "\.env|\.db|secrets\.toml"
 
 2. **Add secrets:**
    - Paste the following TOML configuration:
-   
+
    ```toml
    [database]
    google_drive_file_id = "YOUR_FILE_ID_HERE"
+
+   [auth.users_hashed]
+   # Generate with: python gen_password_hash.py
+   luis  = "$2b$12$EXAMPLE_REPLACE_ME"
    ```
-   
+
    - Replace `YOUR_FILE_ID_HERE` with the Google Drive file ID from Step 1
+   - Replace each `$2b$12$EXAMPLE_REPLACE_ME` with a real bcrypt hash:
+     ```bash
+     python gen_password_hash.py
+     ```
+     Run once per user. Copy the resulting line into the secrets blob.
    - Click "Save"
+
+   **Rotating a password:**
+   1. `python gen_password_hash.py` → generates a new hash.
+   2. Update the line under `[auth.users_hashed]` in Streamlit Cloud secrets.
+   3. Save → Streamlit Cloud auto-restarts with the new hash. Existing
+      sessions stay valid until they expire (12 h) — log out manually if
+      you need to invalidate them immediately.
+
+   **Backwards compatibility:** if you still have a `[auth.users]` block
+   with plaintext passwords, the app keeps working but emits a
+   `⚠️ DEPRECATED` warning to stderr on every login. Migrate to
+   `[auth.users_hashed]` and delete the old block.
 
 3. **Reboot app:**
    - Click "Reboot app" button

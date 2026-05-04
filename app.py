@@ -10,6 +10,7 @@ import streamlit as st
 from datetime import datetime
 from pathlib import Path
 
+from auth import check_password
 from database import (
     download_database_from_cloud,
     is_streamlit_cloud,
@@ -46,59 +47,8 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# Authentication
+# Authentication: see auth.py — bcrypt + rate limit + session expiry + audit log
 # ---------------------------------------------------------------------------
-
-def check_password() -> bool:
-    """Return True if the user entered correct credentials."""
-
-    def password_entered():
-        username = st.session_state.get("username", "")
-        password = st.session_state.get("password", "")
-
-        if "auth" in st.secrets and "users" in st.secrets["auth"]:
-            users = st.secrets["auth"]["users"]
-            if username in users and users[username] == password:
-                st.session_state["password_correct"] = True
-                st.session_state["current_user"] = username
-                st.session_state.pop("username", None)
-                st.session_state.pop("password", None)
-            else:
-                st.session_state["password_correct"] = False
-        elif "auth" in st.secrets:
-            if (
-                username == st.secrets["auth"].get("username", "")
-                and password == st.secrets["auth"].get("password", "")
-            ):
-                st.session_state["password_correct"] = True
-                st.session_state["current_user"] = username
-                st.session_state.pop("username", None)
-                st.session_state.pop("password", None)
-            else:
-                st.session_state["password_correct"] = False
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        st.markdown("## 🔐 Acceso al Dashboard")
-        st.markdown("Por favor, introduce tus credenciales para acceder.")
-        st.text_input("Usuario", key="username", autocomplete="username")
-        st.text_input(
-            "Contraseña", type="password", key="password", autocomplete="current-password"
-        )
-        st.button("Iniciar Sesión", on_click=password_entered, type="primary")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.markdown("## 🔐 Acceso al Dashboard")
-        st.text_input("Usuario", key="username", autocomplete="username")
-        st.text_input(
-            "Contraseña", type="password", key="password", autocomplete="current-password"
-        )
-        st.button("Iniciar Sesión", on_click=password_entered, type="primary")
-        st.error("😕 Usuario o contraseña incorrectos")
-        return False
-    else:
-        return True
 
 
 # ---------------------------------------------------------------------------
