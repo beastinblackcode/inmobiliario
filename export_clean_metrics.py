@@ -444,9 +444,8 @@ def _recompute_market_score(
         "label":       label,
         "emoji":       emoji,
         "description": (
-            "Termómetro provisional basado en indicadores macro + Notarial. "
-            "Subindicadores derivados del scraping de portales se han "
-            "retirado del cómputo público."
+            "Termómetro basado en indicadores macroeconómicos y precios "
+            "reales escriturados ante notario."
         ),
         "trend":       "stable",
     }
