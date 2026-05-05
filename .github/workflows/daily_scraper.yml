@@ -78,29 +78,13 @@ jobs:
         run: python email_report.py
         continue-on-error: true    # No bloquear el pipeline si el email falla
 
-      # ── 6b. Publicar métricas en el dashboard público ───────────────────────
-      - name: Export & publish public metrics
-        env:
-          THERMOMETER_PAT: ${{ secrets.THERMOMETER_PAT }}
-        run: |
-          # 1. Generar metrics.json
-          python export_public_metrics.py -o metrics.json
-
-          # 2. Clonar repo del termómetro
-          git clone --depth 1 https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git _thermometer
-
-          # 3. Copiar y pushear
-          cp metrics.json _thermometer/public/metrics.json
-          cd _thermometer
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add public/metrics.json
-          git diff --staged --quiet || {
-            git commit -m "Update metrics $(date -u '+%Y-%m-%d %H:%M UTC')"
-            git push
-          }
-          cd .. && rm -rf _thermometer
-        continue-on-error: true    # No bloquear si falla el dashboard
+      # NOTE: the public-metrics export step that used to live here was
+      # removed as part of Phase 1 of the Idealista decoupling.  The
+      # public dashboard at madridhome.tech is now refreshed by the
+      # separate `export-metrics.yml` workflow, which uses a CLEAN
+      # exporter that never reads listings/price_history.  This scraper
+      # keeps writing to the private DB (Streamlit dashboard) without
+      # ever pushing scraper-derived data to the public site.
 
       # ── 7. Subir DB actualizada a Google Drive ───────────────────────────────
       - name: Upload updated database to Google Drive

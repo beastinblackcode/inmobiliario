@@ -1,8 +1,21 @@
-name: Export Public Metrics
+name: Export Public Metrics (clean)
+
+# Phase 1 of the Idealista decoupling: this workflow runs the CLEAN
+# exporter (export_clean_metrics.py) which only reads non-scraping data
+# sources (Notariado CIEN, BCE, INE, CGPJ, Open Data Madrid).  It is
+# fully decoupled from `daily_scraper.yml` — they share the SQLite DB
+# only because the clean exporter still needs to read `notarial_prices`
+# and `cgpj_lanzamientos`, both of which are populated by independent
+# importers, not by the Idealista scraper.
 
 on:
+  schedule:
+    # Weekly, Mondays 07:00 UTC (09:00 Madrid summer / 08:00 winter).
+    # Clean sources update at most monthly (Notariado quarterly, INE
+    # monthly, CGPJ quarterly), so weekly is plenty.
+    - cron: "0 7 * * 1"
   workflow_dispatch:
-    # Lanzar manualmente desde Actions → Export Public Metrics → Run workflow
+    # Manual trigger from the Actions tab.
 
 permissions:
   contents: read
@@ -25,35 +38,82 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # The clean exporter reads notarial_prices + cgpj_lanzamientos
+      # from the same SQLite DB the scraper writes to. Both are
+      # populated by independent importers (Notariado CSV / CGPJ portal).
       - name: Download database from Google Drive
         env:
           GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
         run: |
           python - <<'EOF'
-          import os, gdown
+          import os, gdown, pathlib
           file_id = os.environ["GOOGLE_DRIVE_FILE_ID"]
           gdown.download(f"https://drive.google.com/uc?id={file_id}", "real_estate.db", quiet=False)
-          import pathlib
-          print(f"Downloaded: {pathlib.Path('real_estate.db').stat().st_size / 1024 / 1024:.1f} MB")
+          size_mb = pathlib.Path("real_estate.db").stat().st_size / 1024 / 1024
+          print(f"Downloaded: {size_mb:.1f} MB")
           EOF
 
-      - name: Export & publish public metrics
+      # The --verify flag fails the run if any "tóxico" key leaks into
+      # the output. This is the safety net: a regression in the
+      # exporter that tries to read listings will fail loudly here
+      # rather than silently shipping scraped data to the public CDN.
+      - name: Build clean public metrics
+        run: python export_clean_metrics.py --verify -o metrics.json
+
+      # Generate a minimal barrios_profiles.json stub so the existing
+      # file in market-thermometer/public/ is overwritten with clean
+      # content. The Next.js front already tolerates an empty profiles
+      # dict (the verdict / top-opps / distribution sections render
+      # nothing).  Phase 2 will repopulate this file from Catastro +
+      # Open Data Madrid sources.
+      - name: Build clean barrios_profiles.json stub
+        run: |
+          python - <<'EOF'
+          import json
+          from datetime import datetime, timezone
+          stub = {
+              "metadata": {
+                  "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                  "version":      "2.0",
+                  "barrio_count": 0,
+                  "schema_notes": (
+                      "Phase 1 stub. Profiles intentionally empty until "
+                      "Phase 2 repopulates them from Notarial + Catastro + "
+                      "Open Data Madrid sources."
+                  ),
+              },
+              "madrid_baseline": {
+                  "median_price_per_sqm": None,
+                  "median_days_on_market": None,
+              },
+              "profiles": {},
+          }
+          with open("barrios_profiles.json", "w", encoding="utf-8") as f:
+              json.dump(stub, f, ensure_ascii=False, indent=2)
+          print("✓ barrios_profiles.json stub written")
+          EOF
+
+      - name: Publish to market-thermometer
         env:
           THERMOMETER_PAT: ${{ secrets.THERMOMETER_PAT }}
         run: |
-          python export_public_metrics.py -o metrics.json
-          python export_barrio_profiles.py -o barrios_profiles.json
+          git clone --depth 1 \
+            https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git \
+            _thermometer
 
-          git clone --depth 1 https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git _thermometer
+          cp metrics.json          _thermometer/public/metrics.json
+          cp barrios_profiles.json _thermometer/public/barrios_profiles.json
 
-          cp metrics.json           _thermometer/public/metrics.json
-          cp barrios_profiles.json  _thermometer/public/barrios_profiles.json
           cd _thermometer
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
+          git config user.name  "github-actions[bot]"
           git add public/metrics.json public/barrios_profiles.json
           git diff --staged --quiet || {
-            git commit -m "Update metrics + barrio profiles $(date -u '+%Y-%m-%d %H:%M UTC')"
+            git commit -m "Update clean metrics $(date -u '+%Y-%m-%d %H:%M UTC')"
             git push
           }
-          cd .. && rm -rf _thermometer
+
+      - name: Summary
+        run: |
+          echo "::notice::metrics.json size: $(stat -c%s metrics.json) bytes"
+          echo "::notice::barrios_profiles.json size: $(stat -c%s barrios_profiles.json) bytes"
