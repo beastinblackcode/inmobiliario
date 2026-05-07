@@ -101,7 +101,8 @@ class TestBuildCleanMetrics:
     def test_indicators_block_only_contains_clean_keys(self, notarial_db: Path):
         metrics = exp.build_clean_metrics()
         keys = set(metrics["indicators"].keys())
-        assert keys == {"affordability", "lanzamientos", "morosidad"}
+        # Phase 2.1: rental_yield came back via static rental medians.
+        assert keys == {"affordability", "lanzamientos", "morosidad", "rental_yield"}
 
     def test_listing_derived_fields_are_empty(self, notarial_db: Path):
         metrics = exp.build_clean_metrics()
@@ -110,8 +111,20 @@ class TestBuildCleanMetrics:
         assert metrics["valuation_model"] is None
         assert metrics["barrio_trends"] == []
         assert metrics["notarial_gap"] == []
-        assert metrics["rental_yields"] == []
         assert metrics["trends"] == {"market": [], "by_district": []}
+
+    def test_rental_yields_populated_in_phase_2(self, notarial_db: Path):
+        metrics = exp.build_clean_metrics()
+        ys = metrics["rental_yields"]
+        # 3 distritos in fixture (Centro, Salamanca, Chamberí) — all have
+        # a rent in the static table, so we expect 3 yields back.
+        assert len(ys) == 3
+        assert {y["distrito"] for y in ys} == {"Centro", "Salamanca", "Chamberí"}
+        for y in ys:
+            assert y["barrio"] is None              # distrito-level only
+            assert 1.0 < y["gross_yield"] < 8.0     # realistic range
+            assert y["rent_median"] is not None
+            assert y["sale_price_sqm"] > 0
 
     def test_barrios_array_is_populated_with_distrito_proxy(self, notarial_db: Path):
         metrics = exp.build_clean_metrics()
@@ -123,10 +136,12 @@ class TestBuildCleanMetrics:
         assert centro_barrios, "Centro should have barrios"
         for b in centro_barrios:
             assert b["price_per_sqm"] == 6_000
-            # All listing-derived fields must be null
+            # Rent + yield filled in Phase 2.1
+            assert b["rent_median"] is not None
+            assert b["gross_yield"] is not None
+            # Other listing-derived fields still null
             assert b["active_count"] is None
             assert b["avg_days_market"] is None
-            assert b["gross_yield"] is None
 
     def test_affordability_uses_notarial_not_listings(self, notarial_db: Path):
         metrics = exp.build_clean_metrics()
