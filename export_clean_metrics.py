@@ -345,33 +345,96 @@ def _load_clean_barrios(zones: List[Dict]) -> List[Dict]:
     Build the barrios[] array from the canonical coordinate map.
 
     Each barrio gets its distrito's notarial €/m² (degraded fallback —
-    we don't have per-barrio Notarial data).  All listing-derived
-    fields (active_count, avg_days_market, gross_yield, …) are null.
+    we don't have per-barrio Notarial data) and its distrito's median
+    rent + computed gross yield (Phase 2).  The remaining listing-
+    derived fields (active_count, avg_days_market, …) stay null until
+    a non-scraping replacement source ships.
 
     The Next.js front uses this array for navigation and for the
     "barrios de este distrito" sections; the per-barrio price is
     informative even without the per-listing detail.
     """
     from coordinates import BARRIO_COORDINATES
+    from rental_medians import (
+        compute_gross_yield,
+        get_distrito_rent,
+    )
 
     distrito_sqm = {z["name"]: z.get("price_per_sqm") for z in zones}
 
     out: List[Dict] = []
     for (distrito, barrio), _coord in BARRIO_COORDINATES.items():
+        ppsqm = distrito_sqm.get(distrito)
         out.append({
             "barrio":           barrio,
             "distrito":         distrito,
-            "price_per_sqm":    distrito_sqm.get(distrito),  # distrito proxy
+            "price_per_sqm":    ppsqm,                              # distrito proxy
             "median_price":     None,
             "active_count":     None,
             "avg_size_sqm":     None,
             "avg_rooms":        None,
             "avg_days_market":  None,
-            "gross_yield":      None,
-            "rent_median":      None,
+            "gross_yield":      compute_gross_yield(distrito, ppsqm),
+            "rent_median":      get_distrito_rent(distrito),
         })
     out.sort(key=lambda b: (b["distrito"], b["barrio"]))
     return out
+
+
+def _build_rental_yields(zones: List[Dict]) -> List[Dict]:
+    """
+    Per-distrito gross rental yield from Notarial + static rent table.
+
+    Output shape mirrors the legacy `rental_yields[]` produced by the
+    scraper-based exporter, except `barrio` is absent (we only have
+    distrito-level rent data).  Sorted by yield desc.
+    """
+    from rental_medians import (
+        DATA_AS_OF,
+        compute_gross_yield,
+        get_distrito_rent,
+        get_rent_per_sqm,
+    )
+
+    rows: List[Dict] = []
+    for z in zones:
+        distrito = z.get("name")
+        ppsqm    = z.get("price_per_sqm")
+        if not distrito or not ppsqm:
+            continue
+        gy = compute_gross_yield(distrito, ppsqm)
+        if gy is None:
+            continue
+        rows.append({
+            "distrito":       distrito,
+            "barrio":         None,                       # distrito-level only in Phase 2
+            "gross_yield":    gy,
+            "rent_median":    get_distrito_rent(distrito),
+            "rent_per_sqm":   get_rent_per_sqm(distrito),
+            "sale_price_sqm": ppsqm,
+            "data_as_of":     DATA_AS_OF,
+        })
+    rows.sort(key=lambda r: r["gross_yield"], reverse=True)
+    return rows
+
+
+def _build_rental_yield_indicator(yields: List[Dict]) -> Dict:
+    """Aggregate the rental_yields list into the macro indicator format."""
+    if not yields:
+        return {}
+    avg = round(sum(r["gross_yield"] for r in yields) / len(yields), 2)
+    top = yields[0] if yields else None
+    return {
+        "name":         "Rentabilidad bruta alquiler",
+        "unit":         "%",
+        "current":      avg,
+        "avg_yield":    avg,
+        "trend":        "stable",
+        "top_distrito": top["distrito"] if top else None,
+        "top_yield":    top["gross_yield"] if top else None,
+        "n_distritos":  len(yields),
+        "source":       "Notarial CIEN (precio) + medianas mercado alquiler (renta) Q1 2026",
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -520,10 +583,13 @@ def build_clean_metrics() -> Dict[str, Any]:
     finally:
         conn.close()
 
+    rental_yields = _build_rental_yields(zones)
+
     indicators = {
         "affordability": _load_clean_affordability(madrid_median_sqm, euribor),
         "lanzamientos":  lanzamientos,
         "morosidad":     _load_morosidad(),
+        "rental_yield":  _build_rental_yield_indicator(rental_yields),
     }
 
     score  = _recompute_market_score(indicators, macro)
@@ -533,7 +599,7 @@ def build_clean_metrics() -> Dict[str, Any]:
     return {
         "metadata": {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "version":      "2.0",
+            "version":      "2.1",
             "source":       "Termómetro Inmobiliario Madrid (clean export)",
             "data_sources": [
                 "Notariado CIEN",
@@ -542,18 +608,20 @@ def build_clean_metrics() -> Dict[str, Any]:
                 "CGPJ",
                 "Open Data Madrid",
                 "Observatorio del Alquiler",
+                "Mercado de alquiler — agregado por distrito (snapshot Q1 2026)",
             ],
             "schema_notes": (
-                "Phase 1 of Idealista decoupling: listing-derived fields "
-                "are set to null/empty. Phase 2 will repopulate them from "
-                "Catastro / MITMA / extended Notarial sources."
+                "Phase 2.1: rental yields restored using static medianas "
+                "per distrito (refresh annually from MITMA SEIDA). "
+                "Listing-derived fields (drops, days_on_market, active_count) "
+                "remain null."
             ),
         },
         "market_score":     score,
         "indicators":       indicators,
         "macro":            _shape_macro(macro),
         "zones":            zones,
-        "rental_yields":    [],          # Phase 2: Open Data Madrid rents
+        "rental_yields":    rental_yields,
         "trends":           {"market": [], "by_district": []},
         "notarial_gap":     [],          # dies — needs asking price
         "barrios":          barrios,
@@ -563,6 +631,7 @@ def build_clean_metrics() -> Dict[str, Any]:
         "db_stats": {
             "barrios_total":      len(barrios),
             "distritos_notarial": len(zones),
+            "distritos_rentals":  len(rental_yields),
             "last_export_utc":    datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "alerts":           alerts,
@@ -618,10 +687,13 @@ def verify_clean(metrics: Dict[str, Any]) -> List[str]:
     if trends.get("market") or trends.get("by_district"):
         issues.append("trends.market/by_district should be empty")
 
+    # Indicators that depended on per-listing tracking and have no public
+    # replacement.  `rental_yield` was here in Phase 1 but came back in
+    # Phase 2.1 using a static rent table aggregated to distrito level.
     forbidden_indicators = {
         "price_trend", "sales_speed", "supply_demand", "inventory",
         "rotation", "absorption_rate", "months_of_supply", "dispersion",
-        "price_drop_ratio", "rental_yield", "notarial_gap",
+        "price_drop_ratio", "notarial_gap",
     }
     indicators = metrics.get("indicators", {}) or {}
     extra = set(indicators.keys()) & forbidden_indicators
