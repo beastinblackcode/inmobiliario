@@ -60,40 +60,11 @@ jobs:
       - name: Build clean public metrics
         run: python export_clean_metrics.py --verify -o metrics.json
 
-      # Generate a minimal barrios_profiles.json stub so the existing
-      # file in market-thermometer/public/ is overwritten with clean
-      # content. The Next.js front already tolerates an empty profiles
-      # dict (the verdict / top-opps / distribution sections render
-      # nothing).  Phase 2 will repopulate this file from Catastro +
-      # Open Data Madrid sources.
-      - name: Build clean barrios_profiles.json stub
-        run: |
-          python - <<'EOF'
-          import json
-          from datetime import datetime, timezone
-          stub = {
-              "metadata": {
-                  "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                  "version":      "2.0",
-                  "barrio_count": 0,
-                  "schema_notes": (
-                      "Phase 1 stub. Profiles intentionally empty until "
-                      "Phase 2 repopulates them from Notarial + Catastro + "
-                      "Open Data Madrid sources."
-                  ),
-              },
-              "madrid_baseline": {
-                  "median_price_per_sqm": None,
-                  "median_days_on_market": None,
-              },
-              "profiles": {},
-          }
-          with open("barrios_profiles.json", "w", encoding="utf-8") as f:
-              json.dump(stub, f, ensure_ascii=False, indent=2)
-          print("✓ barrios_profiles.json stub written")
-          EOF
-
-      - name: Publish to market-thermometer
+      # Clone market-thermometer up-front so the barrio-profiles
+      # exporter can read the in-tree district_opendata.json (the
+      # canonical Open Data Madrid mirror lives under public/ on the
+      # front, not in this repo).
+      - name: Clone market-thermometer (read + write)
         env:
           THERMOMETER_PAT: ${{ secrets.THERMOMETER_PAT }}
         run: |
@@ -101,6 +72,20 @@ jobs:
             https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git \
             _thermometer
 
+      # Phase 2.2: build the populated barrios_profiles.json from clean
+      # sources (Notarial CIEN distrito €/m² + Open Data Madrid renta
+      # media hogar per barrio). The exporter has its own --verify
+      # safety net that fails the run on banned listing-derived keys
+      # or collapsed verdict variety.
+      - name: Build clean barrios_profiles.json
+        run: |
+          python export_barrio_profiles_clean.py \
+            --verify \
+            --opendata _thermometer/public/district_opendata.json \
+            -o barrios_profiles.json
+
+      - name: Publish to market-thermometer
+        run: |
           cp metrics.json          _thermometer/public/metrics.json
           cp barrios_profiles.json _thermometer/public/barrios_profiles.json
 
