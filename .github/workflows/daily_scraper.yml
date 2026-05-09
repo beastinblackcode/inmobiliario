@@ -1,9 +1,24 @@
 name: Daily Scraper
 
+# ──────────────────────────────────────────────────────────────────────────
+# Cron temporalmente DESACTIVADO durante la migración SQLite → Postgres
+# (Phases B / C / D, ver feat/postgres-foundation).
+#
+# Motivo: la versión actual de `init_database()` (en main) crea un UNIQUE
+# INDEX sobre `price_history(listing_id, date_recorded)`. La copia del DB
+# en Google Drive aún tiene 35 grupos duplicados de cuando el writer
+# antiguo permitía dos filas por mismo (listing, día). El primer cron run
+# fallaría al intentar crear el índice. Hasta que el cutover a Postgres
+# esté hecho, ejecutamos el scraper sólo manualmente vía workflow_dispatch.
+#
+# Reactivar tras Phase D: descomentar el bloque `schedule` de abajo y
+# borrar este comentario.
+# ──────────────────────────────────────────────────────────────────────────
+
 on:
-  schedule:
-    # Runs every 3 days (Mon/Thu) at 06:00 UTC (08:00 Madrid CEST)
-    - cron: "0 6 * * 1,4"
+  # schedule:
+  #   # Runs every 3 days (Mon/Thu) at 06:00 UTC (08:00 Madrid CEST)
+  #   - cron: "0 6 * * 1,4"
   workflow_dispatch:
     # Permite lanzar manualmente desde la pestaña Actions de GitHub
 
