@@ -34,6 +34,30 @@ def is_streamlit_cloud() -> bool:
         return False
 
 
+def _db_has_listings_table(db_path: str) -> bool:
+    """Cheap integrity check: True iff *db_path* opens as SQLite and the
+    ``listings`` table is present.
+
+    Used to decide whether the cached DB on Streamlit Cloud's container
+    disk is usable.  A previous run could have left behind a corrupt /
+    empty file (gdown half-write, OOM, etc.) — without this check, the
+    app would happily reuse it and every query would fail with
+    ``no such table: listings``.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='listings' LIMIT 1"
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+    except sqlite3.DatabaseError:
+        return False
+
+
 def download_database_from_cloud():
     """
     Download database from Google Drive if running on Streamlit Cloud.
@@ -48,12 +72,24 @@ def download_database_from_cloud():
             st.info("💡 Run the scraper first: `python scraper.py`")
             return False
         return True
-    
-    # On Streamlit Cloud
+
+    # On Streamlit Cloud — reuse the cached DB only if it still has the
+    # core ``listings`` table.  If the file exists but is empty / corrupt
+    # (the failure mode that breaks every page with
+    # "no such table: listings"), drop it and re-download from Drive.
     if Path(DATABASE_PATH).exists():
         import streamlit as st
-        st.info("✅ Database already exists, using cached version")
-        return True
+        if _db_has_listings_table(DATABASE_PATH):
+            st.info("✅ Database already exists, using cached version")
+            return True
+        st.warning(
+            "⚠️ Cached database is missing core tables — "
+            "re-downloading from Drive…"
+        )
+        try:
+            Path(DATABASE_PATH).unlink()
+        except OSError:
+            pass
     
     try:
         import streamlit as st
