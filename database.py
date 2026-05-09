@@ -215,15 +215,35 @@ def init_database():
             CREATE INDEX IF NOT EXISTS idx_active_barrio_price
             ON listings(status, barrio, price)
         """)
-        # Price history: fast lookup by listing + date
-        # (table created in migration_add_price_history.py — skip if missing)
-        try:
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_price_history_listing_date
-                ON price_history(listing_id, date_recorded)
-            """)
-        except sqlite3.OperationalError:
-            pass  # table doesn't exist yet
+        # ── Price history table ────────────────────────────────────────────
+        # Originally introduced via migration_add_price_history.py; declared
+        # here too so init_database() is self-sufficient for fresh DBs
+        # (tests, new deployments).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS price_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id      TEXT    NOT NULL,
+                price           INTEGER NOT NULL,
+                date_recorded   TEXT    NOT NULL,
+                change_amount   INTEGER,
+                change_percent  REAL,
+                FOREIGN KEY (listing_id) REFERENCES listings(listing_id)
+            )
+        """)
+        # Fast lookup by listing + date
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_price_history_listing_date
+            ON price_history(listing_id, date_recorded)
+        """)
+        # UNIQUE index enforces "1 row per listing per day" — the invariant
+        # the chart and score logic assume.  Also the target of the writer's
+        # ``ON CONFLICT(listing_id, date_recorded) DO UPDATE`` clause.
+        # See migration_dedupe_price_history.py for the one-time backfill
+        # that made existing data conform.
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ph_unique_listing_date
+            ON price_history(listing_id, date_recorded)
+        """)
         # Sold/removed recent (price-drop analysis, trends)
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_status_last_seen
@@ -1276,40 +1296,56 @@ def get_listing_by_url(url_or_id: str) -> Optional[Dict]:
 
 def _insert_price_change_internal(cursor, listing_id: str, new_price: int, date: str) -> None:
     """
-    Internal function to insert price change using existing cursor.
-    Used by insert_listing and update_listing to avoid nested transactions.
-    
+    Insert (or update) the price_history row for ``(listing_id, date)``.
+
+    Idempotent across multiple scraper runs in the same day: if a row
+    already exists for *date*, the row is updated with the latest price
+    and the recomputed change vs the **last different-day** price.
+    A UNIQUE index on ``(listing_id, date_recorded)`` (created in
+    ``init_database()``) is what the ``ON CONFLICT`` clause targets.
+
+    The lookup for the previous price is bounded by ``< date`` so that
+    a same-day re-run never compares against itself (the bug that
+    produced 15 duplicate groups in early 2026 — see
+    ``migration_dedupe_price_history.py``).
+
     Args:
-        cursor: Database cursor from existing connection
-        listing_id: The listing ID
-        new_price: The new price in euros
-        date: Date of the price change (YYYY-MM-DD format)
+        cursor:    DB cursor from an existing connection.
+        listing_id: The listing ID.
+        new_price: The new price in euros.
+        date:      Date of the price change (YYYY-MM-DD format).
     """
-    # Get the most recent price from history
+    # Last price from a *different* day → robust to multiple runs / day
     cursor.execute("""
-        SELECT price 
-        FROM price_history 
-        WHERE listing_id = ?
-        ORDER BY date_recorded DESC
-        LIMIT 1
-    """, (listing_id,))
-    
+        SELECT price
+          FROM price_history
+         WHERE listing_id = ? AND date_recorded < ?
+         ORDER BY date_recorded DESC, id DESC
+         LIMIT 1
+    """, (listing_id, date))
+
     result = cursor.fetchone()
-    
+
     if result:
-        # Calculate change from previous price
         old_price = result[0]
         change_amount = new_price - old_price
-        change_percent = ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0
+        change_percent = (
+            ((new_price - old_price) / old_price) * 100 if old_price > 0 else 0
+        )
     else:
-        # First price record for this listing
+        # No prior different-day entry → initial observation
         change_amount = None
         change_percent = None
-    
-    # Insert new price record
+
+    # Idempotent upsert: a re-run on the same date overwrites the row
+    # so the kept entry always reflects the latest known state.
     cursor.execute("""
         INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent)
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(listing_id, date_recorded) DO UPDATE SET
+            price          = excluded.price,
+            change_amount  = excluded.change_amount,
+            change_percent = excluded.change_percent
     """, (listing_id, new_price, date, change_amount, change_percent))
 
 
