@@ -4,3 +4,8 @@
 pytest>=8.0.0
 pytest-cov>=5.0.0
 freezegun>=1.4.0
+
+# Postgres test fixture: spins up a disposable Postgres container per
+# test session via testcontainers. Requires Docker available locally
+# (and on CI runners — GitHub Actions ubuntu-latest has it).
+testcontainers[postgres]>=4.7.0

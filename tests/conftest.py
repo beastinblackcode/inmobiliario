@@ -87,6 +87,127 @@ def tmp_db(tmp_path: Path) -> Iterator[Path]:
     dbmod.DATABASE_PATH = orig_mod_path
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Postgres fixture (Phase 3 — runs alongside the SQLite one during the
+# migration so we can validate the new code paths against a real Postgres
+# without touching production).
+#
+# Behaviour:
+#   - Skipped if Docker is not available locally (testcontainers can't
+#     spin up the container, so the fixture is marked skipped instead of
+#     erroring).
+#   - Reuses one container per test session to keep wall time reasonable.
+#   - Runs `alembic upgrade head` against the container so each test
+#     sees the same schema the migrations define.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _docker_available() -> bool:
+    import shutil
+    import subprocess
+    if shutil.which("docker") is None:
+        return False
+    try:
+        subprocess.run(
+            ["docker", "info"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        return True
+    except Exception:
+        return False
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> Iterator[str]:
+    """Spin up a session-scoped Postgres container and yield its URL.
+
+    Skipped when Docker isn't available — local devs without Docker can
+    still run the SQLite-only suite.
+    """
+    if not _docker_available():
+        pytest.skip("Docker not available; skipping Postgres-backed tests.")
+
+    # Lazy import so the suite still imports cleanly without testcontainers.
+    from testcontainers.postgres import PostgresContainer  # noqa: WPS433
+
+    with PostgresContainer("postgres:16-alpine") as container:
+        url = container.get_connection_url()
+        # testcontainers returns ``postgresql+psycopg2://...``; normalise to
+        # the bare ``postgresql://`` shape so our env.py and connection_pg
+        # both accept it.
+        if "+psycopg2" in url:
+            url = url.replace("+psycopg2", "")
+        elif "+psycopg" in url:
+            url = url.replace("+psycopg", "")
+        yield url
+
+
+@pytest.fixture
+def tmp_pg_db(pg_url: str) -> Iterator[str]:
+    """A schema-loaded Postgres URL for a single test.
+
+    Runs ``alembic upgrade head`` once per session, then ``DROP TABLE``
+    every public table at the start of each test (cheaper than recreating
+    the container, still per-test isolation).
+    """
+    import os
+
+    import psycopg
+
+    # Override env so alembic/env.py and db/connection_pg both use our URL.
+    orig_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = pg_url
+
+    # Reset cached pool so connection_pg picks up the new URL.
+    try:
+        from db.connection_pg import reset_pool_for_tests  # noqa: WPS433
+        reset_pool_for_tests()
+    except ImportError:
+        pass
+
+    # Ensure schema is in place. ``upgrade head`` is idempotent so calling
+    # it from every test is fine (no-op after the first).
+    from alembic.config import Config  # noqa: WPS433
+    from alembic import command  # noqa: WPS433
+
+    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_PROJECT_ROOT / "alembic"))
+    command.upgrade(cfg, "head")
+
+    yield pg_url
+
+    # Truncate everything between tests for predictable state. Using
+    # TRUNCATE...CASCADE because of FK chains.
+    with psycopg.connect(pg_url) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        )
+        tables = [r[0] for r in cur.fetchall() if r[0] != "alembic_version"]
+        if tables:
+            cur.execute(
+                "TRUNCATE TABLE "
+                + ", ".join(f'"{t}"' for t in tables)
+                + " RESTART IDENTITY CASCADE"
+            )
+        conn.commit()
+
+    # Restore env
+    if orig_url is None:
+        os.environ.pop("DATABASE_URL", None)
+    else:
+        os.environ["DATABASE_URL"] = orig_url
+
+    try:
+        from db.connection_pg import reset_pool_for_tests  # noqa: WPS433
+        reset_pool_for_tests()
+    except ImportError:
+        pass
+
+
 @pytest.fixture
 def tmp_db_seeded(tmp_db: Path) -> Path:
     """

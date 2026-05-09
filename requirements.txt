@@ -10,6 +10,14 @@ python-dotenv>=1.0.0
 gdown>=4.7.1
 urllib3>=2.0.0
 
+# Postgres backend (Phase 3 of the data layer migration)
+# psycopg 3 — modern driver with native asyncio support and a built-in pool.
+# Pin to >=3.1 so we get the maintained branch. The [binary] extra ships a
+# wheel with libpq embedded, so users don't need a system Postgres install.
+psycopg[binary]>=3.1.0
+psycopg_pool>=3.2.0
+alembic>=1.13.0
+
 # Map visualization
 folium>=0.15.0
 streamlit-folium>=0.15.0
