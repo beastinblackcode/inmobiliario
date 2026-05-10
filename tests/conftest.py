@@ -125,9 +125,24 @@ def _tmp_db_postgres(pg_url: str) -> Iterator[str]:
 
     yield pg_url
 
+    # ── Teardown ────────────────────────────────────────────────────────
+    # Close the test's thread-local connection FIRST.  If we leave it
+    # open (especially in an aborted-transaction state), the TRUNCATE
+    # below blocks waiting for a lock the thread-local conn still
+    # holds — symptom: the test process appears hung.
+    dbconn.close_db()
+    try:
+        from db.connection_pg import reset_pool_for_tests  # noqa: WPS433
+        reset_pool_for_tests()
+    except ImportError:
+        pass
+
     # Per-test isolation: truncate every public table (skip alembic_version).
+    # ``statement_timeout`` keeps a misbehaving teardown from hanging the
+    # whole suite again should the lock-conflict regress.
     with psycopg.connect(pg_url) as conn:
         cur = conn.cursor()
+        cur.execute("SET statement_timeout = '10s'")
         cur.execute(
             "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
         )
@@ -140,16 +155,10 @@ def _tmp_db_postgres(pg_url: str) -> Iterator[str]:
             )
         conn.commit()
 
-    dbconn.close_db()
     if orig_url is None:
         os.environ.pop("DATABASE_URL", None)
     else:
         os.environ["DATABASE_URL"] = orig_url
-    try:
-        from db.connection_pg import reset_pool_for_tests  # noqa: WPS433
-        reset_pool_for_tests()
-    except ImportError:
-        pass
 
 
 @pytest.fixture

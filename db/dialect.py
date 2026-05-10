@@ -118,6 +118,32 @@ def iso_week(col: str) -> str:
     return f"strftime('%Y-%W', {col})"
 
 
+def week_start(col: str) -> str:
+    """Monday of the week that *col* falls in, as a DATE.
+
+    SQLite uses the ``date(col, 'weekday 1', '-7 days')`` idiom; Postgres
+    has the more readable ``date_trunc('week', ...)::date`` (weeks start
+    on Monday by default).
+    """
+    if is_postgres():
+        return f"date_trunc('week', {col}::date)::date"
+    return f"date({col}, 'weekday 1', '-7 days')"
+
+
+def date_plus_days(col: str, days_expr: str) -> str:
+    """Add an integer number of days to a date column.
+
+    SQLite uses ``date(col, '+N days')``; Postgres uses
+    ``col::date + INTERVAL 'N days'``.
+
+    *days_expr* is the SQL fragment for the day count (literal string,
+    placeholder, or expression).
+    """
+    if is_postgres():
+        return f"({col}::date + ({days_expr} || ' days')::interval)::date"
+    return f"date({col}, {days_expr} || ' days')"
+
+
 def date_offset_days(days_expr: str) -> str:
     """Date *days_expr* days from today.
 

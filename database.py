@@ -348,16 +348,24 @@ def init_database():
 
 def migrate_add_description_column():
     """
-    Migration: Add description column to existing databases.
-    Safe to run multiple times - will only add column if it doesn't exist.
+    Migration: Add ``description`` column to existing SQLite databases.
+
+    Postgres: schema is owned by Alembic — no-op.
+    SQLite: legacy migration kept for older databases that pre-date the
+    column.  Uses ``PRAGMA table_info`` (SQLite-only).
     """
+    from db.dialect import is_postgres
+
+    if is_postgres():
+        return
+
     with get_connection() as conn:
         cursor = conn.cursor()
-        
+
         # Check if description column exists
         cursor.execute("PRAGMA table_info(listings)")
         columns = [col[1] for col in cursor.fetchall()]
-        
+
         if 'description' not in columns:
             print("📝 Adding description column to database...")
             cursor.execute("ALTER TABLE listings ADD COLUMN description TEXT")
@@ -537,12 +545,15 @@ def insert_listing(data: Dict) -> bool:
                 )
             
             return True
-    except sqlite3.IntegrityError:
-        # Listing already exists (likely was 'sold_removed' and now reappeared)
-        # Fallback to update which handles status='active' reactivation
-        # print(f"  ♻️ Listing {data.get('listing_id')} exists. Reactivating...")
-        return update_listing(data.get('listing_id'), data)
     except Exception as e:
+        # IntegrityError on the primary key means the listing already
+        # exists (likely was 'sold_removed' and now reappeared). Fall
+        # back to update which handles status='active' reactivation.
+        # SQLite raises ``sqlite3.IntegrityError``; psycopg raises
+        # ``psycopg.errors.UniqueViolation``. Match by class name to
+        # avoid an explicit dialect import here.
+        if type(e).__name__ in ("IntegrityError", "UniqueViolation"):
+            return update_listing(data.get('listing_id'), data)
         print(f"Error inserting listing {data.get('listing_id')}: {e}")
         return False
 
@@ -963,9 +974,13 @@ def get_listings_page(
             f"COALESCE(last_seen_date, {current_date()})",
             f"COALESCE(first_seen_date, last_seen_date, {current_date()})",
         )
+        # ``ROUND(double precision, integer)`` doesn't exist in Postgres
+        # (only ``ROUND(numeric, integer)``). Casting through DECIMAL works
+        # in both backends — SQLite treats DECIMAL as REAL, Postgres as
+        # NUMERIC, and ROUND accepts both.
         derived = f""",
             CASE WHEN size_sqm > 0
-                 THEN ROUND(price * 1.0 / size_sqm, 2)
+                 THEN ROUND(CAST(price * 1.0 / size_sqm AS DECIMAL), 2)
                  ELSE NULL
             END AS price_per_sqm,
             {days_on_market_expr} AS days_on_market"""
@@ -1758,6 +1773,8 @@ def get_price_evolution_by_barrio(barrios: List[str], weeks: int = 16) -> List[D
         List of dicts with: barrio, week_start, median_price_sqm, listing_count.
         Sorted by barrio then week_start ascending.
     """
+    from db.dialect import iso_week, week_start, julianday_diff
+
     if not barrios:
         return []
     try:
@@ -1768,17 +1785,17 @@ def get_price_evolution_by_barrio(barrios: List[str], weeks: int = 16) -> List[D
             cursor.execute(f"""
                 SELECT
                     barrio,
-                    strftime('%Y-%W', last_seen_date)               AS week,
-                    date(last_seen_date, 'weekday 1', '-7 days')    AS week_start,
-                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm,0))  AS median_price_sqm,
-                    COUNT(*)                                         AS listing_count
+                    {iso_week('last_seen_date')}                     AS week,
+                    {week_start('last_seen_date')}                   AS week_start,
+                    AVG(CAST(price AS FLOAT) / NULLIF(size_sqm,0))   AS median_price_sqm,
+                    COUNT(*)                                          AS listing_count
                 FROM listings
                 WHERE barrio IN ({placeholders})
                   AND last_seen_date >= ?
                   AND last_seen_date IS NOT NULL
                   AND price   > 0
                   AND size_sqm > 10
-                GROUP BY barrio, week
+                GROUP BY barrio, week, week_start
                 ORDER BY barrio, week_start
             """, (*barrios, cutoff))
             cols = ["barrio", "week", "week_start", "median_price_sqm", "listing_count"]
@@ -1794,6 +1811,8 @@ def get_barrio_summary(barrios: List[str]) -> List[Dict]:
       barrio, distrito, active_count, median_price, median_price_sqm,
       avg_size_sqm, avg_rooms, avg_days_market.
     """
+    from db.dialect import julianday_diff
+
     if not barrios:
         return []
     try:
@@ -1810,7 +1829,7 @@ def get_barrio_summary(barrios: List[str]) -> List[Dict]:
                     AVG(size_sqm)                                    AS avg_size_sqm,
                     AVG(rooms)                                       AS avg_rooms,
                     AVG(
-                        julianday(last_seen_date) - julianday(first_seen_date)
+                        {julianday_diff('last_seen_date', 'first_seen_date')}
                     )                                                AS avg_days_market
                 FROM listings
                 WHERE barrio IN ({placeholders})
@@ -2029,18 +2048,24 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
         price_trend_pct, score_precio, score_tendencia,
         score_tiempo, score_rentabilidad, score_oferta
     """
+    from db.dialect import (
+        date_offset_days,
+        has_table_sql,
+        julianday_now_diff,
+    )
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
 
             # ── Base stats per barrio (active listings) ──────────────────────
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     barrio,
                     MAX(distrito)                                       AS distrito,
                     COUNT(*)                                            AS active_count,
                     AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0))    AS avg_price_sqm,
-                    AVG(julianday('now') - julianday(first_seen_date))  AS avg_days_market
+                    AVG({julianday_now_diff('first_seen_date')})       AS avg_days_market
                 FROM listings
                 WHERE status  = 'active'
                   AND price   > 0
@@ -2061,13 +2086,13 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
                 return []
 
             # ── Weekly price trend per barrio ─────────────────────────────────
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     l.barrio,
-                    AVG(CASE WHEN ph.date_recorded >= date('now', '-7 days')
+                    AVG(CASE WHEN ph.date_recorded >= {date_offset_days("'-7'")}
                              THEN ph.price END) AS price_last_week,
-                    AVG(CASE WHEN ph.date_recorded >= date('now', '-14 days')
-                              AND ph.date_recorded <  date('now', '-7 days')
+                    AVG(CASE WHEN ph.date_recorded >= {date_offset_days("'-14'")}
+                              AND ph.date_recorded <  {date_offset_days("'-7'")}
                              THEN ph.price END) AS price_prev_week
                 FROM price_history ph
                 JOIN listings l ON l.listing_id = ph.listing_id
@@ -2082,9 +2107,8 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
 
             # ── Rental yield per barrio (latest snapshot) ─────────────────────
             yield_by_barrio = {}
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='rental_prices'"
-            )
+            sql_, params_ = has_table_sql("rental_prices")
+            cursor.execute(sql_, params_)
             if cursor.fetchone():
                 cursor.execute("""
                     SELECT r.barrio, r.median_rent,
@@ -2217,7 +2241,17 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
 # =============================================================================
 
 def migrate_create_watchlist_table():
-    """Migration: create watchlist table on existing databases. Safe to run multiple times."""
+    """No-op under Postgres (Alembic owns the schema).
+
+    Under SQLite this still creates the watchlist table on legacy
+    databases that pre-date the rename. The table now lives in
+    ``alembic/versions/0001_initial_schema.py`` for Postgres deploys.
+    """
+    from db.dialect import is_postgres
+
+    if is_postgres():
+        return
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -2246,14 +2280,27 @@ def add_to_watchlist(listing_id: str, note: str = "", alert_on_drop: bool = True
     Add a listing to the watchlist. Records the current price automatically.
     Returns True if added, False if already present.
     """
+    from db.dialect import current_date, insert_or_ignore_clause
+
     try:
         current_price = get_current_price(listing_id)
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT OR IGNORE INTO watchlist (listing_id, added_date, note, price_at_add, alert_on_drop)
-                VALUES (?, date('now'), ?, ?, ?)
-            """, (listing_id, note or "", current_price, 1 if alert_on_drop else 0))
+            stmt = insert_or_ignore_clause(
+                "watchlist",
+                ["listing_id", "added_date", "note", "price_at_add", "alert_on_drop"],
+                conflict_target="listing_id",
+            )
+            cursor.execute(
+                stmt,
+                (
+                    listing_id,
+                    datetime.now().strftime("%Y-%m-%d"),  # added_date as ISO date
+                    note or "",
+                    current_price,
+                    True if alert_on_drop else False,
+                ),
+            )
             conn.commit()
             return cursor.rowcount > 0
     except Exception as exc:
@@ -2305,10 +2352,12 @@ def get_watchlist(include_sold: bool = True) -> List[Dict]:
         price_per_sqm, status, price_at_add, price_change, price_change_pct,
         added_date, note, alert_on_drop, days_watched, num_drops
     """
+    from db.dialect import julianday_now_diff
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
-            query = """
+            query = f"""
                 SELECT
                     w.listing_id,
                     w.added_date,
@@ -2324,7 +2373,7 @@ def get_watchlist(include_sold: bool = True) -> List[Dict]:
                     CAST(l.price AS FLOAT) / NULLIF(l.size_sqm, 0) AS price_per_sqm,
                     l.status,
                     l.first_seen_date,
-                    julianday('now') - julianday(w.added_date) AS days_watched
+                    {julianday_now_diff('w.added_date')} AS days_watched
                 FROM watchlist w
                 LEFT JOIN listings l ON l.listing_id = w.listing_id
                 ORDER BY w.added_date DESC
@@ -2381,10 +2430,12 @@ def get_watchlist_price_drops(since_days: int = 1) -> List[Dict]:
     Return watchlist entries where the price dropped in the last `since_days` days.
     Used to build the email alert section.
     """
+    from db.dialect import date_offset_days
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     w.listing_id,
                     l.url,
@@ -2403,7 +2454,7 @@ def get_watchlist_price_drops(since_days: int = 1) -> List[Dict]:
                 JOIN listings l       ON l.listing_id = w.listing_id
                 JOIN price_history ph ON ph.listing_id = w.listing_id
                 WHERE ph.change_amount < 0
-                  AND ph.date_recorded >= date('now', ? || ' days')
+                  AND ph.date_recorded >= {date_offset_days('?')}
                   AND l.status = 'active'
                 ORDER BY ph.change_percent ASC
             """, (f"-{since_days}",))
@@ -2452,12 +2503,14 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
         listing_id, url, barrio, distrito, price, size_sqm, rooms, price_per_sqm,
         vs_barrio_pct, barrio_median_sqm, score_oportunidad, first_seen_date.
     """
+    from db.dialect import datetime_offset_hours
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
 
             # 1. Fetch listings first seen in the last `hours` hours
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     listing_id, url, barrio, distrito,
                     price, size_sqm, rooms,
@@ -2467,7 +2520,7 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
                 WHERE status = 'active'
                   AND price  > 0
                   AND size_sqm > 10
-                  AND first_seen_date >= datetime('now', ? || ' hours')
+                  AND first_seen_date >= {datetime_offset_hours('?')}
                 ORDER BY first_seen_date DESC
             """, (f"-{hours}",))
 
@@ -2572,18 +2625,19 @@ def get_rental_yield_history(weeks: int = 12) -> List[Dict]:
                 return []
 
             # Get weekly snapshots from rental_prices
-            cursor.execute("""
+            from db.dialect import iso_week, date_offset_days
+            cursor.execute(f"""
                 SELECT
-                    strftime('%Y-%W', date_recorded)   AS week,
+                    {iso_week('date_recorded')}        AS week,
                     MIN(date_recorded)                 AS week_start,
                     barrio,
                     AVG(median_rent)                   AS avg_rent,
                     SUM(listing_count)                 AS cnt
                 FROM rental_prices
-                WHERE date_recorded >= date('now', ? || ' days')
+                WHERE date_recorded >= {date_offset_days('?')}
                   AND median_rent > 0
                   AND listing_count >= 3
-                GROUP BY strftime('%Y-%W', date_recorded), barrio
+                GROUP BY {iso_week('date_recorded')}, barrio
                 HAVING SUM(listing_count) >= 3
             """, (f"-{weeks * 7}",))
 
@@ -2664,9 +2718,10 @@ def get_price_drop_stats() -> Dict:
       - recent_drops: listings whose price dropped in the last 7 days
       - drop_magnitude_buckets: histogram of drop sizes
     """
+    from db.dialect import date_offset_days, julianday_diff
+
     try:
         with get_connection() as conn:
-            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
             # ── Overview KPIs ────────────────────────────────────────────────
@@ -2701,8 +2756,8 @@ def get_price_drop_stats() -> Dict:
             n_drop_events = row["n_events"] or 0
 
             # Average days from first_seen_date to first price drop
-            cur.execute("""
-                SELECT AVG(julianday(ph.date_recorded) - julianday(l.first_seen_date))
+            cur.execute(f"""
+                SELECT AVG({julianday_diff('ph.date_recorded', 'l.first_seen_date')})
                 FROM price_history ph
                 JOIN listings l ON l.listing_id = ph.listing_id
                 WHERE ph.change_amount < 0
@@ -2715,20 +2770,20 @@ def get_price_drop_stats() -> Dict:
             avg_days_to_drop = round((cur.fetchone()[0] or 0), 1)
 
             # Listings that dropped in the last 7 days
-            cur.execute("""
+            cur.execute(f"""
                 SELECT COUNT(DISTINCT listing_id)
                 FROM price_history
                 WHERE change_amount < 0
-                  AND date_recorded >= date('now', '-7 days')
+                  AND date_recorded >= {date_offset_days("'-7'")}
             """)
             recent_7d = (cur.fetchone() or [0])[0] or 0
 
             # Listings that dropped in the last 30 days
-            cur.execute("""
+            cur.execute(f"""
                 SELECT COUNT(DISTINCT listing_id)
                 FROM price_history
                 WHERE change_amount < 0
-                  AND date_recorded >= date('now', '-30 days')
+                  AND date_recorded >= {date_offset_days("'-30'")}
             """)
             recent_30d = (cur.fetchone() or [0])[0] or 0
 
@@ -2768,7 +2823,7 @@ def get_price_drop_stats() -> Dict:
             by_barrio = [dict(r) for r in cur.fetchall()]
 
             # ── Recent drops (last 7 days) with listing detail ───────────────
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
                     ph.listing_id,
                     l.title,
@@ -2784,7 +2839,7 @@ def get_price_drop_stats() -> Dict:
                 FROM price_history ph
                 JOIN listings l ON l.listing_id = ph.listing_id
                 WHERE ph.change_amount < 0
-                  AND ph.date_recorded >= date('now', '-7 days')
+                  AND ph.date_recorded >= {date_offset_days("'-7'")}
                   AND l.status = 'active'
                 ORDER BY ph.change_percent ASC
                 LIMIT 50
@@ -2835,14 +2890,15 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
     Weekly average €/m² per district, using first_seen_date as the time axis.
     Returns a flat list of {week, week_label, distrito, avg_sqm, n_listings}.
     """
+    from db.dialect import iso_week, week_start as week_start_expr, date_offset_days
+
     try:
         with get_connection() as conn:
-            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
-                    strftime('%Y-%W', first_seen_date)            AS week,
-                    date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
+                    {iso_week('first_seen_date')}             AS week,
+                    {week_start_expr('first_seen_date')}      AS week_start,
                     distrito,
                     ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
                     COUNT(*) AS n_listings
@@ -2850,9 +2906,9 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
                 WHERE size_sqm > 20
                   AND price > 50000
                   AND first_seen_date IS NOT NULL
-                  AND first_seen_date >= date('now', ? || ' days')
-                GROUP BY week, distrito
-                HAVING n_listings >= 3
+                  AND first_seen_date >= {date_offset_days('?')}
+                GROUP BY week, week_start, distrito
+                HAVING COUNT(*) >= 3
                 ORDER BY week, distrito
             """, (f"-{weeks * 7}",))
             return [dict(r) for r in cur.fetchall()]
@@ -2897,15 +2953,16 @@ def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
         # Safety: never discard more than 20 % of the sample
         return filtered if len(filtered) >= len(values) * 0.8 else values
 
+    from db.dialect import iso_week, week_start as week_start_expr, date_offset_days
+
     try:
         with get_connection() as conn:
-            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             # Fetch one row per listing; grouping + median happen in Python
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
-                    strftime('%Y-%W', first_seen_date)            AS week,
-                    date(first_seen_date, 'weekday 1', '-7 days') AS week_start,
+                    {iso_week('first_seen_date')}            AS week,
+                    {week_start_expr('first_seen_date')}     AS week_start,
                     price,
                     CAST(price AS FLOAT) / NULLIF(size_sqm, 0)    AS price_sqm
                 FROM listings
@@ -2913,7 +2970,7 @@ def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
                   AND price > 50000
                   AND CAST(price AS FLOAT) / NULLIF(size_sqm, 0) < 25000
                   AND first_seen_date IS NOT NULL
-                  AND first_seen_date >= date('now', ? || ' days')
+                  AND first_seen_date >= {date_offset_days('?')}
                 ORDER BY week
             """, (f"-{weeks * 7}",))
             rows = cur.fetchall()
@@ -2970,7 +3027,17 @@ def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def init_alerts_table() -> None:
-    """Create custom_alerts table and run additive migrations if needed."""
+    """Ensure the ``custom_alerts`` table exists.
+
+    Postgres: schema is owned by Alembic — this is a no-op.
+    SQLite: keeps the legacy inline ``CREATE TABLE IF NOT EXISTS`` plus
+    additive ``ALTER TABLE`` migrations for older databases.
+    """
+    from db.dialect import is_postgres
+
+    if is_postgres():
+        return
+
     with get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS custom_alerts (
@@ -3003,9 +3070,11 @@ def init_alerts_table() -> None:
 
 def touch_alert_checked(alert_id: int) -> None:
     """Update last_checked timestamp for an alert (called when user views matches)."""
+    from db.dialect import current_timestamp
+
     with get_connection() as conn:
         conn.execute(
-            "UPDATE custom_alerts SET last_checked = datetime('now') WHERE id = ?",
+            f"UPDATE custom_alerts SET last_checked = {current_timestamp()} WHERE id = ?",
             (alert_id,),
         )
         conn.commit()
@@ -3015,7 +3084,6 @@ def get_alerts() -> List[Dict]:
     """Return all active custom alerts."""
     try:
         with get_connection() as conn:
-            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("SELECT * FROM custom_alerts WHERE active = 1 ORDER BY created_at DESC")
             return [dict(r) for r in cur.fetchall()]
@@ -3079,11 +3147,13 @@ def get_alert_matches(
         barrios   = json.loads(alert.get("barrios")   or "[]")
 
         # Time filter
+        from db.dialect import datetime_offset_hours
+
         if since_datetime:
             conditions = ["l.first_seen_date > ?", "l.status = 'active'"]
             params: List = [since_datetime]
         else:
-            conditions = ["l.first_seen_date >= datetime('now', ? || ' hours')", "l.status = 'active'"]
+            conditions = [f"l.first_seen_date >= {datetime_offset_hours('?')}", "l.status = 'active'"]
             params = [f"-{hours}"]
 
         if distritos:
@@ -3303,23 +3373,43 @@ def get_snapshot(
     If *date_str* is given, return exactly that day's value.
     Otherwise return the latest available value.
     """
+    # ``scope_value IS ?`` is SQLite's NULL-safe shorthand and Postgres
+    # doesn't accept it.  Branch on whether scope_value is None instead
+    # — works on both backends.
     try:
         with get_connection() as conn:
-            if date_str:
-                row = conn.execute(
-                    """SELECT metric_value FROM market_snapshots
-                       WHERE scope_type = ? AND scope_value IS ?
-                         AND metric_name = ? AND date_computed = ?""",
-                    (scope_type, scope_value, metric_name, date_str),
-                ).fetchone()
+            if scope_value is None:
+                if date_str:
+                    row = conn.execute(
+                        """SELECT metric_value FROM market_snapshots
+                           WHERE scope_type = ? AND scope_value IS NULL
+                             AND metric_name = ? AND date_computed = ?""",
+                        (scope_type, metric_name, date_str),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """SELECT metric_value FROM market_snapshots
+                           WHERE scope_type = ? AND scope_value IS NULL
+                             AND metric_name = ?
+                           ORDER BY date_computed DESC LIMIT 1""",
+                        (scope_type, metric_name),
+                    ).fetchone()
             else:
-                row = conn.execute(
-                    """SELECT metric_value FROM market_snapshots
-                       WHERE scope_type = ? AND scope_value IS ?
-                         AND metric_name = ?
-                       ORDER BY date_computed DESC LIMIT 1""",
-                    (scope_type, scope_value, metric_name),
-                ).fetchone()
+                if date_str:
+                    row = conn.execute(
+                        """SELECT metric_value FROM market_snapshots
+                           WHERE scope_type = ? AND scope_value = ?
+                             AND metric_name = ? AND date_computed = ?""",
+                        (scope_type, scope_value, metric_name, date_str),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """SELECT metric_value FROM market_snapshots
+                           WHERE scope_type = ? AND scope_value = ?
+                             AND metric_name = ?
+                           ORDER BY date_computed DESC LIMIT 1""",
+                        (scope_type, scope_value, metric_name),
+                    ).fetchone()
             return row[0] if row else None
     except Exception:
         return None
@@ -3339,14 +3429,24 @@ def get_snapshot_series(
     try:
         with get_connection() as conn:
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-            rows = conn.execute(
-                """SELECT date_computed, metric_value
-                   FROM market_snapshots
-                   WHERE scope_type = ? AND scope_value IS ?
-                     AND metric_name = ? AND date_computed >= ?
-                   ORDER BY date_computed""",
-                (scope_type, scope_value, metric_name, cutoff),
-            ).fetchall()
+            if scope_value is None:
+                rows = conn.execute(
+                    """SELECT date_computed, metric_value
+                       FROM market_snapshots
+                       WHERE scope_type = ? AND scope_value IS NULL
+                         AND metric_name = ? AND date_computed >= ?
+                       ORDER BY date_computed""",
+                    (scope_type, metric_name, cutoff),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT date_computed, metric_value
+                       FROM market_snapshots
+                       WHERE scope_type = ? AND scope_value = ?
+                         AND metric_name = ? AND date_computed >= ?
+                       ORDER BY date_computed""",
+                    (scope_type, scope_value, metric_name, cutoff),
+                ).fetchall()
             return [dict(r) for r in rows]
     except Exception:
         return []
@@ -3365,6 +3465,9 @@ def get_latest_snapshots(
     """
     try:
         with get_connection() as conn:
+            # ``scope_value IS s1.scope_value`` is SQLite's NULL-safe
+            # equality.  Postgres needs ``IS NOT DISTINCT FROM`` (which
+            # SQLite also accepts since 3.39).  Use that form for both.
             rows = conn.execute(
                 """
                 SELECT scope_value, metric_value, date_computed
@@ -3375,7 +3478,7 @@ def get_latest_snapshots(
                       SELECT MAX(date_computed)
                       FROM market_snapshots s2
                       WHERE s2.scope_type = s1.scope_type
-                        AND s2.scope_value IS s1.scope_value
+                        AND s2.scope_value IS NOT DISTINCT FROM s1.scope_value
                         AND s2.metric_name = s1.metric_name
                   )
                 ORDER BY metric_value DESC
