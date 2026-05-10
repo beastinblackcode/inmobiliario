@@ -80,17 +80,21 @@ def _compute_scope_metrics(
     count = 0
 
     # ── Active listings metrics ──────────────────────────────────────────
+    from db.dialect import current_date, julianday_diff
+    days_expr = julianday_diff(
+        f"COALESCE(last_seen_date, {current_date()})",
+        f"COALESCE(first_seen_date, last_seen_date, {current_date()})",
+    )
+    # ``ROUND(double precision, integer)`` doesn't exist in Postgres
+    # (only ``ROUND(numeric, integer)``).  Wrap in ``CAST(... AS DECIMAL)``
+    # — works on both backends (SQLite treats DECIMAL as REAL).
     row = conn.execute(
         f"""
         SELECT
             COUNT(*)                                                 AS active_count,
-            ROUND(AVG(price), 0)                                     AS avg_price,
-            ROUND(AVG(CASE WHEN size_sqm > 0 THEN price * 1.0 / size_sqm END), 2) AS avg_price_sqm,
-            ROUND(AVG(
-                CAST(julianday(COALESCE(last_seen_date, date('now')))
-                     - julianday(COALESCE(first_seen_date, last_seen_date, date('now')))
-                AS INTEGER)
-            ), 1)                                                    AS avg_days_on_market
+            ROUND(CAST(AVG(price) AS DECIMAL), 0)                    AS avg_price,
+            ROUND(CAST(AVG(CASE WHEN size_sqm > 0 THEN price * 1.0 / size_sqm END) AS DECIMAL), 2) AS avg_price_sqm,
+            ROUND(CAST(AVG({days_expr}) AS DECIMAL), 1)              AS avg_days_on_market
         FROM listings
         WHERE status = 'active' AND {where_clause}
         """,
@@ -117,7 +121,7 @@ def _compute_scope_metrics(
 
     sqm_prices = conn.execute(
         f"""
-        SELECT ROUND(price * 1.0 / size_sqm, 2)
+        SELECT ROUND(CAST(price * 1.0 / size_sqm AS DECIMAL), 2)
         FROM listings
         WHERE status = 'active' AND size_sqm > 0 AND price > 0 AND {where_clause}
         ORDER BY price * 1.0 / size_sqm
@@ -215,6 +219,20 @@ def _compute_scope_metrics(
     # ── Price drops (last 7 days) ────────────────────────────────────────
     week_ago = (datetime.strptime(date_str, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
     try:
+        # Build the JOIN-prefixed where clause cleanly.  ``where_clause``
+        # comes in two shapes from ``compute_all_snapshots``:
+        #   - ``"1=1"``                  (city scope, no filter)
+        #   - ``"distrito = ?"`` etc.    (distrito / barrio scope)
+        # The drops query joins on ``listings l``, so column refs need a
+        # ``l.`` prefix.  The earlier inline ``.replace`` chain was both
+        # confusing and broken on Postgres (produced ``l.1=1``).
+        if where_clause == "1=1":
+            joined_where = "1=1"
+        else:
+            joined_where = (
+                where_clause.replace("distrito ", "l.distrito ")
+                            .replace("barrio ", "l.barrio ")
+            )
         drops_row = conn.execute(
             f"""
             SELECT COUNT(DISTINCT ph.listing_id)
@@ -223,21 +241,18 @@ def _compute_scope_metrics(
             WHERE ph.change_amount < 0
               AND ph.date_recorded >= ?
               AND l.status = 'active'
-              AND {where_clause.replace('1=1', 'l.' + '1=1' if where_clause == '1=1' else where_clause)}
-            """.replace(
-                # Prefix table for joined queries
-                "distrito ", "l.distrito "
-            ).replace(
-                "barrio ", "l.barrio "
-            ),
+              AND {joined_where}
+            """,
             [week_ago] + params,
         ).fetchone()
         if drops_row:
             _upsert_snapshot(conn, date_str, scope_type, scope_value, "price_drops_count", drops_row[0])
             count += 1
-    except sqlite3.OperationalError:
-        # price_history table might not exist yet
-        pass
+    except Exception as exc:
+        # price_history table might not exist yet (sqlite3.OperationalError)
+        # or any other backend-specific OperationalError equivalent.
+        if type(exc).__name__ not in ("OperationalError", "UndefinedTable"):
+            raise
 
     return count
 
@@ -252,22 +267,27 @@ def compute_all_snapshots(date_str: str | None = None) -> int:
 
     conn = get_db()
 
-    # Ensure market_snapshots table exists
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS market_snapshots (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            date_computed   TEXT NOT NULL,
-            scope_type      TEXT NOT NULL,
-            scope_value     TEXT,
-            metric_name     TEXT NOT NULL,
-            metric_value    REAL,
-            UNIQUE(date_computed, scope_type, scope_value, metric_name)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_snapshots_lookup
-        ON market_snapshots(scope_type, scope_value, metric_name, date_computed)
-    """)
+    # Ensure market_snapshots table exists.
+    # Postgres: schema is owned by Alembic, so this is a no-op
+    # (the SQL below uses ``AUTOINCREMENT`` which Postgres rejects).
+    # SQLite: legacy inline CREATE keeps fresh local DBs working.
+    from db.dialect import is_postgres
+    if not is_postgres():
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_computed   TEXT NOT NULL,
+                scope_type      TEXT NOT NULL,
+                scope_value     TEXT,
+                metric_name     TEXT NOT NULL,
+                metric_value    REAL,
+                UNIQUE(date_computed, scope_type, scope_value, metric_name)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_lookup
+            ON market_snapshots(scope_type, scope_value, metric_name, date_computed)
+        """)
 
     total = 0
 

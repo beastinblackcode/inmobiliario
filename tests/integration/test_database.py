@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -23,6 +24,10 @@ import database as dbmod
 pytestmark = pytest.mark.integration
 
 
+def _is_postgres() -> bool:
+    return os.environ.get("DB_BACKEND", "sqlite").lower() == "postgres"
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # init_database
 # ──────────────────────────────────────────────────────────────────────────
@@ -31,18 +36,32 @@ pytestmark = pytest.mark.integration
 class TestInitDatabase:
     def test_creates_listings_table(self, tmp_db: Path):
         conn = get_db()
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
-        ).fetchall()
+        if _is_postgres():
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name='listings'"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='listings'"
+            ).fetchall()
         assert len(rows) == 1
 
     def test_creates_indexes(self, tmp_db: Path):
         conn = get_db()
-        idx_names = {
-            r[0] for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='listings'"
-            ).fetchall()
-        }
+        if _is_postgres():
+            idx_names = {
+                r[0] for r in conn.execute(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE schemaname='public' AND tablename='listings'"
+                ).fetchall()
+            }
+        else:
+            idx_names = {
+                r[0] for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='listings'"
+                ).fetchall()
+            }
         # Composite indexes from the perf optimisation pass
         assert "idx_active_distrito_price" in idx_names
         assert "idx_active_barrio_price"   in idx_names

@@ -297,15 +297,37 @@ def _get_pg_db() -> _PgConnection:
 
 
 def _close_pg_db() -> None:
+    """Hard-close the thread-local Postgres connection.
+
+    We forcibly close the underlying connection rather than returning
+    it to the pool, because a failed test or aborted transaction can
+    leave the connection in a state where every subsequent query just
+    returns ``InFailedSqlTransaction``.  Closing it ensures the pool
+    will hand out a fresh connection next time, at the cost of a small
+    reconnection overhead per ``close_db()`` call (acceptable: tests
+    do this between cases, runtime does it only at shutdown).
+    """
     conn: Optional[_PgConnection] = getattr(_local, "conn", None)
     if isinstance(conn, _PgConnection):
         try:
-            from db.connection_pg import get_pool
             try:
                 conn.rollback()
             except Exception:
                 pass
-            get_pool().putconn(conn._raw)
+            try:
+                # Return to pool first so it can dispose of the dead
+                # connection cleanly.  If we close before putconn the
+                # pool may complain or leak the slot.
+                from db.connection_pg import get_pool
+                get_pool().putconn(conn._raw)
+                conn._raw.close()
+            except Exception:
+                # Pool unreachable (e.g. testcontainer torn down) —
+                # close the raw connection directly.
+                try:
+                    conn._raw.close()
+                except Exception:
+                    pass
         finally:
             _local.conn = None
 

@@ -38,11 +38,22 @@ def _insert(conn, lid, distrito, barrio, price, sqm, last_seen, status="active")
 
 
 def _get_metric(conn, scope_type, scope_value, name):
-    row = conn.execute("""
-        SELECT metric_value FROM market_snapshots
-        WHERE scope_type=? AND scope_value IS ? AND metric_name=?
-        ORDER BY date_computed DESC LIMIT 1
-    """, (scope_type, scope_value, name)).fetchone()
+    # ``scope_value IS ?`` is SQLite's NULL-safe equality.  Postgres
+    # doesn't support that shape — we either need ``IS NOT DISTINCT FROM``
+    # or branch on whether the value is NULL.  Branching is simpler and
+    # works on both backends.
+    if scope_value is None:
+        row = conn.execute("""
+            SELECT metric_value FROM market_snapshots
+            WHERE scope_type=? AND scope_value IS NULL AND metric_name=?
+            ORDER BY date_computed DESC LIMIT 1
+        """, (scope_type, name)).fetchone()
+    else:
+        row = conn.execute("""
+            SELECT metric_value FROM market_snapshots
+            WHERE scope_type=? AND scope_value=? AND metric_name=?
+            ORDER BY date_computed DESC LIMIT 1
+        """, (scope_type, scope_value, name)).fetchone()
     return row[0] if row else None
 
 

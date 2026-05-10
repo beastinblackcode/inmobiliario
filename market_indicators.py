@@ -112,32 +112,34 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
         "trend": "stable"
     }
     
+    from db.dialect import iso_week
+
     with get_connection() as conn:
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT DISTINCT strftime('%Y-%W', first_seen_date) as week_num,
+
+        cursor.execute(f"""
+            SELECT DISTINCT {iso_week('first_seen_date')} as week_num,
                    MIN(first_seen_date) as week_start
             FROM listings
             WHERE first_seen_date IS NOT NULL
-            GROUP BY strftime('%Y-%W', first_seen_date)
-            ORDER BY first_seen_date DESC
+            GROUP BY {iso_week('first_seen_date')}
+            ORDER BY week_start DESC
             LIMIT ?
         """, (weeks,))
-        
+
         week_info = cursor.fetchall()
         week_info.reverse()  # Chronological order
-        
+
         for week_num, week_start in week_info:
             if not week_num:
                 continue
-                
-            cursor.execute("""
+
+            cursor.execute(f"""
                 SELECT price FROM listings
                 WHERE price > 0
-                AND strftime('%Y-%W', first_seen_date) = ?
+                AND {iso_week('first_seen_date')} = ?
             """, (week_num,))
-            
+
             prices = [row[0] for row in cursor.fetchall()]
 
             if len(prices) >= 10:
@@ -146,10 +148,10 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
                 median_price = statistics.median(prices)
 
                 # Also get €/m²
-                cursor.execute("""
+                cursor.execute(f"""
                     SELECT price / size_sqm FROM listings
                     WHERE price > 0 AND size_sqm > 0
-                    AND strftime('%Y-%W', first_seen_date) = ?
+                    AND {iso_week('first_seen_date')} = ?
                 """, (week_num,))
                 prices_sqm = [row[0] for row in cursor.fetchall()]
                 prices_sqm = _remove_outliers(prices_sqm) if prices_sqm else prices_sqm
@@ -264,35 +266,38 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
         "trend": "stable"
     }
     
+    from db.dialect import iso_week, julianday_diff
+
     with get_connection() as conn:
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT DISTINCT strftime('%Y-%W', last_seen_date) as week_num,
+
+        cursor.execute(f"""
+            SELECT DISTINCT {iso_week('last_seen_date')} as week_num,
                    MIN(last_seen_date) as week_start
             FROM listings
             WHERE status = 'sold_removed'
             AND last_seen_date IS NOT NULL
-            GROUP BY strftime('%Y-%W', last_seen_date)
-            ORDER BY last_seen_date DESC
+            GROUP BY {iso_week('last_seen_date')}
+            ORDER BY week_start DESC
             LIMIT ?
         """, (weeks,))
-        
+
         week_info = cursor.fetchall()
         week_info.reverse()
-        
+
         for week_num, week_start in week_info:
             if not week_num:
                 continue
-                
-            cursor.execute("""
-                SELECT julianday(last_seen_date) - julianday(first_seen_date) as days
+
+            days_expr = julianday_diff('last_seen_date', 'first_seen_date')
+            cursor.execute(f"""
+                SELECT {days_expr} as days
                 FROM listings
                 WHERE status = 'sold_removed'
                 AND first_seen_date IS NOT NULL
                 AND last_seen_date IS NOT NULL
-                AND strftime('%Y-%W', last_seen_date) = ?
-                AND julianday(last_seen_date) - julianday(first_seen_date) >= 1
+                AND {iso_week('last_seen_date')} = ?
+                AND {days_expr} >= 1
             """, (week_num,))
 
             # Note: 0-day observations (first_seen = last_seen) are excluded above —
@@ -377,35 +382,37 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
         "trend": "stable"
     }
     
+    from db.dialect import iso_week, date_plus_days
+
     with get_connection() as conn:
         cursor = conn.cursor()
-        
+
         # Get all weeks with data
-        cursor.execute("""
-            SELECT DISTINCT strftime('%Y-%W', first_seen_date) as week_num,
+        cursor.execute(f"""
+            SELECT DISTINCT {iso_week('first_seen_date')} as week_num,
                    MIN(first_seen_date) as week_start
             FROM listings
             WHERE first_seen_date IS NOT NULL
-            GROUP BY strftime('%Y-%W', first_seen_date)
-            ORDER BY first_seen_date DESC
+            GROUP BY {iso_week('first_seen_date')}
+            ORDER BY week_start DESC
             LIMIT ?
         """, (weeks,))
-        
+
         week_info = cursor.fetchall()
         week_info.reverse()
-        
+
         # Skip first week (baseline)
         for week_num, week_start in week_info[1:]:
             if not week_num:
                 continue
-            
+
             # New listings this week
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
-                WHERE strftime('%Y-%W', first_seen_date) = ?
+                WHERE {iso_week('first_seen_date')} = ?
             """, (week_num,))
             new_count = cursor.fetchone()[0]
-            
+
             # Sold/removed this week.
             # mark_stale_as_sold() uses a 14-day threshold before marking a
             # property as sold_removed, and does NOT update last_seen_date —
@@ -413,10 +420,11 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
             # So a property that disappeared in week W has last_seen_date ≈ W-2.
             # We compensate by shifting the detection window +14 days:
             # "absorbed in week W" ≡ last_seen_date falls in week W-2.
-            cursor.execute("""
+            shifted_last_seen = date_plus_days('last_seen_date', "'+14'")
+            cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
-                AND strftime('%Y-%W', date(last_seen_date, '+14 days')) = ?
+                AND {iso_week(shifted_last_seen)} = ?
             """, (week_num,))
             sold_count = cursor.fetchone()[0]
             
@@ -909,8 +917,9 @@ def get_affordability_index(euribor_rate: float = None) -> Dict:
         # Use listings from the last 4 complete scrape weeks instead of ALL
         # active listings.  The full active set includes the bulk-import week
         # which has a very different composition and inflates the median.
-        cursor.execute("""
-            SELECT strftime('%Y-%W', first_seen_date) AS wk, COUNT(*) AS cnt
+        from db.dialect import iso_week
+        cursor.execute(f"""
+            SELECT {iso_week('first_seen_date')} AS wk, COUNT(*) AS cnt
             FROM listings WHERE first_seen_date IS NOT NULL AND price > 0
             GROUP BY wk ORDER BY wk DESC LIMIT 8
         """)
@@ -930,7 +939,7 @@ def get_affordability_index(euribor_rate: float = None) -> Dict:
             cursor.execute(f"""
                 SELECT price FROM listings
                 WHERE price > 0
-                AND strftime('%Y-%W', first_seen_date) IN ({placeholders})
+                AND {iso_week('first_seen_date')} IN ({placeholders})
             """, recent)
         else:
             cursor.execute("""
@@ -1453,6 +1462,8 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
     }
 
     try:
+        from db.dialect import date_offset_days
+
         with get_connection() as conn:
             cursor = conn.cursor()
 
@@ -1479,9 +1490,9 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
                 INNER JOIN listings l ON l.listing_id = ph.listing_id
                 WHERE l.status = 'active'
                   AND ph.price_change < 0
-                  AND ph.date >= date('now', ?)
+                  AND ph.date >= """ + date_offset_days('?') + """
                 """,
-                (f"-{window_days} days",),
+                (f"-{window_days}",),
             )
             row = cursor.fetchone()
             listings_with_drop = row[0] or 0
@@ -1502,10 +1513,10 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
                 INNER JOIN listings l ON l.listing_id = ph.listing_id
                 WHERE l.status = 'active'
                   AND ph.price_change < 0
-                  AND ph.date >= date('now', ?)
-                  AND ph.date <  date('now', ?)
+                  AND ph.date >= """ + date_offset_days('?') + """
+                  AND ph.date <  """ + date_offset_days('?') + """
                 """,
-                (f"-{window_days * 2} days", f"-{window_days} days"),
+                (f"-{window_days * 2}", f"-{window_days}"),
             )
             prev_with_drop = cursor.fetchone()[0] or 0
             prev_ratio = round(prev_with_drop / total_active * 100, 1)
@@ -2033,26 +2044,37 @@ def get_sales_speed_by_zone(zone_type: str = "district") -> Dict:
         "zones": []
     }
 
+    from db.dialect import is_postgres, julianday_diff
+
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        cursor.execute("PRAGMA table_info(listings)")
-        cols = {row[1] for row in cursor.fetchall()}
+        # Cheap column-existence check (PRAGMA in SQLite, information_schema in Postgres)
+        if is_postgres():
+            cursor.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='listings'"
+            )
+            cols = {row[0] for row in cursor.fetchall()}
+        else:
+            cursor.execute("PRAGMA table_info(listings)")
+            cols = {row[1] for row in cursor.fetchall()}
         if col not in cols:
             result["error"] = f"Column '{col}' not found in listings table"
             return result
 
+        days_expr = julianday_diff('last_seen_date', 'first_seen_date')
         cursor.execute(f"""
             SELECT
                 {col},
-                julianday(last_seen_date) - julianday(first_seen_date) AS days
+                {days_expr} AS days
             FROM listings
             WHERE status = 'sold_removed'
               AND first_seen_date IS NOT NULL
               AND last_seen_date IS NOT NULL
               AND {col} IS NOT NULL
               AND {col} != ''
-              AND julianday(last_seen_date) - julianday(first_seen_date) >= 0
+              AND {days_expr} >= 0
         """)
         rows = cursor.fetchall()
 
