@@ -166,7 +166,23 @@ def get_connection():
 
 
 def init_database():
-    """Initialize database schema."""
+    """Initialize database schema.
+
+    SQLite: keeps the legacy inline ``CREATE TABLE IF NOT EXISTS``
+    statements + indexes + auto-import.  This branch hasn't changed.
+
+    Postgres: schema is owned by Alembic (``alembic upgrade head``);
+    this function only runs the bootstrap data load (Notarial CSV
+    import).  All the CREATE TABLE statements below — most of which
+    use ``AUTOINCREMENT``, an SQLite-only keyword — would error
+    against Postgres anyway.
+    """
+    from db.dialect import is_postgres  # local import to avoid cycles
+
+    if is_postgres():
+        _auto_import_notarial()
+        return
+
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -418,16 +434,19 @@ def get_scraping_log(limit: int = 50) -> List[Dict]:
     """
     Retrieve scraping execution history.
     """
+    from db.dialect import has_table_sql
+
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
             # Check if table exists first (migration might not have run yet if scraper hasn't run)
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='scraping_log'")
+            sql, params = has_table_sql("scraping_log")
+            cursor.execute(sql, params)
             if not cursor.fetchone():
                 return []
-                
+
             cursor.execute("""
-                SELECT 
+                SELECT
                     id, start_time, end_time, duration_minutes,
                     properties_processed, new_listings, updated_listings,
                     total_requests, cost_estimate_usd, status
@@ -938,15 +957,18 @@ def get_listings_page(
         ).fetchone()[0]
 
         # Derived columns computed in SQL — no more df.apply()
-        derived = """,
+        from db.dialect import current_date, julianday_diff
+
+        days_on_market_expr = julianday_diff(
+            f"COALESCE(last_seen_date, {current_date()})",
+            f"COALESCE(first_seen_date, last_seen_date, {current_date()})",
+        )
+        derived = f""",
             CASE WHEN size_sqm > 0
                  THEN ROUND(price * 1.0 / size_sqm, 2)
                  ELSE NULL
             END AS price_per_sqm,
-            CAST(
-                julianday(COALESCE(last_seen_date, date('now')))
-                - julianday(COALESCE(first_seen_date, last_seen_date, date('now')))
-            AS INTEGER) AS days_on_market"""
+            {days_on_market_expr} AS days_on_market"""
 
         sql = f"SELECT *{derived} FROM listings WHERE {where} ORDER BY {order_by}"
 
@@ -1896,9 +1918,9 @@ def get_rental_yields(min_listings: int = 3) -> List[Dict]:
             cursor = conn.cursor()
 
             # Check table exists (migration may not have run yet)
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='rental_prices'"
-            )
+            from db.dialect import has_table_sql
+            sql_, params_ = has_table_sql("rental_prices")
+            cursor.execute(sql_, params_)
             if not cursor.fetchone():
                 return []
 
@@ -2543,9 +2565,9 @@ def get_rental_yield_history(weeks: int = 12) -> List[Dict]:
             cursor = conn.cursor()
 
             # Check table exists
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='rental_prices'"
-            )
+            from db.dialect import has_table_sql
+            sql_, params_ = has_table_sql("rental_prices")
+            cursor.execute(sql_, params_)
             if not cursor.fetchone():
                 return []
 

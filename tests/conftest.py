@@ -34,32 +34,36 @@ if str(_PROJECT_ROOT) not in sys.path:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def tmp_db(tmp_path: Path) -> Iterator[Path]:
-    """
-    Create a fresh empty SQLite DB at a temp path, run init_database(),
-    rebind both DATABASE_PATH globals, and clean up afterwards.
+def _db_backend() -> str:
+    """Read ``DB_BACKEND`` env var; default to ``sqlite``.
 
-    Yields the Path to the temp DB file.
+    Defined here (instead of importing from ``db.connection``) so the
+    fixture file can decide which sub-fixture to delegate to without
+    importing application code first.
+    """
+    return "postgres" if os.environ.get("DB_BACKEND", "sqlite").lower() == "postgres" else "sqlite"
+
+
+@pytest.fixture
+def _tmp_db_sqlite(tmp_path: Path) -> Iterator[Path]:
+    """SQLite implementation of the ``tmp_db`` fixture (legacy default).
+
+    Renamed from the original ``tmp_db`` body — same behaviour:
+    fresh sqlite file, ``init_database()`` called, optional
+    ``price_history`` table created, paths rebound, cleanup at end.
     """
     db_path = tmp_path / "test.db"
 
     import db.connection as dbconn  # noqa: WPS433
     import database as dbmod        # noqa: WPS433
 
-    # Save originals so we can restore on teardown
     orig_conn_path = dbconn.DATABASE_PATH
     orig_mod_path = dbmod.DATABASE_PATH
 
     dbconn.set_database_path(str(db_path))
     dbmod.DATABASE_PATH = str(db_path)
-
-    # Reset thread-local connection so the new path is picked up
     dbconn.close_db()
 
-    # Initialize schema (and the optional price_history table that
-    # several modules — insert_listing, rank_opportunities, snapshots —
-    # assume exists).
     dbmod.init_database()
 
     from db.connection import get_db
@@ -81,10 +85,94 @@ def tmp_db(tmp_path: Path) -> Iterator[Path]:
 
     yield db_path
 
-    # Teardown: close connection, restore globals
     dbconn.close_db()
     dbconn.set_database_path(orig_conn_path)
     dbmod.DATABASE_PATH = orig_mod_path
+
+
+@pytest.fixture
+def _tmp_db_postgres(pg_url: str) -> Iterator[str]:
+    """Postgres implementation of ``tmp_db``.
+
+    Reuses the session-scoped ``pg_url`` testcontainer, runs ``alembic
+    upgrade head`` once (idempotent), points ``DATABASE_URL`` at it so
+    ``db.connection_pg`` resolves to the container, and truncates
+    every public table between tests for isolation. Returns the URL
+    string instead of a Path (no test dereferences the value, so the
+    type change is safe).
+    """
+    import psycopg
+
+    orig_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = pg_url
+
+    # Reset cached pool + thread-local connection so both pickup the URL.
+    try:
+        from db.connection_pg import reset_pool_for_tests  # noqa: WPS433
+        reset_pool_for_tests()
+    except ImportError:
+        pass
+    import db.connection as dbconn  # noqa: WPS433
+    dbconn.close_db()
+
+    # Apply schema (idempotent).
+    from alembic.config import Config  # noqa: WPS433
+    from alembic import command  # noqa: WPS433
+
+    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_PROJECT_ROOT / "alembic"))
+    command.upgrade(cfg, "head")
+
+    yield pg_url
+
+    # Per-test isolation: truncate every public table (skip alembic_version).
+    with psycopg.connect(pg_url) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+        )
+        tables = [r[0] for r in cur.fetchall() if r[0] != "alembic_version"]
+        if tables:
+            cur.execute(
+                "TRUNCATE TABLE "
+                + ", ".join(f'"{t}"' for t in tables)
+                + " RESTART IDENTITY CASCADE"
+            )
+        conn.commit()
+
+    dbconn.close_db()
+    if orig_url is None:
+        os.environ.pop("DATABASE_URL", None)
+    else:
+        os.environ["DATABASE_URL"] = orig_url
+    try:
+        from db.connection_pg import reset_pool_for_tests  # noqa: WPS433
+        reset_pool_for_tests()
+    except ImportError:
+        pass
+
+
+@pytest.fixture
+def tmp_db(request):
+    """Backend-dispatching schema-loaded test database.
+
+    Behaviour driven by the ``DB_BACKEND`` env var:
+
+      * Unset / ``sqlite``  → fresh SQLite file (legacy default).
+      * ``postgres``        → testcontainers Postgres + alembic upgrade.
+
+    Tests don't dereference the yielded value (they rely on the side
+    effect of having a usable DB through ``get_connection()`` /
+    ``get_db()``).  The legacy SQLite branch returns a ``Path`` for
+    backward compatibility; the Postgres branch returns a URL string.
+
+    Implementation note: ``getfixturevalue`` resolves the chosen
+    sub-fixture for us, runs its setup, and registers its teardown
+    against the current test — so we just forward the value.
+    """
+    if _db_backend() == "postgres":
+        return request.getfixturevalue("_tmp_db_postgres")
+    return request.getfixturevalue("_tmp_db_sqlite")
 
 
 # ──────────────────────────────────────────────────────────────────────────
