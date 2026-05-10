@@ -67,6 +67,26 @@ _pool_lock = threading.Lock()
 _pool: Optional[ConnectionPool] = None
 
 
+def _shutdown_pool() -> None:
+    """``atexit`` hook that closes the global pool on interpreter shutdown.
+
+    Without this, psycopg's pool-worker threads outlive the script and
+    print ``couldn't stop thread 'pool-1-worker-X'`` warnings before
+    being killed by the runtime.  Cosmetic but noisy.
+    """
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.close()
+        except Exception:
+            pass
+        _pool = None
+
+
+import atexit  # noqa: E402  — keep imports at top, hook close to module
+atexit.register(_shutdown_pool)
+
+
 def _resolve_url() -> str:
     """Return the active Postgres connection URL or raise.
 
@@ -74,6 +94,13 @@ def _resolve_url() -> str:
       1. ``st.secrets["postgres"]["url"]`` (Streamlit Cloud / local Streamlit)
       2. ``DATABASE_URL`` env var
       3. ``POSTGRES_URL`` env var
+
+    The returned URL is normalised so libpq accepts it even if the
+    password contains characters that would otherwise be misparsed
+    (most commonly ``+``, which libpq's URL parser decodes as a
+    literal plus, but psycopg's URL parser treats as space).  We
+    re-encode the password component defensively — see
+    ``_normalise_url()``.
     """
     # 1. Streamlit secrets — only when running inside a Streamlit context.
     try:
@@ -81,7 +108,7 @@ def _resolve_url() -> str:
 
         url = st.secrets.get("postgres", {}).get("url")
         if url:
-            return url
+            return _normalise_url(url)
     except Exception:
         # Streamlit not available, or no secret configured. Fall through.
         pass
@@ -89,12 +116,52 @@ def _resolve_url() -> str:
     # 2./3. Environment variables.
     url = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
     if url:
-        return url
+        return _normalise_url(url)
 
     raise RuntimeError(
         "No Postgres connection URL configured. "
         "Set DATABASE_URL (env) or st.secrets['postgres']['url'] (Streamlit)."
     )
+
+
+def _normalise_url(url: str) -> str:
+    """Re-encode the password if it contains URL-unsafe chars.
+
+    psycopg's URL parser uses ``urllib.parse``, which decodes ``+`` as
+    a space inside the userinfo component. Many real-world passwords
+    (Supabase included) contain ``+``, leading to confusing
+    ``password authentication failed`` errors in production.  We
+    detect raw ``+`` and ``%`` in the password and percent-encode them
+    so libpq sees the original characters.
+
+    Idempotent: a URL whose password is already correctly encoded
+    passes through unchanged.
+    """
+    import re
+    from urllib.parse import quote
+
+    # Match ``scheme://user:password@host…``. Anything before the last
+    # ``@`` (before the first ``/`` of the path) is userinfo.
+    m = re.match(
+        r"^(?P<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)"
+        r"(?P<user>[^:@/]+)"
+        r":(?P<pwd>[^@]*)"
+        r"@(?P<rest>.*)$",
+        url,
+    )
+    if not m:
+        return url
+    pwd = m.group("pwd")
+    # Already-encoded sequences (``%xx``) stay as-is; anything that
+    # would re-decode wrong gets quoted.  ``safe=''`` quotes everything
+    # that isn't an unreserved char, which is the right call for
+    # passwords.  We also accept already-encoded passwords by skipping
+    # if the pwd contains no raw ``+`` or ``%`` followed by non-hex.
+    if "+" not in pwd and not re.search(r"%[^0-9A-Fa-f]", pwd):
+        # Looks already URL-safe — leave alone.
+        return url
+    encoded = quote(pwd, safe="")
+    return f"{m.group('scheme')}{m.group('user')}:{encoded}@{m.group('rest')}"
 
 
 def get_pool() -> ConnectionPool:
