@@ -211,8 +211,12 @@ def _load_lanzamientos(conn: sqlite3.Connection) -> Dict:
             }
             for r in reversed(rows)
         ]
-    except sqlite3.OperationalError as exc:
-        # Table may not exist on a fresh DB — that's fine, return base
+    except Exception as exc:
+        # Table may not exist on a fresh DB, or a Postgres error path
+        # bubbled up — either way we degrade gracefully.  Originally
+        # only ``sqlite3.OperationalError`` was caught; widened during
+        # the SQLite → Postgres migration so the same fallback covers
+        # ``psycopg.errors.UndefinedTable`` and friends.
         print(f"⚠️  cgpj_lanzamientos read failed: {exc}", file=sys.stderr)
 
     return result
@@ -571,17 +575,16 @@ def build_clean_metrics() -> Dict[str, Any]:
     macro          = _load_macro()
     euribor        = (macro.get("euribor") or {}).get("current")
 
-    # Open the DB read-only — we only ever query notarial_prices and
-    # cgpj_lanzamientos through the guarded _query() helper.
-    conn = sqlite3.connect(f"file:{_DATABASE_PATH}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
+    # Open the DB through the backend-dispatching shim — picks SQLite or
+    # Postgres based on DB_BACKEND.  We only ever query notarial_prices
+    # and cgpj_lanzamientos through the guarded _query() helper, both of
+    # which exist in both schemas with identical column names.
+    from db.connection import get_connection
+    with get_connection() as conn:
         zones = _safe(_load_notarial_zones, conn, default=[]) or []
         valid_sqm = [z["price_per_sqm"] for z in zones if z["price_per_sqm"]]
         madrid_median_sqm = statistics.median(valid_sqm) if valid_sqm else None
         lanzamientos = _safe(_load_lanzamientos, conn, default={}) or {}
-    finally:
-        conn.close()
 
     rental_yields = _build_rental_yields(zones)
 
@@ -709,14 +712,17 @@ def verify_clean(metrics: Dict[str, Any]) -> List[str]:
 
 
 def main() -> int:
-    global _DATABASE_PATH  # noqa: PLW0603
     parser = argparse.ArgumentParser(description="Export the CLEAN public metrics JSON")
     parser.add_argument("-o", "--output", help="output JSON file path")
     parser.add_argument("--verify", action="store_true", help="run sanity checks on the output and fail if any")
-    parser.add_argument("--db", default=_DATABASE_PATH, help="path to the SQLite DB (default: real_estate.db)")
+    parser.add_argument("--db", default=None, help="path to the SQLite DB (only honoured when DB_BACKEND=sqlite)")
     args = parser.parse_args()
 
-    _DATABASE_PATH = args.db
+    # ``--db`` only applies when we're on SQLite; with Postgres the URL
+    # comes from DATABASE_URL / st.secrets and there's no file to point at.
+    if args.db is not None:
+        from db.connection import set_database_path
+        set_database_path(args.db)
 
     try:
         metrics = build_clean_metrics()
