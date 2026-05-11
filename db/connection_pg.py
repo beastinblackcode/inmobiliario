@@ -50,8 +50,41 @@ from contextlib import contextmanager
 from typing import Iterator, Optional
 
 import psycopg
+from psycopg.adapt import Loader
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+
+
+# ──────────────────────────────────────────────────────────────────────
+# NUMERIC → float type loader
+# ──────────────────────────────────────────────────────────────────────
+#
+# Postgres returns ``AVG(integer)`` and ``ROUND(numeric, n)`` as
+# Python ``decimal.Decimal`` by default.  SQLite returned ``float`` for
+# the same queries.  Multiple call sites in ``analytics.py`` /
+# ``tabs/opportunities_tab.py`` / ``market_indicators.py`` do
+# ``aggregated_value / some_float`` (e.g. percentile of a barrio
+# median against a city-wide float), which Python rejects with
+# ``TypeError: unsupported operand type(s) for /: 'decimal.Decimal' and 'float'``.
+#
+# Rather than sprinkle ``float(...)`` casts across hundreds of call
+# sites (and risk missing some until the next Streamlit click hits a
+# new code path), we tell psycopg to decode NUMERIC as float at the
+# read boundary.  Currency precision concerns are nil: we are computing
+# ratios and percentages off €-integer columns, not doing accounting.
+
+
+class _NumericAsFloatLoader(Loader):
+    """Decode Postgres NUMERIC into Python ``float`` instead of ``Decimal``."""
+
+    def load(self, data: bytes) -> float:
+        return float(data.decode())
+
+
+# Register globally so every connection (including the ones used by
+# ``alembic`` and ad-hoc scripts) gets the same behaviour.  The
+# ``numeric`` OID covers both ``NUMERIC`` and ``DECIMAL`` (same type in PG).
+psycopg.adapters.register_loader("numeric", _NumericAsFloatLoader)
 
 
 # Pool sizing: Supabase free-tier transaction pooler exposes 200
