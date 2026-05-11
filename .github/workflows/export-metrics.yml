@@ -3,10 +3,14 @@ name: Export Public Metrics (clean)
 # Phase 1 of the Idealista decoupling: this workflow runs the CLEAN
 # exporter (export_clean_metrics.py) which only reads non-scraping data
 # sources (Notariado CIEN, BCE, INE, CGPJ, Open Data Madrid).  It is
-# fully decoupled from `daily_scraper.yml` — they share the SQLite DB
+# fully decoupled from `daily_scraper.yml` — they share the Postgres DB
 # only because the clean exporter still needs to read `notarial_prices`
 # and `cgpj_lanzamientos`, both of which are populated by independent
 # importers, not by the Idealista scraper.
+#
+# Post Phase D cutover (May 2026): reads happen against the Supabase
+# Postgres pointed at by ``DATABASE_URL``.  No more Google Drive
+# download step at the start of the run.
 
 on:
   schedule:
@@ -25,6 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    env:
+      DB_BACKEND: postgres
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,21 +45,6 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      # The clean exporter reads notarial_prices + cgpj_lanzamientos
-      # from the same SQLite DB the scraper writes to. Both are
-      # populated by independent importers (Notariado CSV / CGPJ portal).
-      - name: Download database from Google Drive
-        env:
-          GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
-        run: |
-          python - <<'EOF'
-          import os, gdown, pathlib
-          file_id = os.environ["GOOGLE_DRIVE_FILE_ID"]
-          gdown.download(f"https://drive.google.com/uc?id={file_id}", "real_estate.db", quiet=False)
-          size_mb = pathlib.Path("real_estate.db").stat().st_size / 1024 / 1024
-          print(f"Downloaded: {size_mb:.1f} MB")
-          EOF
 
       # The --verify flag fails the run if any "tóxico" key leaks into
       # the output. This is the safety net: a regression in the

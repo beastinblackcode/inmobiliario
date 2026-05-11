@@ -1,33 +1,76 @@
-# Deployment Guide: Streamlit Cloud
+# Deployment Guide: Streamlit Cloud + Supabase Postgres
 
-This guide walks you through deploying the Madrid Real Estate Tracker to Streamlit Community Cloud.
+This guide walks you through deploying the Madrid Real Estate Tracker
+to Streamlit Community Cloud, backed by a Supabase Postgres database.
 
 ## Prerequisites
 
 - GitHub account
-- Google Drive account (for database hosting)
-- Local copy of `real_estate.db` with data
+- Supabase account (free tier is enough — DB stays well under 500 MB)
+- Local copy of `real_estate.db` (only for the one-time cutover load —
+  see "Cutover from SQLite" below if you are migrating an existing
+  deployment)
 
 ---
 
-## Step 1: Upload Database to Google Drive
+## Step 1: Provision Postgres (Supabase)
 
-1. **Upload the database file:**
-   - Go to [Google Drive](https://drive.google.com)
-   - Upload `real_estate.db` to your Drive
-   - Right-click the file → "Share" → "Get link"
-   - Set permissions to "Anyone with the link can view"
+1. **Create a project:**
+   - Sign in at [supabase.com](https://supabase.com) → "New project"
+   - Pick the region closest to your traffic (Europe West for Madrid)
+   - Set a strong database password — you will paste it into the URL
+     below.  **Note:** Supabase often generates passwords that
+     contain `+`; that's fine, the runtime URL-encodes them.
 
-2. **Extract the file ID:**
-   - Copy the share link (format: `https://drive.google.com/file/d/{FILE_ID}/view`)
-   - Extract the `FILE_ID` part (long alphanumeric string)
-   - Save this ID - you'll need it later
+2. **Grab the connection URL.**  Supabase exposes two pooler ports:
 
-**Example:**
+   | Use case | Port | When to use it |
+   |---|---|---|
+   | Long-running process (Streamlit, scraper) | **6543** (transaction pooler) | Default — pgbouncer in front, free IPv4, scales fine for our concurrency |
+   | Migrations / admin (`alembic`, ad-hoc `CREATE INDEX CONCURRENTLY`, `COPY`) | **5432** (session pooler) | Required for statements pgbouncer can't multiplex |
+
+   Both URLs look like:
+   ```
+   postgresql://postgres.<ref>:<PASSWORD>@aws-1-<region>.pooler.supabase.com:<PORT>/postgres
+   ```
+
+3. **Apply the schema:**
+   ```bash
+   export DATABASE_URL='postgresql://postgres.<ref>:<PWD>@aws-1-<region>.pooler.supabase.com:5432/postgres'
+   alembic upgrade head
+   ```
+
+   (Use port `5432` here — Alembic runs DDL.)
+
+If you are deploying for the first time with no historical data, you
+are done — skip the cutover section and continue at Step 2.
+
+---
+
+## Cutover from SQLite (one-time, only when migrating an existing deploy)
+
+If you already have a `real_estate.db` you want to preserve:
+
+```bash
+# Schema first (as above).
+export DATABASE_URL='postgresql://postgres.<ref>:<PWD>@…:5432/postgres'
+alembic upgrade head
+
+# Load every row.  ~96k rows / ~15s on a clean target.
+python migration_sqlite_to_postgres.py
+
+# Sanity-check via Streamlit before flipping any environment.
+DB_BACKEND=postgres DATABASE_URL="$DATABASE_URL" streamlit run app.py
 ```
-Link: https://drive.google.com/file/d/1a2b3c4d5e6f7g8h9i0j/view
-File ID: 1a2b3c4d5e6f7g8h9i0j
-```
+
+The backfill is single-transaction; on any error it rolls back and
+exits non-zero.  `--truncate` re-runs are idempotent.  See the
+docstring at the top of `migration_sqlite_to_postgres.py` for the
+full mode list and data-quality notes.
+
+Once the Streamlit smoke looks healthy, flip the runtime by following
+Step 5 (Configure Secrets) and re-enable the Daily Scraper cron in
+`.github/workflows/daily_scraper.yml` (uncomment the `schedule` block).
 
 ---
 
@@ -112,15 +155,22 @@ git status | grep -E "\.env|\.db|secrets\.toml"
    - Paste the following TOML configuration:
 
    ```toml
-   [database]
-   google_drive_file_id = "YOUR_FILE_ID_HERE"
+   [postgres]
+   # Transaction pooler URL (port 6543) — works for Streamlit's
+   # long-running process.  Use the Session pooler (port 5432) for
+   # one-off admin tasks (alembic, COPY) only.
+   url = "postgresql://postgres.<ref>:<PASSWORD>@aws-1-<region>.pooler.supabase.com:6543/postgres"
 
    [auth.users_hashed]
    # Generate with: python gen_password_hash.py
    luis  = "$2b$12$EXAMPLE_REPLACE_ME"
    ```
 
-   - Replace `YOUR_FILE_ID_HERE` with the Google Drive file ID from Step 1
+   - Replace the `<ref>`, `<PASSWORD>`, and `<region>` placeholders
+     with the values from your Supabase project.  Passwords
+     containing `+` are accepted as-is; the runtime percent-encodes
+     them defensively before handing the URL to libpq (see
+     `db/connection_pg._normalise_url`).
    - Replace each `$2b$12$EXAMPLE_REPLACE_ME` with a real bcrypt hash:
      ```bash
      python gen_password_hash.py
@@ -140,10 +190,17 @@ git status | grep -E "\.env|\.db|secrets\.toml"
    `⚠️ DEPRECATED` warning to stderr on every login. Migrate to
    `[auth.users_hashed]` and delete the old block.
 
-3. **Reboot app:**
+3. **Select the Postgres backend** (env var, not secret):
+   - In the same Settings panel, open the "Advanced settings" /
+     "Environment variables" section.
+   - Add ``DB_BACKEND = postgres``.
+   - Without this var, the runtime defaults to SQLite (legacy) and
+     the `[postgres]` URL above is ignored.
+
+4. **Reboot app:**
    - Click "Reboot app" button
-   - App will restart and download the database
-   - Should load successfully now
+   - App will restart, the connection pool opens lazily on first
+     query, and the dashboard renders directly from Supabase.
 
 ---
 
@@ -191,33 +248,27 @@ git status | grep -E "\.env|\.db|secrets\.toml"
 
 ### Updating Data (Daily Scraping)
 
-**On your local machine:**
+Both the scraper and the public exporter run on GitHub Actions and
+write straight to the same Supabase Postgres that Streamlit Cloud
+reads from.  There is no DB file to ship anywhere.
 
-1. Run the scraper:
-   ```bash
-   cd /Users/luisnuno/Downloads/workspace/inmobiliario
-   source venv/bin/activate
-   python scraper.py
-   ```
+**Required GitHub secrets** (Repo → Settings → Secrets and variables → Actions):
 
-2. Upload updated database to Google Drive:
-   - Go to Google Drive
-   - Delete old `real_estate.db`
-   - Upload new `real_estate.db`
-   - **Important:** Keep the same file ID (replace, don't create new)
+| Secret | Used by | Notes |
+|---|---|---|
+| `DATABASE_URL` | both workflows | Same Supabase URL as Streamlit, port `6543` (transaction pooler) — pgbouncer fronts both readers and writers fine |
+| `BRIGHTDATA_*` | `daily_scraper.yml` | Existing — proxy creds |
+| `GMAIL_APP_PASSWORD` | `daily_scraper.yml` | Existing — for `email_report.py` |
+| `THERMOMETER_PAT` | `export-metrics.yml` | Existing — for the cross-repo push to `market-thermometer` |
 
-3. Streamlit Cloud will automatically use the updated database:
-   - Next user visit will download fresh data
-   - Cache expires after 5 minutes
+The `GOOGLE_DRIVE_FILE_ID` and `GOOGLE_SA_CREDENTIALS` secrets are
+**no longer used by either workflow** post-cutover; delete them when
+convenient.
 
-**Automated sync (optional):**
-
-Install `rclone` to automate Google Drive sync:
-```bash
-brew install rclone
-rclone config  # Configure Google Drive
-rclone copy real_estate.db gdrive:/ --update
-```
+**Re-enabling the scraper cron** (currently paused — see banner at
+the top of `.github/workflows/daily_scraper.yml`): uncomment the
+`schedule` block.  Do this **only after** the Postgres backfill has
+been verified by a local Streamlit run.
 
 ### Updating Code
 
@@ -260,34 +311,43 @@ rclone copy real_estate.db gdrive:/ --update
 
 ## Troubleshooting
 
-### "Database configuration missing in secrets"
+### "No Postgres connection URL configured"
 
-**Problem:** Secrets not configured correctly
-
-**Solution:**
-1. Go to app settings → Secrets
-2. Verify TOML format is correct
-3. Ensure `[database]` section exists
-4. Check file ID has no extra spaces
-
-### "Failed to download database"
-
-**Problem:** Google Drive file not accessible
+**Problem:** `db.connection_pg._resolve_url` couldn't find a URL in
+either `st.secrets["postgres"]["url"]`, `DATABASE_URL`, or `POSTGRES_URL`.
 
 **Solution:**
-1. Check file sharing settings (must be "Anyone with link")
-2. Verify file ID is correct
-3. Try downloading manually: `https://drive.google.com/uc?id={FILE_ID}`
-4. Check file size (Streamlit Cloud has 1GB limit)
+1. In Streamlit Cloud, verify `[postgres]` block is in secrets with a
+   `url` field.
+2. Confirm `DB_BACKEND=postgres` is set under Advanced settings —
+   without it the runtime stays on SQLite and never inspects the
+   `[postgres]` block.
+3. For GitHub Actions, confirm `DATABASE_URL` is set under repo
+   secrets and the workflow's `env:` block exposes it.
 
-### "ModuleNotFoundError: No module named 'gdown'"
+### "password authentication failed for user 'postgres'"
 
-**Problem:** Dependencies not installed
+**Problem:** Most commonly a `+` in the password that some URL parser
+decoded as a space.  The runtime handles this defensively
+(`db.connection_pg._normalise_url`), but if you are running ad-hoc
+queries with another tool, you may hit it.
 
 **Solution:**
-1. Verify `gdown>=4.7.1` is in `requirements.txt`
-2. Push updated requirements to GitHub
-3. Streamlit Cloud will rebuild automatically
+1. Percent-encode the password component: `+` → `%2B`.
+2. Test with `psql "<URL>" -c 'SELECT 1'` before pasting it into a
+   secret.
+
+### "duplicate key value violates unique constraint" on first cron run
+
+**Problem:** The Postgres schema enforces UNIQUE on
+`price_history(listing_id, date_recorded)`.  An older SQLite snapshot
+had a few same-day duplicates that pre-dated
+`migration_dedupe_price_history.py`.
+
+**Solution:** the Phase C backfill (`migration_sqlite_to_postgres.py`)
+already dedupes at read time, so this should not happen after a clean
+cutover.  If you see it from a *running* scraper, it is a writer bug
+in `insert_listing` — file an issue, do not silence the constraint.
 
 ### App is slow or crashes
 
@@ -310,7 +370,9 @@ Before going live, verify:
 - [ ] `.streamlit/secrets.toml` is in `.gitignore`
 - [ ] No secrets in commit history (`git log --all --full-history --source -- .env`)
 - [ ] GitHub repository is private (or secrets removed if public)
-- [ ] Google Drive file permissions are appropriate
+- [ ] Supabase project is in the right region and uses a strong password
+- [ ] Supabase RLS / network restrictions configured if you expect
+      anything other than this codebase to talk to the DB
 - [ ] Streamlit app access is restricted to authorized users
 
 ---
@@ -320,13 +382,16 @@ Before going live, verify:
 | Service | Plan | Cost |
 |---------|------|------|
 | Streamlit Cloud | Free tier | $0/month |
-| Google Drive | Free (15GB) | $0/month |
+| Supabase | Free tier (500 MB DB, 2 GB transfer) | $0/month |
 | GitHub | Free (private repos) | $0/month |
 | **Total** | | **$0/month** |
 
+The current DB is ~25 MB (~96k rows), so the 500 MB Supabase free
+tier has years of headroom at the current scraping cadence.
+
 **Upgrade options:**
 - Streamlit Cloud Pro: $20/month (more resources, custom domains)
-- Google Workspace: $6/month (more storage)
+- Supabase Pro: $25/month (8 GB DB, daily backups, no auto-pause)
 
 ---
 
@@ -344,8 +409,10 @@ After successful deployment:
    - Monitor app health regularly
 
 3. **Automate scraping:**
-   - Consider setting up cron job for daily scraping
-   - Use `rclone` for automatic database sync
+   - Uncomment the `schedule` block in
+     `.github/workflows/daily_scraper.yml` to re-enable the
+     thrice-weekly cron (Mon/Thu 06:00 UTC) once the cutover is
+     verified.
 
 4. **Optimize performance:**
    - Monitor resource usage
