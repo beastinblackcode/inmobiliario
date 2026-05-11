@@ -1,18 +1,25 @@
 name: Daily Scraper
 
 # ──────────────────────────────────────────────────────────────────────────
-# Cron temporalmente DESACTIVADO durante la migración SQLite → Postgres
-# (Phases B / C / D, ver feat/postgres-foundation).
+# Postgres backend (Phase D cutover, May 2026).
 #
-# Motivo: la versión actual de `init_database()` (en main) crea un UNIQUE
-# INDEX sobre `price_history(listing_id, date_recorded)`. La copia del DB
-# en Google Drive aún tiene 35 grupos duplicados de cuando el writer
-# antiguo permitía dos filas por mismo (listing, día). El primer cron run
-# fallaría al intentar crear el índice. Hasta que el cutover a Postgres
-# esté hecho, ejecutamos el scraper sólo manualmente vía workflow_dispatch.
+# This workflow now reads/writes through ``DB_BACKEND=postgres`` against
+# the Supabase Postgres pointed at by the ``DATABASE_URL`` secret. The
+# Google Drive sync (download at start / upload at end) is gone: the DB
+# lives in one place and every consumer (scraper, exporters, Streamlit)
+# talks to it directly.
 #
-# Reactivar tras Phase D: descomentar el bloque `schedule` de abajo y
-# borrar este comentario.
+# Cron is intentionally still commented out.  Re-enable it manually
+# **only after**:
+#   1. ``alembic upgrade head`` has been applied to the target Postgres
+#      (one-shot, sets up the schema in ``alembic/versions/0001…``).
+#   2. ``python migration_sqlite_to_postgres.py`` has loaded the SQLite
+#      snapshot into it (one-shot Phase C backfill).
+#   3. A local Streamlit smoke against the same DATABASE_URL renders
+#      the dashboard with sensible numbers.
+#
+# Until then, ``workflow_dispatch`` lets us trigger ad-hoc runs from
+# the Actions tab for verification.
 # ──────────────────────────────────────────────────────────────────────────
 
 on:
@@ -20,7 +27,7 @@ on:
   #   # Runs every 3 days (Mon/Thu) at 06:00 UTC (08:00 Madrid CEST)
   #   - cron: "0 6 * * 1,4"
   workflow_dispatch:
-    # Permite lanzar manualmente desde la pestaña Actions de GitHub
+    # Manual trigger from the Actions tab.
 
 permissions:
   contents: read
@@ -29,6 +36,14 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 360         # ~3h venta + alquiler semanal; GitHub max = 360
+
+    # Backend selection is job-wide: every step that ends up calling
+    # ``db.connection.get_db()`` (scraper, snapshots, email, summary)
+    # picks Postgres via the dispatching shim.  ``DATABASE_URL`` is the
+    # standard libpq env var; ``db.connection_pg._resolve_url`` reads it.
+    env:
+      DB_BACKEND: postgres
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────────
@@ -46,28 +61,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ── 4. Descargar DB desde Google Drive ───────────────────────────────────
-      - name: Download database from Google Drive
-        env:
-          GOOGLE_DRIVE_FILE_ID: ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
-        run: |
-          python - <<'EOF'
-          import os, gdown
-          file_id = os.environ["GOOGLE_DRIVE_FILE_ID"]
-          url = f"https://drive.google.com/uc?id={file_id}"
-          print(f"Downloading DB (file_id={file_id}) ...")
-          gdown.download(url, "real_estate.db", quiet=False)
-          import pathlib
-          size = pathlib.Path("real_estate.db").stat().st_size / 1024 / 1024
-          print(f"Downloaded: {size:.1f} MB")
-          EOF
+      # NOTE: the "download DB from Google Drive" and
+      # "backfill price_history" steps that lived here pre-cutover are
+      # gone.  The DB is in Postgres now; new rows go straight in,
+      # existing rows were one-shot-loaded by migration_sqlite_to_postgres.py.
 
-      # ── 4b. Backfill missing initial price_history rows (idempotent) ──────────
-      - name: Backfill price history
-        run: python migration_backfill_initial_history.py
-        continue-on-error: true    # Never block scraping if migration fails
-
-      # ── 5. Scraping ──────────────────────────────────────────────────────────
+      # ── 4. Scraping ──────────────────────────────────────────────────────────
       - name: Run scraper
         env:
           PYTHONUNBUFFERED: "1"
@@ -81,12 +80,12 @@ jobs:
         run: python scraper.py
         continue-on-error: true    # Partial scrapes still provide valuable data
 
-      # ── 5b. Pre-compute daily market snapshots ─────────────────────────────
+      # ── 4b. Pre-compute daily market snapshots ─────────────────────────────
       - name: Compute daily snapshots
         run: python compute_snapshots.py
         continue-on-error: true
 
-      # ── 6. Email diario (opcional) ───────────────────────────────────────────
+      # ── 5. Email diario (opcional) ───────────────────────────────────────────
       - name: Send daily email report
         env:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -101,14 +100,7 @@ jobs:
       # keeps writing to the private DB (Streamlit dashboard) without
       # ever pushing scraper-derived data to the public site.
 
-      # ── 7. Subir DB actualizada a Google Drive ───────────────────────────────
-      - name: Upload updated database to Google Drive
-        env:
-          GOOGLE_SA_CREDENTIALS: ${{ secrets.GOOGLE_SA_CREDENTIALS }}
-          GOOGLE_DRIVE_FILE_ID:  ${{ secrets.GOOGLE_DRIVE_FILE_ID }}
-        run: python ci_drive_upload.py
-
-      # ── 9. Resumen ────────────────────────────────────────────────────────────
+      # ── 6. Resumen ────────────────────────────────────────────────────────────
       - name: Scrape summary
         run: |
           python - <<'EOF'

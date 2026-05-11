@@ -26,10 +26,13 @@ def is_streamlit_cloud() -> bool:
     # Streamlit Cloud sets this env var automatically
     if os.environ.get("STREAMLIT_SHARING_MODE"):
         return True
-    # Fallback: check for the database secret block
+    # Fallback: presence of any deployment secret block.  Pre-cutover
+    # this was ``[database]`` (Google Drive file id); post-cutover it
+    # is ``[postgres]`` (Supabase URL).  Either signals "we're in a
+    # Streamlit Cloud-like environment with secrets configured".
     try:
         import streamlit as st
-        return "database" in st.secrets
+        return ("database" in st.secrets) or ("postgres" in st.secrets)
     except Exception:
         return False
 
@@ -62,7 +65,14 @@ def download_database_from_cloud():
     """
     Download database from Google Drive if running on Streamlit Cloud.
     Returns True if download was successful or not needed.
+
+    No-op when ``DB_BACKEND=postgres`` — there is no SQLite file to
+    sync; the Streamlit app talks straight to Supabase.  Returning
+    ``True`` lets ``app.py`` proceed without changes.
     """
+    if os.environ.get("DB_BACKEND", "sqlite").lower() == "postgres":
+        return True
+
     # Only download if on Streamlit Cloud and DB doesn't exist
     if not is_streamlit_cloud():
         # Running locally - check if DB exists
