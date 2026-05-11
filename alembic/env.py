@@ -36,6 +36,14 @@ def _resolve_url() -> str:
     dialect tag) to use psycopg 3 instead of the legacy psycopg2.  The
     Supabase / DATABASE_URL strings come without the tag, so we patch
     the prefix here once.
+
+    We also run the URL through ``db.connection_pg._normalise_url`` so
+    passwords containing ``+`` (common with Supabase auto-generated
+    secrets) are percent-encoded before SQLAlchemy's URL parser sees
+    them — otherwise ``urllib.parse`` decodes ``+`` as space and
+    auth fails with a confusing ``password authentication failed``.
+    The runtime already does this; keeping Alembic in sync means the
+    same ``DATABASE_URL`` works in both contexts.
     """
     raw = (
         os.environ.get("DATABASE_URL")
@@ -47,6 +55,11 @@ def _resolve_url() -> str:
         raise RuntimeError(
             "No DB URL configured. Set DATABASE_URL or POSTGRES_URL."
         )
+    # Lazy import: alembic env.py is loaded before sys.path tweaks, but
+    # db/ is at the repo root which is already on sys.path when alembic
+    # CLI runs from the project directory.
+    from db.connection_pg import _normalise_url
+    raw = _normalise_url(raw)
     if raw.startswith("postgresql://"):
         return "postgresql+psycopg://" + raw[len("postgresql://"):]
     if raw.startswith("postgres://"):
