@@ -190,12 +190,13 @@ git status | grep -E "\.env|\.db|secrets\.toml"
    `⚠️ DEPRECATED` warning to stderr on every login. Migrate to
    `[auth.users_hashed]` and delete the old block.
 
-3. **Select the Postgres backend** (env var, not secret):
-   - In the same Settings panel, open the "Advanced settings" /
-     "Environment variables" section.
-   - Add ``DB_BACKEND = postgres``.
-   - Without this var, the runtime defaults to SQLite (legacy) and
-     the `[postgres]` URL above is ignored.
+3. **No extra step needed.** ``app.py`` detects the ``[postgres]``
+   block in ``st.secrets`` at boot and sets ``DB_BACKEND=postgres``
+   for the rest of the process.  (Streamlit Community Cloud's free
+   tier doesn't expose a UI for arbitrary env vars, so we bridge
+   the secret to the env var in code.)  An explicit ``DB_BACKEND``
+   env var still wins if you ever need to force SQLite — but
+   normally there's nothing else to configure.
 
 4. **Reboot app:**
    - Click "Reboot app" button
