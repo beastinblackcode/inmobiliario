@@ -53,7 +53,14 @@ def notarial_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(exp, "_DATABASE_PATH", str(db))
+    # Post Phase D: the exporter goes through ``db.connection`` instead
+    # of opening sqlite3 directly. Point the shim at our tmp DB and
+    # force the SQLite branch (these tests build a SQLite fixture and
+    # don't apply to the Postgres track).
+    from db.connection import set_database_path, close_db
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
+    close_db()                       # drop any thread-local conn pointing at the real DB
+    set_database_path(str(db))
 
     # Stub out the network-bound loaders
     monkeypatch.setattr(exp, "_load_macro", lambda: {
@@ -61,12 +68,16 @@ def notarial_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Pat
         "ipc":      {"name": "IPC", "current": 2.8, "trend": "stable", "unit": "%"},
         "ipv":      {"name": "IPV", "current": 6.5, "trend": "up", "unit": "%"},
     })
-    # _load_lanzamientos now takes the SQLite conn — match the signature
+    # _load_lanzamientos still takes the conn — signature unchanged.
     monkeypatch.setattr(exp, "_load_lanzamientos", lambda conn: {
         "name": "Lanzamientos", "current": 240, "unit": "trim", "trend": "stable",
     })
 
     yield db
+
+    # Restore the shim's path so the next test's default isn't poisoned.
+    close_db()
+    set_database_path("real_estate.db")
 
 
 # ──────────────────────────────────────────────────────────────────────────

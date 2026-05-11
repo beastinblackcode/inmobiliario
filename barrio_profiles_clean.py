@@ -290,18 +290,23 @@ def _pick_neighbours(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _load_distrito_prices(db_path: str) -> Dict[str, int]:
-    """Latest-period €/m² per distrito from Notarial CIEN."""
-    conn = sqlite3.connect(db_path)
-    try:
+def _load_distrito_prices() -> Dict[str, int]:
+    """Latest-period €/m² per distrito from Notarial CIEN.
+
+    Reads through the backend-dispatching shim — picks SQLite or
+    Postgres based on the ``DB_BACKEND`` env var.  Callers that need
+    to point at a non-default SQLite file should call
+    ``db.connection.set_database_path()`` beforehand (no-op on
+    Postgres).
+    """
+    from db.connection import get_connection
+    with get_connection() as conn:
         rows = conn.execute("""
             SELECT distrito, precio_m2
               FROM notarial_prices
              WHERE periodo = (SELECT MAX(periodo) FROM notarial_prices)
         """).fetchall()
-    finally:
-        conn.close()
-    return {d: round(p) for d, p in rows if p is not None}
+    return {row[0]: round(row[1]) for row in rows if row[1] is not None}
 
 
 def _load_barrio_incomes(opendata_path: str) -> Dict[str, float]:
@@ -340,15 +345,21 @@ def build_clean_barrio_profiles(
         A dict ready for ``json.dump``.
     """
     here = os.path.dirname(os.path.abspath(__file__))
-    db_path = db_path or os.path.join(here, "real_estate.db")
     opendata_path = opendata_path or os.path.join(
         here, "market-thermometer", "public", "district_opendata.json"
     )
 
+    # If the caller still passes a SQLite path, honour it via the shim
+    # (no-op when ``DB_BACKEND=postgres``).  Default path inference
+    # only fires for SQLite — Postgres lives at DATABASE_URL.
+    if db_path:
+        from db.connection import set_database_path
+        set_database_path(db_path)
+
     # 1. Lazy import to avoid heavy deps when this module is type-checked
     from coordinates import BARRIO_COORDINATES
 
-    distrito_ppsqm = _load_distrito_prices(db_path)
+    distrito_ppsqm = _load_distrito_prices()
     barrio_incomes = _load_barrio_incomes(opendata_path)
 
     # Madrid baselines — medians across the canonical universe
