@@ -54,6 +54,61 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 
+# ──────────────────────────────────────────────────────────────────────
+# NUMERIC → float type loaders
+# ──────────────────────────────────────────────────────────────────────
+#
+# Postgres returns ``AVG(integer)`` and ``ROUND(numeric, n)`` as
+# Python ``decimal.Decimal`` by default.  SQLite returned ``float`` for
+# the same queries.  Multiple call sites in ``analytics.py`` /
+# ``tabs/opportunities_tab.py`` / ``market_indicators.py`` do
+# ``aggregated_value / some_float`` (e.g. percentile of a barrio
+# median against a city-wide float), which Python rejects with
+# ``TypeError: unsupported operand type(s) for /: 'decimal.Decimal' and 'float'``.
+#
+# Rather than sprinkle ``float(...)`` casts across hundreds of call
+# sites (and risk missing some until the next Streamlit click hits a
+# new code path), we tell psycopg to decode NUMERIC as float at the
+# read boundary.  Currency precision concerns are nil: we are computing
+# ratios and percentages off €-integer columns, not doing accounting.
+#
+# psycopg3 transports NUMERIC in either TEXT or BINARY wire format and
+# picks per-query based on result format negotiation.  We register a
+# loader for each — both subclass the built-in numeric loaders so the
+# wire parsing logic (which knows about each format) is reused and we
+# only cast the final ``Decimal`` to ``float``.
+
+
+from psycopg.types.numeric import NumericLoader  # noqa: E402
+
+try:
+    from psycopg.types.numeric import NumericBinaryLoader  # noqa: E402
+except ImportError:  # pragma: no cover — older psycopg without binary loader
+    NumericBinaryLoader = None  # type: ignore[assignment]
+
+
+class _NumericAsFloatTextLoader(NumericLoader):
+    """Decode TEXT-format NUMERIC as Python ``float``."""
+
+    def load(self, data):
+        v = super().load(data)
+        return float(v) if v is not None else None
+
+
+psycopg.adapters.register_loader("numeric", _NumericAsFloatTextLoader)
+
+
+if NumericBinaryLoader is not None:
+    class _NumericAsFloatBinaryLoader(NumericBinaryLoader):  # type: ignore[misc, valid-type]
+        """Decode BINARY-format NUMERIC as Python ``float``."""
+
+        def load(self, data):
+            v = super().load(data)
+            return float(v) if v is not None else None
+
+    psycopg.adapters.register_loader("numeric", _NumericAsFloatBinaryLoader)
+
+
 # Pool sizing: Supabase free-tier transaction pooler exposes 200
 # pgbouncer connections shared across the project.  We deliberately stay
 # well below that — the scraper is single-threaded and Streamlit will
