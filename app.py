@@ -6,12 +6,36 @@ executes on each run.  Replaces the old ``st.tabs()`` + JS-polling hack
 which rendered *all* 8 tabs on every interaction.
 """
 
+import os
+
 import streamlit as st
 from datetime import datetime
 from pathlib import Path
 
-from auth import check_password
-from database import (
+
+# ---------------------------------------------------------------------------
+# Backend bootstrap: bridge Streamlit secrets → DB_BACKEND env var.
+#
+# Streamlit Community Cloud free tier exposes secrets via ``st.secrets``
+# but does NOT expose a UI for arbitrary environment variables.  The DB
+# shim in ``db.connection`` reads ``DB_BACKEND`` from ``os.environ`` to
+# decide between SQLite (default) and Postgres.  If the deployment has
+# a ``[postgres]`` block configured, default to Postgres — that's the
+# only reason that block would be there in the first place.  An
+# explicit ``DB_BACKEND`` env var (CI workflows, local dev) still wins.
+# ---------------------------------------------------------------------------
+if "DB_BACKEND" not in os.environ:
+    try:
+        if "postgres" in st.secrets and st.secrets["postgres"].get("url"):
+            os.environ["DB_BACKEND"] = "postgres"
+    except Exception:
+        pass
+
+
+# Imports that touch the DB go *after* the bootstrap so they see the
+# right backend on first access.
+from auth import check_password  # noqa: E402
+from database import (  # noqa: E402
     download_database_from_cloud,
     is_streamlit_cloud,
     DATABASE_PATH,
