@@ -387,10 +387,19 @@ def migrate_add_description_column():
 def migrate_create_scraping_log_table():
     """
     Migration: Create scraping_log table for tracking execution stats.
+
+    No-op on Postgres — Alembic owns the schema (see
+    ``alembic/versions/0001_initial_schema.py``).  The SQLite branch
+    keeps the inline CREATE TABLE so local SQLite workflows don't need
+    to install alembic.
     """
+    from db.dialect import is_postgres
+    if is_postgres():
+        return
+
     with get_connection() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS scraping_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1865,7 +1874,13 @@ def migrate_create_rental_prices_table():
     """
     Migration: Create rental_prices table on existing databases.
     Safe to run multiple times (CREATE TABLE IF NOT EXISTS).
+
+    No-op on Postgres — Alembic owns the schema.
     """
+    from db.dialect import is_postgres
+    if is_postgres():
+        return
+
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
