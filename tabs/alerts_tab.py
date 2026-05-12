@@ -209,7 +209,14 @@ def render_alerts_tab():
                     score     = m.get("score_oportunidad")
                     score_str = f"⭐ {int(score)}" if score else ""
                     badges    = _nlp_badges(m)
-                    first_seen = m.get("first_seen_date", "")[:10] if m.get("first_seen_date") else "—"
+                    # Backend-agnostic: SQLite returns str, Postgres returns datetime.date.
+                    _fs = m.get("first_seen_date")
+                    if _fs is None or _fs == "":
+                        first_seen = "—"
+                    elif hasattr(_fs, "isoformat"):
+                        first_seen = _fs.isoformat()[:10]
+                    else:
+                        first_seen = str(_fs)[:10]
 
                     with st.container(border=False):
                         c1, c2 = st.columns([3, 1])
