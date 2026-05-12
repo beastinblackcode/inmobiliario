@@ -19,6 +19,9 @@ real_estate.db
 # Streamlit secrets (IMPORTANT: Never commit secrets)
 .streamlit/secrets.toml
 
+# Mi Zona — per-user buyer criteria (local persistence)
+.streamlit/mi_zona_*.json
+
 # IDE
 .vscode/
 .idea/
