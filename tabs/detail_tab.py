@@ -24,6 +24,7 @@ from analytics import (
 )
 from data_utils import load_data
 from property_history import get_property_history, PropertyHistory
+from offer_engine import suggest_offer, OfferSuggestion
 
 
 def _get_listing_by_url(url: str) -> dict | None:
@@ -348,6 +349,110 @@ def _render_property_timeline(ph: PropertyHistory, current_listing_id: str) -> N
         st.markdown(
             f"**Total acumulado:** {total_drops} bajada{'s' if total_drops != 1 else ''} "
             f"sumando €{abs(total_drop_eur):,} a lo largo de todos los anuncios."
+        )
+
+
+def _render_offer_suggestion(offer: OfferSuggestion) -> None:
+    """Render the suggested offer section.
+
+    Layout: a big "range card" on the left with low/mid/high in €,
+    plus a savings vs asking strip; on the right, a compact factor
+    breakdown so the buyer can see *why* the discount is what it is.
+    """
+    asking = offer.asking_price
+    saved_eur = asking - offer.suggested_mid
+    saved_pct = offer.discount_vs_asking_pct
+
+    # Choose accent colour by signal strength.
+    if saved_pct >= 8:
+        accent = "#16a34a"   # green: meaningful savings
+        verdict = "Margen claro para ofertar por debajo"
+    elif saved_pct >= 3:
+        accent = "#0891b2"   # cyan: moderate
+        verdict = "Margen moderado vs precio pedido"
+    elif saved_pct > 0:
+        accent = "#94a3b8"   # slate: small
+        verdict = "Margen pequeño — propiedad bien tasada"
+    else:
+        accent = "#dc2626"   # red: no margin or asking below fair
+        verdict = "Sin margen — precio igual o inferior al fair value"
+
+    fair_v_str = f"€{offer.fair_value:,}"
+    fair_method_label = {
+        "barrio_comps":   "comparables del barrio",
+        "distrito_comps": "comparables del distrito",
+        "barrio_median":  "mediana del barrio",
+        "notarial":       "anchor notarial",
+    }.get(offer.fair_value_method, offer.fair_value_method)
+    confidence_emoji = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(offer.fair_confidence, "")
+
+    left, right = st.columns([1, 1])
+
+    with left:
+        st.markdown(
+            f"""<div style='background:#0f172a;border-radius:12px;padding:24px;color:#e2e8f0;
+                border-left:6px solid {accent};'>
+                <div style='font-size:13px;color:#94a3b8;letter-spacing:0.5px;
+                            text-transform:uppercase;'>Rango de oferta sugerido</div>
+                <div style='font-size:36px;font-weight:900;margin-top:8px;color:white;'>
+                    €{offer.suggested_low:,} <span style='color:#64748b;font-size:24px;'>—</span> €{offer.suggested_high:,}
+                </div>
+                <div style='font-size:14px;margin-top:4px;color:#cbd5e1;'>
+                    Punto medio: <b style='color:white;'>€{offer.suggested_mid:,}</b>
+                </div>
+                <div style='margin-top:16px;padding:12px;background:#1e293b;border-radius:8px;'>
+                    <div style='font-size:13px;color:#94a3b8;'>vs precio pedido (€{asking:,}):</div>
+                    <div style='font-size:22px;font-weight:700;color:{accent};margin-top:2px;'>
+                        −€{saved_eur:,} ({saved_pct:+.1f}%)
+                    </div>
+                    <div style='font-size:12px;color:#cbd5e1;margin-top:4px;'>{verdict}</div>
+                </div>
+                <div style='font-size:12px;color:#64748b;margin-top:12px;'>
+                    Fair value: {fair_v_str} ({fair_method_label}) {confidence_emoji}
+                    {' · pedido por encima del fair' if offer.is_above_fair_value else ''}
+                </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
+
+    with right:
+        if not offer.factors:
+            st.info(
+                "Sin factores de descuento detectados.  La oferta sugerida "
+                "iguala al fair value (compra a precio de mercado).  Esto es "
+                "típico de pisos recién publicados o sin señales de presión."
+            )
+            return
+
+        st.markdown(
+            "<div style='font-size:13px;color:#94a3b8;letter-spacing:0.5px;"
+            "text-transform:uppercase;margin-bottom:10px;'>"
+            "Factores aplicados</div>",
+            unsafe_allow_html=True,
+        )
+        for f in offer.factors:
+            pct_abs   = abs(f.discount_pct)
+            # Bar width visualises the relative size of each factor.
+            bar_width = min(100, pct_abs * 15)
+            st.markdown(
+                f"""<div style='margin-bottom:10px;'>
+                    <div style='display:flex;justify-content:space-between;font-size:13px;'>
+                        <span><b>{f.label}</b> — {f.why}</span>
+                        <span style='color:{accent};font-weight:700;white-space:nowrap;margin-left:8px;'>
+                            {f.discount_pct:+.1f}%
+                        </span>
+                    </div>
+                    <div style='background:#1e293b;border-radius:4px;height:6px;margin-top:4px;'>
+                        <div style='background:{accent};width:{bar_width:.0f}%;height:6px;border-radius:4px;'></div>
+                    </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        st.caption(
+            f"Descuento total: {offer.total_discount_pct:+.1f}% sobre el fair value. "
+            "Mete la oferta en el extremo bajo si tienes señales fuertes; usa el alto "
+            "como tope de cierre."
         )
 
 
@@ -713,6 +818,69 @@ def render_detail_tab() -> None:
 
     except Exception as e:
         st.warning(f"No se pudo calcular el score de negociabilidad: {e}")
+
+    # ── Sugerencia de oferta ──────────────────────────────────────────────────
+    # The synthesis of every signal above: fair value (comparables +
+    # notarial + trend) discounted by buyer-leverage factors (days on
+    # market, drops, seller type, NLP signals, republications).  One
+    # actionable number — what to put on the table.
+    st.markdown("---")
+    st.subheader("💸 Sugerencia de Oferta")
+    st.caption(
+        "Rango de precio realista para presentar al vendedor.  Combina el "
+        "fair value (comparables del barrio + anchor notarial) con los "
+        "signals que indican margen de negociación.  La oferta sugerida "
+        "**nunca excede el fair value** — no se trata de pagar más."
+    )
+
+    try:
+        from analytics import estimate_fair_price
+
+        # Reuse all_active (already loaded for the quality score) so we
+        # don't repeat the heavy listings query.
+        notarial_sqm_for_distrito = None
+        if _notarial_raw:
+            _latest = max(_notarial_raw, key=lambda r: r["periodo"])
+            notarial_sqm_for_distrito = _latest["precio_m2"]
+
+        fair = estimate_fair_price(
+            listing             = listing,
+            all_active_df       = all_active,
+            notarial_sqm        = notarial_sqm_for_distrito,
+            district_trend_pct  = None,            # optional; skip for now
+        )
+
+        if "error" in fair:
+            st.info(f"No se puede calcular sugerencia: {fair['error']}")
+        else:
+            fair_value = int(fair.get("trend_adjusted_price") or fair.get("estimated_price") or 0)
+            confidence = fair.get("confidence", "medium")
+            method     = "barrio_comps" if (fair.get("num_comps") or 0) >= 5 else "distrito_comps"
+
+            # NLP signals — already loaded earlier via ``amenities`` but
+            # those are physical (terraza/garaje), not the leverage signals
+            # (negociable/urgencia).  Load the right table.
+            nlp_signals = None
+            try:
+                from nlp_analyzer import get_signals_for_listings
+                nlp_signals = get_signals_for_listings([listing["listing_id"]]).get(
+                    listing["listing_id"]
+                )
+            except Exception:
+                pass
+
+            offer = suggest_offer(
+                listing           = score_row,
+                fair_value        = fair_value,
+                fair_confidence   = confidence,
+                fair_value_method = method,
+                property_history  = property_history,
+                nlp_signals       = nlp_signals,
+            )
+            _render_offer_suggestion(offer)
+
+    except Exception as e:
+        st.warning(f"No se pudo calcular la sugerencia de oferta: {e}")
 
     st.markdown("---")
 
