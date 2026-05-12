@@ -399,33 +399,36 @@ def _render_offer_suggestion(offer: OfferSuggestion) -> None:
     }.get(offer.fair_value_method, offer.fair_value_method)
     confidence_emoji = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(offer.fair_confidence, "")
 
+    above_fair_suffix = " · pedido por encima del fair" if offer.is_above_fair_value else ""
+
+    # ``st.html`` renders raw HTML without going through the markdown
+    # parser, which would otherwise treat our indented closing
+    # ``</div>`` lines as a fenced code block when an inline f-string
+    # conditional collapses to an empty line.  The whole block is
+    # pre-built as a flat string for the same reason.
     left, right = st.columns([1, 1])
 
     with left:
-        st.markdown(
-            f"""<div style='background:#0f172a;border-radius:12px;padding:24px;color:#e2e8f0;
-                border-left:6px solid {accent};'>
-                <div style='font-size:13px;color:#94a3b8;letter-spacing:0.5px;
-                            text-transform:uppercase;'>Rango de oferta sugerido</div>
-                <div style='font-size:36px;font-weight:900;margin-top:8px;color:white;'>
-                    €{offer.suggested_low:,} <span style='color:#64748b;font-size:24px;'>—</span> €{offer.suggested_high:,}
-                </div>
-                <div style='font-size:14px;margin-top:4px;color:#cbd5e1;'>
-                    Punto medio: <b style='color:white;'>€{offer.suggested_mid:,}</b>
-                </div>
-                <div style='margin-top:16px;padding:12px;background:#1e293b;border-radius:8px;'>
-                    <div style='font-size:13px;color:#94a3b8;'>vs precio pedido (€{asking:,}):</div>
-                    <div style='font-size:22px;font-weight:700;color:{accent};margin-top:2px;'>
-                        −€{saved_eur:,} ({saved_pct:+.1f}%)
-                    </div>
-                    <div style='font-size:12px;color:#cbd5e1;margin-top:4px;'>{verdict}</div>
-                </div>
-                <div style='font-size:12px;color:#64748b;margin-top:12px;'>
-                    Fair value: {fair_v_str} ({fair_method_label}) {confidence_emoji}
-                    {' · pedido por encima del fair' if offer.is_above_fair_value else ''}
-                </div>
-            </div>""",
-            unsafe_allow_html=True,
+        st.html(
+            f"<div style=\"background:#0f172a;border-radius:12px;padding:24px;"
+            f"color:#e2e8f0;border-left:6px solid {accent};\">"
+            f"<div style=\"font-size:13px;color:#94a3b8;letter-spacing:0.5px;"
+            f"text-transform:uppercase;\">Rango de oferta sugerido</div>"
+            f"<div style=\"font-size:36px;font-weight:900;margin-top:8px;color:white;\">"
+            f"€{offer.suggested_low:,} <span style=\"color:#64748b;font-size:24px;\">—</span> €{offer.suggested_high:,}"
+            f"</div>"
+            f"<div style=\"font-size:14px;margin-top:4px;color:#cbd5e1;\">"
+            f"Punto medio: <b style=\"color:white;\">€{offer.suggested_mid:,}</b></div>"
+            f"<div style=\"margin-top:16px;padding:12px;background:#1e293b;border-radius:8px;\">"
+            f"<div style=\"font-size:13px;color:#94a3b8;\">vs precio pedido (€{asking:,}):</div>"
+            f"<div style=\"font-size:22px;font-weight:700;color:{accent};margin-top:2px;\">"
+            f"−€{saved_eur:,} ({saved_pct:+.1f}%)</div>"
+            f"<div style=\"font-size:12px;color:#cbd5e1;margin-top:4px;\">{verdict}</div>"
+            f"</div>"
+            f"<div style=\"font-size:12px;color:#64748b;margin-top:12px;\">"
+            f"Fair value: {fair_v_str} ({fair_method_label}) {confidence_emoji}{above_fair_suffix}"
+            f"</div>"
+            f"</div>"
         )
 
     with right:
@@ -437,29 +440,24 @@ def _render_offer_suggestion(offer: OfferSuggestion) -> None:
             )
             return
 
-        st.markdown(
-            "<div style='font-size:13px;color:#94a3b8;letter-spacing:0.5px;"
-            "text-transform:uppercase;margin-bottom:10px;'>"
-            "Factores aplicados</div>",
-            unsafe_allow_html=True,
+        st.html(
+            "<div style=\"font-size:13px;color:#94a3b8;letter-spacing:0.5px;"
+            "text-transform:uppercase;margin-bottom:10px;\">Factores aplicados</div>"
         )
         for f in offer.factors:
             pct_abs   = abs(f.discount_pct)
-            # Bar width visualises the relative size of each factor.
             bar_width = min(100, pct_abs * 15)
-            st.markdown(
-                f"""<div style='margin-bottom:10px;'>
-                    <div style='display:flex;justify-content:space-between;font-size:13px;'>
-                        <span><b>{f.label}</b> — {f.why}</span>
-                        <span style='color:{accent};font-weight:700;white-space:nowrap;margin-left:8px;'>
-                            {f.discount_pct:+.1f}%
-                        </span>
-                    </div>
-                    <div style='background:#1e293b;border-radius:4px;height:6px;margin-top:4px;'>
-                        <div style='background:{accent};width:{bar_width:.0f}%;height:6px;border-radius:4px;'></div>
-                    </div>
-                </div>""",
-                unsafe_allow_html=True,
+            st.html(
+                f"<div style=\"margin-bottom:10px;\">"
+                f"<div style=\"display:flex;justify-content:space-between;font-size:13px;\">"
+                f"<span><b>{f.label}</b> — {f.why}</span>"
+                f"<span style=\"color:{accent};font-weight:700;white-space:nowrap;margin-left:8px;\">"
+                f"{f.discount_pct:+.1f}%</span>"
+                f"</div>"
+                f"<div style=\"background:#1e293b;border-radius:4px;height:6px;margin-top:4px;\">"
+                f"<div style=\"background:{accent};width:{bar_width:.0f}%;height:6px;border-radius:4px;\"></div>"
+                f"</div>"
+                f"</div>"
             )
 
         st.caption(
