@@ -7,7 +7,26 @@ histórico de precios y propiedades similares en el mismo barrio.
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
+
+
+def _iso_date(v: Any, default: str = "N/A") -> str:
+    """Normalise a date column to ``'YYYY-MM-DD'`` regardless of backend.
+
+    SQLite stores dates as TEXT (``'YYYY-MM-DD'`` or ``'YYYY-MM-DD HH:MM:SS'``)
+    and pre-cutover code freely sliced them with ``[:10]``.  Postgres
+    returns native ``datetime.date`` / ``datetime.datetime`` via
+    psycopg, which break ``len()`` and slicing.  This helper hides
+    the difference so callers don't have to ``isinstance``-check
+    every place.
+    """
+    if v is None or v == "":
+        return default
+    if isinstance(v, (date, datetime)):
+        return v.isoformat()[:10]
+    s = str(v)
+    return s[:10] if len(s) >= 10 else s
 
 from database import (
     get_connection, get_property_price_stats,
@@ -154,30 +173,24 @@ def _build_chart_series(history: list, listing: dict) -> tuple[list, str]:
         series — list of {date, price, change_amount, change_percent}
         kind   — "flat" | "single_change" | "multi_change"
     """
-    first_seen = listing.get("first_seen_date")
-    last_seen  = listing.get("last_seen_date")
+    # Backend-agnostic normalisation: SQLite returns strings, Postgres
+    # returns ``datetime.date``; ``_iso_date`` collapses both to
+    # ``'YYYY-MM-DD'`` so the downstream chart + Plotly handling works
+    # without ``isinstance``-checking everywhere.
+    first_seen = _iso_date(listing.get("first_seen_date"), default="")
+    last_seen  = _iso_date(listing.get("last_seen_date"),  default="")
     cur_price  = listing.get("price")
-
-    # Normalise dates to YYYY-MM-DD (strip any time component)
-    if first_seen and len(first_seen) > 10:
-        first_seen = first_seen[:10]
-    if last_seen and len(last_seen) > 10:
-        last_seen = last_seen[:10]
 
     series: list = []
 
     # Anchor: start point
     if history:
-        # Use stored first entry, but normalise its date format
         first_entry = dict(history[0])
-        if first_entry.get("date_recorded") and len(first_entry["date_recorded"]) > 10:
-            first_entry["date_recorded"] = first_entry["date_recorded"][:10]
+        first_entry["date_recorded"] = _iso_date(first_entry.get("date_recorded"), default="")
         series.append(first_entry)
-        # Add intermediate changes (everything past index 0)
         for h in history[1:]:
             entry = dict(h)
-            if entry.get("date_recorded") and len(entry["date_recorded"]) > 10:
-                entry["date_recorded"] = entry["date_recorded"][:10]
+            entry["date_recorded"] = _iso_date(entry.get("date_recorded"), default="")
             series.append(entry)
     elif first_seen and cur_price:
         # Synthesise initial point from listing metadata
@@ -559,8 +572,8 @@ def render_detail_tab() -> None:
     k6.metric("🌅 Orientación", listing.get("orientation") or "N/A")
     k7.metric("🏢 Planta", listing.get("floor") or "N/A")
     k8.metric("👤 Vendedor", listing.get("seller_type") or "N/A")
-    k9.metric("📅 Visto por primera vez", listing.get("first_seen_date", "N/A")[:10])
-    k10.metric("🔄 Última actualización", listing.get("last_seen_date", "N/A")[:10])
+    k9.metric("📅 Visto por primera vez", _iso_date(listing.get("first_seen_date")))
+    k10.metric("🔄 Última actualización",  _iso_date(listing.get("last_seen_date")))
 
     # ── Características y entorno (NLP) ───────────────────────────────────────
     try:
@@ -913,7 +926,7 @@ def render_detail_tab() -> None:
         if kind == "flat":
             st.caption(
                 f"➡️ Precio sin cambios desde **{series[0]['date_recorded']}** "
-                f"(visto por última vez **{listing.get('last_seen_date', '')[:10]}**)."
+                f"(visto por última vez **{_iso_date(listing.get('last_seen_date'), default='')}**)."
             )
         elif kind == "single_change":
             st.caption("📉 Una bajada/subida registrada — la línea conecta los puntos clave.")

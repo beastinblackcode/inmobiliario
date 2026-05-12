@@ -98,7 +98,12 @@ def _render_sidebar_info():
     try:
         from database import get_scraping_log
         log = get_scraping_log(limit=1)
-        last_scrape = log[0]["start_time"][:10] if log else "sin datos"
+        # ``start_time`` is TEXT on SQLite, datetime on Postgres.
+        if log:
+            ts = log[0]["start_time"]
+            last_scrape = ts.isoformat()[:10] if hasattr(ts, "isoformat") else str(ts)[:10]
+        else:
+            last_scrape = "sin datos"
     except Exception:
         last_scrape = "—"
 
