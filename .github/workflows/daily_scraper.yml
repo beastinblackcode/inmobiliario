@@ -3,29 +3,17 @@ name: Daily Scraper
 # ──────────────────────────────────────────────────────────────────────────
 # Postgres backend (Phase D cutover, May 2026).
 #
-# This workflow now reads/writes through ``DB_BACKEND=postgres`` against
-# the Supabase Postgres pointed at by the ``DATABASE_URL`` secret. The
-# Google Drive sync (download at start / upload at end) is gone: the DB
-# lives in one place and every consumer (scraper, exporters, Streamlit)
-# talks to it directly.
-#
-# Cron is intentionally still commented out.  Re-enable it manually
-# **only after**:
-#   1. ``alembic upgrade head`` has been applied to the target Postgres
-#      (one-shot, sets up the schema in ``alembic/versions/0001…``).
-#   2. ``python migration_sqlite_to_postgres.py`` has loaded the SQLite
-#      snapshot into it (one-shot Phase C backfill).
-#   3. A local Streamlit smoke against the same DATABASE_URL renders
-#      the dashboard with sensible numbers.
-#
-# Until then, ``workflow_dispatch`` lets us trigger ad-hoc runs from
-# the Actions tab for verification.
+# Reads/writes go through ``DB_BACKEND=postgres`` against the Supabase
+# Postgres pointed at by the ``DATABASE_URL`` secret. The Google Drive
+# sync (download at start / upload at end) is gone: the DB lives in one
+# place and every consumer (scraper, exporters, Streamlit) talks to it
+# directly.
 # ──────────────────────────────────────────────────────────────────────────
 
 on:
-  # schedule:
-  #   # Runs every 3 days (Mon/Thu) at 06:00 UTC (08:00 Madrid CEST)
-  #   - cron: "0 6 * * 1,4"
+  schedule:
+    # Runs every 3 days (Mon/Thu) at 06:00 UTC (08:00 Madrid CEST)
+    - cron: "0 6 * * 1,4"
   workflow_dispatch:
     # Manual trigger from the Actions tab.
 
