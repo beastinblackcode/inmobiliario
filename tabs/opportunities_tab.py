@@ -45,8 +45,10 @@ def _render_opportunity_expander(row) -> None:
     score = row["quality_score"]
     badge, label = _quality_badge(score)
     title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
+    reps = int(row.get("republications", 0) or 0)
+    rep_chip = f" · 🔄 {reps}x" if reps > 0 else ""
 
-    with st.expander(f"{badge} **{score:.0f}/100** ({label}) — {title_preview}"):
+    with st.expander(f"{badge} **{score:.0f}/100** ({label}){rep_chip} — {title_preview}"):
         rc1, rc2, rc3 = st.columns(3)
         with rc1:
             st.metric("💰 Precio", f"€{row['price']:,}")
@@ -97,8 +99,10 @@ def _render_negotiability_expander(row) -> None:
     n_badge, n_label = _urgency_badge(n_score)
     q_badge, q_label = _quality_badge(q_score)
     title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
+    reps = int(row.get("republications", 0) or 0)
+    rep_chip = f" · 🔄 {reps}x" if reps > 0 else ""
 
-    with st.expander(f"{n_badge} **{n_score:.0f}/100** ({n_label}) — {title_preview}"):
+    with st.expander(f"{n_badge} **{n_score:.0f}/100** ({n_label}){rep_chip} — {title_preview}"):
         rc1, rc2, rc3 = st.columns(3)
         with rc1:
             st.metric("💰 Precio", f"€{row['price']:,}")
@@ -206,6 +210,20 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
     )
 
     df_ranked = rank_opportunities(active_df[active_df["price"] < 500_000])
+
+    # Enrich with property republication counts so each card can flag
+    # "🔄 Nx" when the listing has been published before.  One bulk
+    # query, not one-per-card.  Defensive: if fingerprints haven't
+    # been computed yet (fresh deploy / empty table) the helper
+    # returns 0 for every id — the chip simply never renders.
+    try:
+        from property_history import get_republication_counts
+        rep_counts = get_republication_counts(df_ranked["listing_id"].tolist())
+        df_ranked = df_ranked.copy()
+        df_ranked["republications"] = df_ranked["listing_id"].map(rep_counts).fillna(0).astype(int)
+    except Exception:
+        df_ranked = df_ranked.copy()
+        df_ranked["republications"] = 0
 
     if df_ranked.empty:
         st.warning("No hay propiedades activas para analizar.")
