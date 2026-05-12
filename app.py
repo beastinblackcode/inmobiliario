@@ -146,7 +146,8 @@ def main():
     # ------------------------------------------------------------------
     pages = {
         "🏠 Caza": [
-            st.Page("pages/oportunidades.py", title="🎯 Oportunidades", default=True),
+            st.Page("pages/mi_zona.py",       title="🎯 Mi Zona", default=True),
+            st.Page("pages/oportunidades.py", title="🏆 Oportunidades"),
             st.Page("pages/bajadas.py",       title="📉 Bajadas de Precio"),
             st.Page("pages/busqueda.py",      title="🔍 Búsqueda"),
             st.Page("pages/seguimientos.py",  title="🔔 Mis Seguimientos"),
