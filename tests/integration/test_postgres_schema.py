@@ -34,6 +34,8 @@ _EXPECTED_TABLES = {
     "listing_signals",
     "listing_amenities",
     "cgpj_lanzamientos",
+    "property_fingerprints",      # added in 0002
+    "listing_property_map",       # added in 0002
 }
 
 
