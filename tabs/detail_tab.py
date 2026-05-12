@@ -23,6 +23,7 @@ from analytics import (
     estimate_fair_price,
 )
 from data_utils import load_data
+from property_history import get_property_history, PropertyHistory
 
 
 def _get_listing_by_url(url: str) -> dict | None:
@@ -229,6 +230,127 @@ def _get_similar(listing: dict, exclude_id: str, limit: int = 5) -> list:
 
 
 @st.fragment
+def _render_property_banner(ph: PropertyHistory) -> None:
+    """Banner shown right under the header when the listing has been
+    republished.  Surfaces the three buyer-actionable lifetime stats:
+    republication count, total days on market across all listings, and
+    the net price change from the *original* asking price to the
+    current one.
+
+    Hidden for singletons — there's nothing useful to say.
+    """
+    if ph.republication_count == 0:
+        return
+
+    # Cumulative change: negative is good news for the buyer.
+    delta_eur = ph.cumulative_change_eur
+    delta_pct = ph.cumulative_change_pct
+    if delta_eur is not None and delta_eur < 0:
+        delta_str = f"<span style='color:#a7f3d0;'>↓ €{abs(delta_eur):,} ({delta_pct:+.1f}%)</span>"
+    elif delta_eur is not None and delta_eur > 0:
+        delta_str = f"<span style='color:#fda4af;'>↑ €{delta_eur:,} ({delta_pct:+.1f}%)</span>"
+    else:
+        delta_str = "<span style='color:#cbd5e1;'>sin cambio neto</span>"
+
+    # Visual weight scales with republication count — 2 listings is
+    # informative, 5 listings is a strong leverage signal.
+    if ph.republication_count >= 3:
+        bg, accent = "#7c2d12", "#fdba74"   # deep amber: strong signal
+    else:
+        bg, accent = "#1e293b", "#94a3b8"   # neutral slate
+
+    st.markdown(
+        f"""<div style='background:{bg};border-left:4px solid {accent};
+            padding:14px 18px;border-radius:8px;margin:12px 0;color:#e2e8f0;'>
+            <div style='font-size:15px;font-weight:600;'>
+              🔄 Esta propiedad ha sido republicada
+              <span style='color:{accent};'>{ph.republication_count} vez{'es' if ph.republication_count > 1 else ''}</span>
+            </div>
+            <div style='font-size:13px;margin-top:6px;'>
+              <b>{ph.listing_count}</b> anuncios en total ·
+              <b>{ph.total_days_on_market}</b> días acumulados en mercado ·
+              precio inicial → actual: {delta_str}
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_property_timeline(ph: PropertyHistory, current_listing_id: str) -> None:
+    """Expandable "Historial de la propiedad" section listing every
+    ``listing_id`` that ever pointed at this property, chronologically.
+
+    For each listing we show the date range, vendor type, opening price
+    → final price (with drop info), days on market, and a link back to
+    Idealista.  The currently-displayed listing is highlighted.
+
+    Hidden for singletons.
+    """
+    if ph.republication_count == 0:
+        return
+
+    with st.expander(f"🕰️ Historial completo de esta propiedad ({ph.listing_count} anuncios)"):
+        st.caption(
+            "Mismo piso publicado bajo distintos `listing_id`. Te interesa "
+            "como comprador para entender la verdadera trayectoria de precio "
+            "y tiempo en mercado — datos que cada anuncio individual oculta."
+        )
+
+        rows = []
+        for i, l in enumerate(ph.listings, start=1):
+            is_current = l.listing_id == current_listing_id
+
+            # Format date range
+            f = l.first_seen_date.isoformat() if l.first_seen_date else "—"
+            lt = l.last_seen_date.isoformat()  if l.last_seen_date  else "—"
+            date_range = f"{f} → {lt}"
+
+            # Price column: initial → final + drop info if changed
+            if l.initial_price and l.final_price and l.initial_price != l.final_price:
+                delta = l.final_price - l.initial_price
+                price_str = (
+                    f"€{l.initial_price:,} → €{l.final_price:,}  "
+                    f"({delta:+,})"
+                )
+            elif l.final_price:
+                price_str = f"€{l.final_price:,}"
+            else:
+                price_str = "—"
+
+            status_icon = "🟢" if l.status == "active" else "🔴"
+            current_marker = "👉 " if is_current else "   "
+
+            rows.append({
+                "#":       current_marker + str(i),
+                "Periodo": date_range,
+                "Días":    l.days_on_market,
+                "Vendedor": l.seller_type or "—",
+                "Precio":  price_str,
+                "Bajadas": l.n_drops if l.n_drops > 0 else "",
+                "Estado":  f"{status_icon} {l.status}",
+                "URL":     l.url or "",
+            })
+
+        df = pd.DataFrame(rows)
+        st.dataframe(
+            df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "URL": st.column_config.LinkColumn("URL", display_text="Ver anuncio"),
+            },
+        )
+
+        # Footnote: cross-listing aggregate so the reader doesn't have
+        # to sum mentally.
+        total_drops = sum(l.n_drops for l in ph.listings)
+        total_drop_eur = sum(l.accumulated_drop_eur for l in ph.listings)
+        st.markdown(
+            f"**Total acumulado:** {total_drops} bajada{'s' if total_drops != 1 else ''} "
+            f"sumando €{abs(total_drop_eur):,} a lo largo de todos los anuncios."
+        )
+
+
 def render_detail_tab() -> None:
     st.header("🔍 Detalle de Propiedad")
 
@@ -293,6 +415,14 @@ def render_detail_tab() -> None:
 
     history = _get_price_history(listing["listing_id"])
 
+    # Property-level history — None when fingerprints haven't been
+    # computed yet, or this listing was scraped after the last
+    # fingerprint job.  Both downstream renders no-op safely on None.
+    try:
+        property_history = get_property_history(listing["listing_id"])
+    except Exception:
+        property_history = None
+
     # ── Header ────────────────────────────────────────────────────────────────
     st.markdown("---")
     col_title, col_link = st.columns([5, 1])
@@ -302,6 +432,9 @@ def render_detail_tab() -> None:
         st.caption(f"{status_badge} · {listing['distrito']} · {listing['barrio']}")
     with col_link:
         st.link_button("🔗 Ver en Idealista", listing["url"], use_container_width=True)
+
+    if property_history is not None:
+        _render_property_banner(property_history)
 
     # ── KPIs principales ──────────────────────────────────────────────────────
     price_sqm = listing["price"] / listing["size_sqm"] if listing.get("size_sqm") else None
@@ -371,6 +504,10 @@ def render_detail_tab() -> None:
     if listing.get("description"):
         with st.expander("📄 Descripción del anuncio"):
             st.markdown(listing["description"])
+
+    # ── Historial de la propiedad (cross-listing) ──────────────────────────
+    if property_history is not None:
+        _render_property_timeline(property_history, listing["listing_id"])
 
     st.markdown("---")
 
