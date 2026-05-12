@@ -36,7 +36,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 from db.connection import get_connection
 from property_fingerprints import (
@@ -89,47 +89,81 @@ def _wipe(conn) -> None:
     cur.execute("DELETE FROM property_fingerprints")
 
 
-def _write_property(conn, prop: Property) -> int:
-    """Insert one property row, return its generated ``property_id``.
+_PROPERTY_COLS = (
+    "listing_count", "republication_count",
+    "first_seen_date", "last_seen_date", "total_days_on_market",
+    "distrito", "barrio", "size_sqm", "rooms", "floor",
+)
 
-    Uses ``RETURNING`` to fetch the identity, which works on Postgres
-    natively.  On SQLite ``RETURNING`` is supported since 3.35 (Apr
-    2021); the bundled sqlite3 module on every Python we support
-    (3.10+) carries a recent-enough sqlite.
+
+def _property_row(p: Property) -> tuple:
+    return (
+        p.listing_count, p.republication_count,
+        p.first_seen_date, p.last_seen_date, p.total_days_on_market,
+        p.distrito, p.barrio, p.size_sqm, p.rooms, p.floor,
+    )
+
+
+def _write_properties(conn, properties: Sequence[Property]) -> list[int]:
+    """Bulk-insert all properties, return their ``property_id`` in input order.
+
+    Uses a single multi-VALUES ``INSERT … RETURNING property_id`` per
+    batch.  One row at a time would be ~33k network round trips over
+    the Madrid↔Supabase link — ~65 minutes of pure latency.  Batching
+    1000 rows per query drops it to ~30 round trips, finishing in
+    seconds.  Postgres's hard cap is 65 535 bind parameters per query;
+    at 10 columns/row the safe batch is 6 500 — we leave headroom.
+
+    Works on SQLite too — the multi-VALUES syntax is portable.
+    ``RETURNING`` returns rows in input order on both backends.
     """
+    if not properties:
+        return []
+
+    ids: list[int] = []
     cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO property_fingerprints (
-            listing_count, republication_count,
-            first_seen_date, last_seen_date, total_days_on_market,
-            distrito, barrio, size_sqm, rooms, floor
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        RETURNING property_id
-        """,
-        (
-            prop.listing_count,
-            prop.republication_count,
-            prop.first_seen_date,
-            prop.last_seen_date,
-            prop.total_days_on_market,
-            prop.distrito,
-            prop.barrio,
-            prop.size_sqm,
-            prop.rooms,
-            prop.floor,
-        ),
-    )
-    return cur.fetchone()[0]
+    batch_size = 1000
+    cols_sql = ", ".join(_PROPERTY_COLS)
+    placeholder_tuple = "(" + ", ".join(["?"] * len(_PROPERTY_COLS)) + ")"
+
+    for start in range(0, len(properties), batch_size):
+        batch = properties[start:start + batch_size]
+        values_sql = ", ".join([placeholder_tuple] * len(batch))
+        flat_params: list = []
+        for p in batch:
+            flat_params.extend(_property_row(p))
+
+        cur.execute(
+            f"INSERT INTO property_fingerprints ({cols_sql}) "
+            f"VALUES {values_sql} "
+            f"RETURNING property_id",
+            flat_params,
+        )
+        ids.extend(r[0] for r in cur.fetchall())
+    return ids
 
 
-def _write_mappings(conn, mappings: Iterable[tuple[str, int]]) -> None:
-    """Bulk-insert ``(listing_id, property_id)`` pairs."""
+def _write_mappings(conn, mappings: Sequence[tuple[str, int]]) -> None:
+    """Bulk-insert ``(listing_id, property_id)`` pairs.
+
+    Same batching reasoning as ``_write_properties`` — ``executemany``
+    in psycopg3 issues separate round trips, which is unworkable over
+    a high-latency link.  Multi-VALUES INSERT batches by 2 500 rows
+    (2 cols × 2 500 = 5 000 params, well under the 65 535 cap).
+    """
+    if not mappings:
+        return
     cur = conn.cursor()
-    cur.executemany(
-        "INSERT INTO listing_property_map (listing_id, property_id) VALUES (?, ?)",
-        list(mappings),
-    )
+    batch_size = 2500
+    for start in range(0, len(mappings), batch_size):
+        batch = mappings[start:start + batch_size]
+        values_sql = ", ".join(["(?, ?)"] * len(batch))
+        flat = [v for pair in batch for v in pair]
+        cur.execute(
+            f"INSERT INTO listing_property_map (listing_id, property_id) "
+            f"VALUES {values_sql}",
+            flat,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -197,10 +231,10 @@ def main() -> int:
         t2 = time.time()
         _wipe(conn)
         # We commit on context exit; until then, the wipe is reversible.
+        property_ids = _write_properties(conn, properties)
         mappings: list[tuple[str, int]] = []
-        for p in properties:
-            property_id = _write_property(conn, p)
-            mappings.extend((lid, property_id) for lid in p.listing_ids)
+        for p, pid in zip(properties, property_ids):
+            mappings.extend((lid, pid) for lid in p.listing_ids)
         _write_mappings(conn, mappings)
         print(f"\n  Escritura: {time.time()-t2:.1f}s ({len(mappings)} mappings)", file=sys.stderr)
 

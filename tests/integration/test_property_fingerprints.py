@@ -1,7 +1,7 @@
 """
 Integration tests for the property-fingerprint pipeline.
 
-These exercise ``compute_property_fingerprints._wipe / _write_property /
+These exercise ``compute_property_fingerprints._wipe / _write_properties /
 _write_mappings`` against the real Alembic schema on Postgres (when
 Docker is available) and on SQLite (always).  We assert that:
 
@@ -101,7 +101,7 @@ def test_sqlite_end_to_end_writes_expected_rows(sqlite_db: Path):
     from compute_property_fingerprints import (
         _load_all_listings,
         _wipe,
-        _write_property,
+        _write_properties,
         _write_mappings,
     )
     from db.connection import get_connection
@@ -114,9 +114,9 @@ def test_sqlite_end_to_end_writes_expected_rows(sqlite_db: Path):
         assert len(props) == 2  # {L1,L2} clustered + L3 singleton
 
         _wipe(conn)
+        property_ids = _write_properties(conn, props)
         mappings = []
-        for p in props:
-            pid = _write_property(conn, p)
+        for p, pid in zip(props, property_ids):
             mappings.extend((lid, pid) for lid in p.listing_ids)
         _write_mappings(conn, mappings)
 
@@ -138,7 +138,7 @@ def test_sqlite_rerun_is_idempotent(sqlite_db: Path):
     from compute_property_fingerprints import (
         _load_all_listings,
         _wipe,
-        _write_property,
+        _write_properties,
         _write_mappings,
     )
     from db.connection import get_connection
@@ -148,9 +148,9 @@ def test_sqlite_rerun_is_idempotent(sqlite_db: Path):
             rows = _load_all_listings(conn)
             props = cluster_listings(rows)
             _wipe(conn)
+            property_ids = _write_properties(conn, props)
             mappings = []
-            for p in props:
-                pid = _write_property(conn, p)
+            for p, pid in zip(props, property_ids):
                 mappings.extend((lid, pid) for lid in p.listing_ids)
             _write_mappings(conn, mappings)
 
@@ -190,7 +190,7 @@ def test_postgres_end_to_end(tmp_pg_db: str, monkeypatch: pytest.MonkeyPatch):
     from compute_property_fingerprints import (
         _load_all_listings,
         _wipe,
-        _write_property,
+        _write_properties,
         _write_mappings,
     )
     from db.connection import get_connection, close_db
@@ -202,9 +202,9 @@ def test_postgres_end_to_end(tmp_pg_db: str, monkeypatch: pytest.MonkeyPatch):
         props = cluster_listings(rows)
         assert len(props) == 2
         _wipe(conn)
+        property_ids = _write_properties(conn, props)
         mappings = []
-        for p in props:
-            pid = _write_property(conn, p)
+        for p, pid in zip(props, property_ids):
             mappings.extend((lid, pid) for lid in p.listing_ids)
         _write_mappings(conn, mappings)
 
@@ -234,7 +234,7 @@ def test_postgres_cascade_delete_cleans_map(tmp_pg_db: str, monkeypatch: pytest.
         """, (_SHARED_DESC,))
         raw.commit()
 
-    from compute_property_fingerprints import _write_property, _write_mappings
+    from compute_property_fingerprints import _write_properties, _write_mappings
     from db.connection import get_connection, close_db
     close_db()
     with get_connection() as conn:
@@ -243,7 +243,7 @@ def test_postgres_cascade_delete_cleans_map(tmp_pg_db: str, monkeypatch: pytest.
             listing_ids=["A"], distrito="Centro", barrio="Sol",
             size_sqm=60.0, rooms=2, floor="5",
         )
-        pid = _write_property(conn, prop)
+        [pid] = _write_properties(conn, [prop])
         _write_mappings(conn, [("A", pid)])
 
     close_db()
