@@ -65,6 +65,7 @@ def sqlite_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
             size_sqm             REAL,
             rooms                INTEGER,
             floor                TEXT,
+            cluster_type         TEXT NOT NULL DEFAULT 'singleton',
             computed_at          TEXT DEFAULT (datetime('now'))
         );
         CREATE TABLE listing_property_map (

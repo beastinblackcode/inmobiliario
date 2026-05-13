@@ -93,6 +93,7 @@ _PROPERTY_COLS = (
     "listing_count", "republication_count",
     "first_seen_date", "last_seen_date", "total_days_on_market",
     "distrito", "barrio", "size_sqm", "rooms", "floor",
+    "cluster_type",                  # added in alembic 0004
 )
 
 
@@ -101,6 +102,7 @@ def _property_row(p: Property) -> tuple:
         p.listing_count, p.republication_count,
         p.first_seen_date, p.last_seen_date, p.total_days_on_market,
         p.distrito, p.barrio, p.size_sqm, p.rooms, p.floor,
+        p.cluster_type,
     )
 
 
@@ -183,14 +185,31 @@ def _report(properties: list[Property]) -> None:
     print(f"  Grupos de republicación:    {n_reposts:>6d}  "
           f"({listings_in_reposts} listings en total)")
 
+    # Matcher v2: break down by cluster_type so the buyer-facing
+    # ``temporal`` (real republication) is visible separately from
+    # the false-positive ``obra_nueva`` clusters.
+    from collections import Counter
+    by_type = Counter(p.cluster_type for p in properties if p.listing_count > 1)
+    if by_type:
+        print(f"\n  Tipos de cluster (multi-listing):")
+        for t in ("temporal", "parallel", "obra_nueva"):
+            if by_type.get(t):
+                print(f"    {t:12s}  {by_type[t]:>5d}")
+
     if not n_reposts:
         return
-    # Top-5 most republished as a sanity-check sample.
-    top = sorted(properties, key=lambda p: p.republication_count, reverse=True)[:5]
-    print(f"\n  Top republicaciones:")
-    for p in top:
-        attrs = f"{p.barrio} · {p.size_sqm:.0f}m² · {p.rooms}h"
-        print(f"    {p.listing_count} listings  ({p.total_days_on_market}d en mercado)  {attrs}")
+    # Top-5 *real* republications (cluster_type='temporal') first if
+    # we have them — the previous version was dominated by obra_nueva
+    # noise and surfaced misleading top entries.
+    temporal = sorted(
+        (p for p in properties if p.cluster_type == "temporal"),
+        key=lambda p: p.total_days_on_market, reverse=True,
+    )[:5]
+    if temporal:
+        print(f"\n  Top republicaciones temporales (señal real):")
+        for p in temporal:
+            attrs = f"{p.barrio} · {p.size_sqm:.0f}m² · {p.rooms}h"
+            print(f"    {p.listing_count}x  ({p.total_days_on_market}d)  {attrs}")
 
 
 def main() -> int:

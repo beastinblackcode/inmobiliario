@@ -72,6 +72,7 @@ def sqlite_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
             size_sqm              REAL,
             rooms                 INTEGER,
             floor                 TEXT,
+            cluster_type          TEXT NOT NULL DEFAULT 'singleton',
             computed_at           TEXT
         );
         CREATE TABLE listing_property_map (
@@ -99,10 +100,10 @@ def sqlite_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
             ('L2', 300000, '2025-10-01',  NULL,  NULL),
             ('L2', 295000, '2026-01-15',  -5000, -1.66);
 
-        -- Two property rows: one with L1+L2, one with S1.
+        -- Two property rows: one with L1+L2 (temporal), one with S1 (singleton).
         INSERT INTO property_fingerprints VALUES
-            (1, 2, 1, '2024-03-01','2026-02-10', 240, 'Centro','Sol',80.0,3,'3','2026-05-12'),
-            (2, 1, 0, '2026-02-15','2026-02-20',   5, 'Centro','Sol',55.0,2,'5','2026-05-12');
+            (1, 2, 1, '2024-03-01','2026-02-10', 240, 'Centro','Sol',80.0,3,'3','temporal', '2026-05-12'),
+            (2, 1, 0, '2026-02-15','2026-02-20',   5, 'Centro','Sol',55.0,2,'5','singleton','2026-05-12');
 
         INSERT INTO listing_property_map VALUES
             ('L1', 1),
@@ -220,8 +221,8 @@ def test_postgres_end_to_end(tmp_pg_db: str, monkeypatch: pytest.MonkeyPatch):
             INSERT INTO property_fingerprints (
                 listing_count, republication_count,
                 first_seen_date, last_seen_date, total_days_on_market,
-                distrito, barrio, size_sqm, rooms, floor
-            ) VALUES (2, 1, '2024-03-01', '2026-02-10', 240, 'Centro', 'Sol', 80.0, 3, '3')
+                distrito, barrio, size_sqm, rooms, floor, cluster_type
+            ) VALUES (2, 1, '2024-03-01', '2026-02-10', 240, 'Centro', 'Sol', 80.0, 3, '3', 'temporal')
             RETURNING property_id
         """)
         pid = cur.fetchone()[0]

@@ -260,3 +260,89 @@ class TestClusterListings:
         ]
         props = cluster_listings(listings, threshold=1.01)
         assert len(props) == 2  # neither pair can hit > 1.0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Matcher v2: cluster_type classification
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestClusterTypeClassification:
+    """Verify each cluster gets the right ``cluster_type`` label."""
+
+    def test_singleton(self):
+        props = cluster_listings([_listing("a", description=_SHARED)])
+        assert props[0].cluster_type == "singleton"
+        assert props[0].is_real_republication is False
+
+    def test_temporal_when_dates_dont_overlap(self):
+        """A delisted in 2024-06, B starts 2025-10 — clear gap → temporal."""
+        listings = [
+            _listing("100000001", description=_SHARED,
+                     first_seen="2024-03-01", last_seen="2024-06-15"),
+            _listing("110000001", description=_SHARED,
+                     first_seen="2025-10-01", last_seen="2026-02-10"),
+        ]
+        props = cluster_listings(listings)
+        assert len(props) == 1
+        assert props[0].cluster_type == "temporal"
+        assert props[0].is_real_republication is True
+
+    def test_parallel_when_dates_overlap_diff_agencies(self):
+        """All listings co-exist, mixed seller types → parallel, not obra_nueva."""
+        listings = [
+            _listing("100000001", description=_SHARED,
+                     first_seen="2026-02-01", last_seen="2026-03-01"),
+            _listing("100000002", description=_SHARED,
+                     first_seen="2026-02-01", last_seen="2026-03-01"),
+        ]
+        # Force one to be Particular so it doesn't qualify as obra_nueva.
+        listings[1]["seller_type"] = "Particular"
+        # Need at least default seller_type on the first; ``_listing`` doesn't set it.
+        listings[0]["seller_type"] = "Agencia"
+        props = cluster_listings(listings)
+        assert len(props) == 1
+        assert props[0].cluster_type == "parallel"
+
+    def test_obra_nueva_when_ids_consecutive_same_day_agency(self):
+        """Classic obra-nueva: 5 consecutive IDs, same start date, all agency."""
+        listings = [
+            _listing(str(110682315 + i), description=_SHARED,
+                     first_seen="2026-02-19", last_seen="2026-05-11")
+            for i in range(5)
+        ]
+        for l in listings:
+            l["seller_type"] = "Agencia"
+        props = cluster_listings(listings)
+        assert len(props) == 1
+        assert props[0].cluster_type == "obra_nueva"
+        assert props[0].is_real_republication is False
+
+    def test_parallel_when_ids_far_apart(self):
+        """Same first_seen + same seller but IDs far apart → not obra_nueva."""
+        listings = [
+            _listing("100000001", description=_SHARED,
+                     first_seen="2026-02-19", last_seen="2026-05-11"),
+            _listing("999999999", description=_SHARED,
+                     first_seen="2026-02-19", last_seen="2026-05-11"),
+        ]
+        for l in listings:
+            l["seller_type"] = "Agencia"
+        props = cluster_listings(listings)
+        assert len(props) == 1
+        # IDs span > 200 → not obra_nueva, so parallel.
+        assert props[0].cluster_type == "parallel"
+
+    def test_temporal_wins_over_obra_nueva_when_gap_exists(self):
+        """Even with consecutive IDs + same seller, a real time gap → temporal."""
+        listings = [
+            _listing("110682315", description=_SHARED,
+                     first_seen="2024-03-01", last_seen="2024-06-15"),
+            _listing("110682316", description=_SHARED,
+                     first_seen="2025-10-01", last_seen="2026-02-10"),
+        ]
+        for l in listings:
+            l["seller_type"] = "Agencia"
+        props = cluster_listings(listings)
+        assert len(props) == 1
+        assert props[0].cluster_type == "temporal"

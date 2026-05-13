@@ -34,6 +34,28 @@ def _urgency_badge(score: float) -> tuple:
     return "⚪", "Bajo"
 
 
+def _cluster_chip(row) -> str:
+    """Return a Matcher-v2-aware chip suffix for an expander title.
+
+    Empty string for singletons or unclassified.  Distinguishes the
+    three multi-listing shapes so a parallel multi-agency cluster
+    doesn't look like a fatigue signal.
+    """
+    reps = int(row.get("republications", 0) or 0)
+    if reps <= 0:
+        return ""
+    ctype = row.get("cluster_type", "singleton")
+    if ctype == "temporal":
+        return f" · 🔄 {reps}x republicada"
+    if ctype == "parallel":
+        return f" · 🏷️ {reps + 1} anuncios paralelos"
+    if ctype == "obra_nueva":
+        # Different units in same development — not a republication at
+        # all.  Skip the chip; less visual noise on these.
+        return ""
+    return f" · 🔄 {reps}x"
+
+
 def _render_opportunity_expander(row) -> None:
     """Render one ranked-opportunity row as a Streamlit expander.
 
@@ -45,8 +67,7 @@ def _render_opportunity_expander(row) -> None:
     score = row["quality_score"]
     badge, label = _quality_badge(score)
     title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
-    reps = int(row.get("republications", 0) or 0)
-    rep_chip = f" · 🔄 {reps}x" if reps > 0 else ""
+    rep_chip = _cluster_chip(row)
 
     with st.expander(f"{badge} **{score:.0f}/100** ({label}){rep_chip} — {title_preview}"):
         rc1, rc2, rc3 = st.columns(3)
@@ -99,8 +120,7 @@ def _render_negotiability_expander(row) -> None:
     n_badge, n_label = _urgency_badge(n_score)
     q_badge, q_label = _quality_badge(q_score)
     title_preview = row["title"][:70] + "..." if len(row["title"]) > 70 else row["title"]
-    reps = int(row.get("republications", 0) or 0)
-    rep_chip = f" · 🔄 {reps}x" if reps > 0 else ""
+    rep_chip = _cluster_chip(row)
 
     with st.expander(f"{n_badge} **{n_score:.0f}/100** ({n_label}){rep_chip} — {title_preview}"):
         rc1, rc2, rc3 = st.columns(3)
@@ -211,19 +231,26 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
 
     df_ranked = rank_opportunities(active_df[active_df["price"] < 500_000])
 
-    # Enrich with property republication counts so each card can flag
-    # "🔄 Nx" when the listing has been published before.  One bulk
-    # query, not one-per-card.  Defensive: if fingerprints haven't
-    # been computed yet (fresh deploy / empty table) the helper
-    # returns 0 for every id — the chip simply never renders.
+    # Matcher v2: enrich with cluster_type + count so each card can
+    # render a different chip for real republications vs parallel
+    # multi-listings vs obra-nueva noise.  One bulk query, not
+    # one-per-card.  Defensive: when fingerprints haven't been computed
+    # yet (fresh deploy / empty table) the helper returns singletons
+    # everywhere — no chip renders.
     try:
-        from property_history import get_republication_counts
-        rep_counts = get_republication_counts(df_ranked["listing_id"].tolist())
+        from property_history import get_cluster_info
+        info = get_cluster_info(df_ranked["listing_id"].tolist())
         df_ranked = df_ranked.copy()
-        df_ranked["republications"] = df_ranked["listing_id"].map(rep_counts).fillna(0).astype(int)
+        df_ranked["republications"] = df_ranked["listing_id"].map(
+            lambda lid: info.get(lid, {}).get("count", 0)
+        ).astype(int)
+        df_ranked["cluster_type"]   = df_ranked["listing_id"].map(
+            lambda lid: info.get(lid, {}).get("type", "singleton")
+        )
     except Exception:
         df_ranked = df_ranked.copy()
         df_ranked["republications"] = 0
+        df_ranked["cluster_type"]   = "singleton"
 
     if df_ranked.empty:
         st.warning("No hay propiedades activas para analizar.")
