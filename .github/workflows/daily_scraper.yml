@@ -98,3 +98,52 @@ jobs:
           print(f"   Sold/removed:     {s['sold_count']:,}")
           print(f"   Avg price:        €{s['avg_price']:,.0f}")
           EOF
+
+      # ── 7. Health-check (fail loudly when nothing useful happened) ────────
+      # The previous steps run with ``continue-on-error: true`` so a failed
+      # scrape doesn't take the whole workflow with it (we still want the
+      # email + snapshots steps to run on partial data).  That gentleness
+      # also means a *fully* broken scraper run can finish "green" — the
+      # post-mortem from this session showed 2.5 months of silent failures
+      # for exactly that reason.  This guard explicitly fails the run when
+      # the latest ``scraping_log`` row is stale or trivially small.
+      #
+      # No ``continue-on-error`` here on purpose: a red workflow run is
+      # exactly the signal we want when the data pipeline stops producing.
+      - name: Verify scrape actually produced data
+        run: |
+          python - <<'EOF'
+          import sys
+          from datetime import date, timedelta
+          from database import get_scraping_log
+
+          MIN_PROPERTIES   = 1000   # below this, the scraper effectively did nothing
+          MAX_STALENESS_D  = 2      # latest log row must be no older than this
+
+          log = get_scraping_log(limit=1)
+          if not log:
+              sys.exit("❌ No scraping_log rows found at all — scraper never wrote.")
+
+          row = log[0]
+          n = int(row.get("properties_processed") or 0)
+          if n < MIN_PROPERTIES:
+              sys.exit(
+                  f"❌ Last run only processed {n} properties "
+                  f"(threshold {MIN_PROPERTIES}).  Treat as silent failure."
+              )
+
+          # ``start_time`` is text on SQLite, datetime on Postgres.
+          ts = row.get("start_time")
+          if hasattr(ts, "date"):
+              ran = ts.date() if hasattr(ts, "hour") else ts
+          else:
+              ran = date.fromisoformat(str(ts)[:10])
+          age = (date.today() - ran).days
+          if age > MAX_STALENESS_D:
+              sys.exit(
+                  f"❌ Latest scraping_log entry is {age} days old ({ran}) "
+                  f"— newer run never reached log_scraping_execution()."
+              )
+
+          print(f"✅ Verified: {n:,} properties · last ran {ran} ({age}d ago).")
+          EOF
