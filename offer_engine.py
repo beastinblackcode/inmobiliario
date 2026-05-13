@@ -67,6 +67,9 @@ CAP_DROPS            =  6.0
 CAP_SELLER_TYPE      =  3.0
 CAP_NLP_SIGNALS      =  4.0
 CAP_OVERPRICED       =  6.0
+CAP_CONDITION        =  5.0
+CAP_ENERGY_CERT      =  2.0
+CAP_CONSTRUCTION_AGE =  2.0
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -244,6 +247,115 @@ def _factor_nlp_signals(amenities: Optional[dict]) -> Optional[OfferFactor]:
     )
 
 
+def _factor_condition(amenities: Optional[dict]) -> Optional[OfferFactor]:
+    """NLP-extracted ``condition`` categorical → discount.
+
+    Drives a more nuanced signal than the boolean ``needs_work`` /
+    ``renovated`` that's been firing from ``listing_signals``.  When
+    we have an explicit category we use it; otherwise the listing
+    falls back to whatever ``_factor_nlp_signals`` provides.
+
+    A property described as ``a_reformar`` warrants -3% (the buyer
+    will need to plan for works).  ``para_reformar`` is stronger
+    -5%.  ``reformado`` is neutral-to-slight-negative because there's
+    less leverage when the work has been done.  ``buen_estado`` and
+    ``obra_nueva`` give no leverage signal.
+    """
+    if not amenities:
+        return None
+    cond = amenities.get("condition")
+    if not cond:
+        return None
+
+    discount_by_cond = {
+        "para_reformar":  -5.0,
+        "a_reformar":     -3.0,
+        "buen_estado":     0.0,
+        "reformado":       0.0,
+        "obra_nueva":      0.0,
+    }
+    if cond not in discount_by_cond or discount_by_cond[cond] == 0.0:
+        return None
+    return OfferFactor(
+        label        = "Estado de la propiedad",
+        discount_pct = max(discount_by_cond[cond], -CAP_CONDITION),
+        why          = f"Vendedor describe el piso como {cond.replace('_', ' ')} — "
+                       "habrá que descontar el coste de obras.",
+    )
+
+
+def _factor_energy_certification(amenities: Optional[dict]) -> Optional[OfferFactor]:
+    """Energy class → discount/boost.
+
+    F/G are increasingly hard to sell and re-certify after the 2026
+    EU disclosure rules; a buyer can use that as leverage.  A/B
+    properties cost less to run and historically command a premium —
+    we don't push the offer *above* fair value for them, but we apply
+    a smaller leverage factor (less room to negotiate down).
+
+    The middle classes (C/D/E) and ``exento`` / ``en_tramite`` get
+    no factor.
+    """
+    if not amenities:
+        return None
+    cert = amenities.get("energy_certification")
+    if not cert or cert in ("C", "D", "E", "exento", "en_tramite"):
+        return None
+    discount_by_cert = {
+        "A": +0.5,
+        "B": +0.5,
+        "F": -1.0,
+        "G": -2.0,
+    }
+    pct = discount_by_cert.get(cert, 0.0)
+    if pct == 0.0:
+        return None
+    return OfferFactor(
+        label        = "Certificación energética",
+        discount_pct = max(pct, -CAP_ENERGY_CERT) if pct < 0 else min(pct, +CAP_ENERGY_CERT),
+        why          = (
+            f"Certificación {cert} — propiedad más cara de mantener; "
+            "tiende a pesar en el precio."
+        ) if pct < 0 else (
+            f"Certificación {cert} — propiedad eficiente; menos margen para negociar."
+        ),
+    )
+
+
+def _factor_construction_year(amenities: Optional[dict]) -> Optional[OfferFactor]:
+    """Construction year → small leverage signal.
+
+    Very old properties (<1950) typically carry a renovation backlog
+    even when listed as ``buen_estado``; the bias is small but real.
+    Newer properties (post-2010) tend to need less work in the medium
+    term.  Neither swings more than ``CAP_CONSTRUCTION_AGE``.
+    """
+    if not amenities:
+        return None
+    year = amenities.get("construction_year")
+    if year is None:
+        return None
+    try:
+        year = int(year)
+    except (TypeError, ValueError):
+        return None
+    if year < 1950:
+        pct, label = -1.5, "Edificio anterior a 1950 — instalaciones probablemente obsoletas."
+    elif year < 1970:
+        pct, label = -0.5, f"Edificio del {year} — antiguo, riesgo de obras de actualización."
+    elif year >= 2018:
+        pct, label = +1.0, f"Edificio del {year} — moderno, sin reformas a la vista."
+    elif year >= 2010:
+        pct, label = +0.5, f"Edificio del {year} — relativamente nuevo."
+    else:
+        return None
+    return OfferFactor(
+        label        = "Antigüedad del edificio",
+        discount_pct = max(pct, -CAP_CONSTRUCTION_AGE) if pct < 0 else min(pct, +CAP_CONSTRUCTION_AGE),
+        why          = label,
+    )
+
+
 def _factor_overpriced(asking_price: int, fair_value: int) -> Optional[OfferFactor]:
     """When asking > fair_value the property is overpriced relative to comps.
 
@@ -299,6 +411,7 @@ def suggest_offer(
     fair_value_method: str       = "barrio_comps",
     property_history:  Any       = None,
     nlp_signals:       Optional[dict] = None,
+    nlp_amenities:     Optional[dict] = None,
 ) -> OfferSuggestion:
     """Build a complete offer suggestion for a listing.
 
@@ -330,12 +443,15 @@ def suggest_offer(
 
     factors: list[OfferFactor] = []
     for fn, arg in (
-        (_factor_days_on_market,  listing),
-        (_factor_price_drops,     listing),
-        (_factor_seller_type,     listing),
-        (_factor_republications,  property_history),
-        (_factor_nlp_signals,     nlp_signals),
-        (_factor_overpriced,      None),         # special-case below
+        (_factor_days_on_market,        listing),
+        (_factor_price_drops,           listing),
+        (_factor_seller_type,           listing),
+        (_factor_republications,        property_history),
+        (_factor_nlp_signals,           nlp_signals),
+        (_factor_condition,             nlp_amenities),
+        (_factor_energy_certification,  nlp_amenities),
+        (_factor_construction_year,     nlp_amenities),
+        (_factor_overpriced,            None),         # special-case below
     ):
         if fn is _factor_overpriced:
             f = _factor_overpriced(asking_price, fair_value)
