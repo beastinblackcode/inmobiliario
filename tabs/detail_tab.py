@@ -626,16 +626,43 @@ def render_detail_tab() -> None:
 
         if amenities:
             badges = amenities_to_badges(amenities)
-            year = amenities.get("construction_year")
-            if badges or year:
+            year       = amenities.get("construction_year")
+            energy     = amenities.get("energy_certification")
+            condition  = amenities.get("condition")
+
+            if badges or year or energy or condition:
                 st.markdown("**🏷️ Características detectadas en la descripción**")
-                cols = st.columns([1, 4])
+                cols = st.columns([2, 4])
+
                 with cols[0]:
+                    # Metric-style fields for the three v2 NLP fields.
+                    # Each is shown only when extracted; otherwise the slot
+                    # collapses and we don't clutter the layout.
                     if year:
                         st.metric("📅 Año construcción", str(year))
+                    if energy:
+                        # A/B → green emoji, C/D/E → neutral, F/G → red.
+                        if energy in ("A", "B"):
+                            cert_label = f"🟢 {energy}"
+                        elif energy in ("F", "G"):
+                            cert_label = f"🔴 {energy}"
+                        elif energy in ("exento", "en_tramite"):
+                            cert_label = f"⚪ {energy.replace('_', ' ').title()}"
+                        else:
+                            cert_label = f"🟡 {energy}"
+                        st.metric("⚡ Certif. energética", cert_label)
+                    if condition:
+                        cond_icons = {
+                            "obra_nueva":    "🆕 Obra nueva",
+                            "reformado":     "✨ Reformado",
+                            "buen_estado":   "👌 Buen estado",
+                            "a_reformar":    "🔧 A reformar",
+                            "para_reformar": "🛠️ Reforma integral",
+                        }
+                        st.metric("🏠 Estado", cond_icons.get(condition, condition))
+
                 with cols[1]:
                     if badges:
-                        # Render badges as a compact pill row
                         st.markdown(
                             " ".join(
                                 f"<span style='background:#1e293b;color:#e2e8f0;"
@@ -907,15 +934,28 @@ def render_detail_tab() -> None:
             confidence = fair.get("confidence", "medium")
             method     = "barrio_comps" if (fair.get("num_comps") or 0) >= 5 else "distrito_comps"
 
-            # NLP signals — already loaded earlier via ``amenities`` but
-            # those are physical (terraza/garaje), not the leverage signals
-            # (negociable/urgencia).  Load the right table.
-            nlp_signals = None
+            # NLP signals (urgency / negotiable / etc.) and amenities
+            # (construction_year, energy_certification, condition).
+            # Two separate tables; both fed to the offer engine which
+            # turns them into discount factors.
+            nlp_signals: dict | None = None
+            nlp_amenities_for_offer: dict | None = None
             try:
-                from nlp_analyzer import get_signals_for_listings
+                from nlp_analyzer import (
+                    get_signals_for_listings, get_amenities_for_listings,
+                    extract_amenities as _extract,
+                )
                 nlp_signals = get_signals_for_listings([listing["listing_id"]]).get(
                     listing["listing_id"]
                 )
+                nlp_amenities_for_offer = get_amenities_for_listings(
+                    [listing["listing_id"]]
+                ).get(listing["listing_id"])
+                # Fallback: derive on the fly if the table doesn't have a
+                # row yet for this listing (fresh scrape since the last
+                # NLP batch run).
+                if nlp_amenities_for_offer is None and listing.get("description"):
+                    nlp_amenities_for_offer = _extract(listing["description"])
             except Exception:
                 pass
 
@@ -926,6 +966,7 @@ def render_detail_tab() -> None:
                 fair_value_method = method,
                 property_history  = property_history,
                 nlp_signals       = nlp_signals,
+                nlp_amenities     = nlp_amenities_for_offer,
             )
             _render_offer_suggestion(offer)
 

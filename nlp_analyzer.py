@@ -251,27 +251,166 @@ AMENITIES: Dict[str, Dict[str, List[str]]] = {
 # are mid-19th century; everything earlier is almost certainly an OCR
 # artefact or a postal code mistakenly captured).
 YEAR_PATTERNS = [
+    # Verb-based ("construido en 1985", "edificado en 1960")
     re.compile(
-        r"\b(?:construid[oa]|edificad[oa]|levantad[oa])\s+(?:en\s+(?:el\s+)?(?:a[ñn]o\s+)?)?(\d{4})\b",
+        r"\b(?:construid[oa]|edificad[oa]|levantad[oa]|reformad[oa])\s+"
+        r"(?:en\s+(?:el\s+)?(?:a[ñn]o\s+)?)?(\d{4})\b",
         re.IGNORECASE,
     ),
+    # Labelled ("año construcción: 1985", "fecha de construcción 1960")
     re.compile(
-        r"\b(?:año|fecha)\s+(?:de\s+)?construcci[oó]n\s*[:\-]?\s*(\d{4})\b",
+        r"\b(?:a[ñn]o|fecha)\s+(?:de\s+)?construcci[oó]n\s*[:\-]?\s*(\d{4})\b",
         re.IGNORECASE,
     ),
+    # Building referenced ("edificio del 1985", "edificio de 1965")
     re.compile(
         r"\bedificio\s+(?:del?\s+)?(?:a[ñn]o\s+)?(\d{4})\b",
         re.IGNORECASE,
     ),
+    # Property referenced ("vivienda del 2010")
     re.compile(
-        r"\bvivienda\s+(?:del?\s+)?(?:a[ñn]o\s+)?(\d{4})\b",
+        r"\b(?:vivienda|piso|inmueble|finca)\s+(?:del?\s+)?(?:a[ñn]o\s+)?(\d{4})\b",
         re.IGNORECASE,
     ),
+    # "construcción: 1985" / "construcción 1985"
     re.compile(
         r"\bconstrucci[oó]n\s*[:\-]?\s*(\d{4})\b",
         re.IGNORECASE,
     ),
+    # "promoción de 2010", "promoción del año 2010"
+    re.compile(
+        r"\bpromoci[oó]n\s+(?:del?\s+)?(?:a[ñn]o\s+)?(\d{4})\b",
+        re.IGNORECASE,
+    ),
+    # "del año 1960", "de los años 60" → only catch 4-digit, "años 60"
+    # cases are too imprecise to commit to a specific year.
+    re.compile(
+        r"\bdel\s+a[ñn]o\s+(\d{4})\b",
+        re.IGNORECASE,
+    ),
 ]
+
+
+# ── Energy certification (A-G) ─────────────────────────────────────────────────
+#
+# Spanish listings use the Real Decreto 235/2013 letter scale.  Common
+# phrasings:
+#   "certificación energética: B"
+#   "calificación energética E"
+#   "consumo: A · emisiones: A"  (we take the consumption letter)
+#   "etiqueta energética: C"
+#   "en trámite" / "exento" — non-letter outcomes we also surface
+#
+# The patterns capture the first single A-G letter that follows the
+# energy-related label.  We refuse to match a bare letter without a
+# label since it would collide with floor numbers ("planta B").
+
+_ENERGY_LETTER_RE = re.compile(
+    r"\b(?:certificad[oa]|certificaci[oó]n|calificaci[oó]n|consumo|etiqueta|"
+    r"clasificaci[oó]n)\s+"
+    r"(?:energ[eé]tic[oa]\s*)?(?:de\s+)?(?:consumo\s*)?[:\-]?\s*"
+    r"\(?([A-G])\)?\b",
+    re.IGNORECASE,
+)
+_ENERGY_LABELLED_RE = re.compile(
+    r"\benerg[eé]tic[oa]\s*[:\-]?\s*\(?([A-G])\)?\b",
+    re.IGNORECASE,
+)
+_ENERGY_EXEMPT_RE = re.compile(
+    r"\b(?:certificad[oa]|certificaci[oó]n|calificaci[oó]n|etiqueta)\s+"
+    r"(?:energ[eé]tic[oa]\s*[:\-]?\s*)?"
+    r"(?:en\s+tr[aá]mite|exento|exenta|pendiente)\b",
+    re.IGNORECASE,
+)
+
+
+# ── Condition / state ──────────────────────────────────────────────────────────
+#
+# A single categorical condition per listing.  Categories chosen so the
+# offer engine can map them to discount/boost factors directly:
+#
+#   obra_nueva     — strong positive (new build, no immediate works)
+#   reformado      — positive (recent renovation, move-in ready)
+#   buen_estado    — neutral (habitable, no major works)
+#   a_reformar     — negative (needs work)
+#   para_reformar  — strongly negative (gut renovation / "para reformar
+#                    integral" / "necesita reforma completa")
+#
+# Patterns are listed in priority order: stronger phrasings beat weaker
+# ones inside the same listing.
+
+_CONDITION_PATTERNS = [
+    ("obra_nueva", [
+        r"\bobra\s+nueva\b",
+        r"\bvivienda\s+nueva\b",
+        r"\ba\s+estrenar\b",
+        r"\bsin\s+estrenar\b",
+        r"\bnueva\s+construcci[oó]n\b",
+    ]),
+    ("para_reformar", [
+        r"\breforma\s+integral\b",
+        r"\breforma\s+completa\b",
+        # Negative-lookbehind for "no" so "no necesita reforma" — a
+        # *positive* description — doesn't get misclassified as
+        # needing one.
+        r"(?<!no\s)\bnecesita\s+reforma\b",
+        r"\bpara\s+reformar\s+(?:integral|completa)",
+    ]),
+    ("a_reformar", [
+        # Same negative-lookbehind discipline so "no a reformar" /
+        # "no necesita..." don't fire.
+        r"(?<!no\s)\ba\s+reformar\b",
+        r"(?<!no\s)\bpara\s+reformar\b",
+        r"\bpiso\s+a\s+reformar\b",
+        r"(?<!no\s)\bnecesita\s+actualizaci[oó]n\b",
+    ]),
+    ("reformado", [
+        r"\b(?:totalmente|completamente|integralmente)\s+reformad[oa]\b",
+        r"\brecientemente\s+reformad[oa]\b",
+        r"\breci[eé]n\s+reformad[oa]\b",
+        r"\breformad[oa]\s+(?:en|el\s+a[ñn]o)\s+20\d{2}\b",
+        r"\bvivienda\s+reformad[oa]\b",
+        r"\bpiso\s+reformad[oa]\b",
+    ]),
+    ("buen_estado", [
+        r"\bbuen\s+estado\b",
+        r"\bperfecto\s+estado\b",
+        r"\bmuy\s+buen\s+estado\b",
+        r"\bestado\s+impecable\b",
+        r"\blistos?\s+para\s+entrar\b",
+        r"\bpara\s+entrar\s+a\s+vivir\b",
+    ]),
+]
+
+
+def _extract_energy_certification(text: str) -> Optional[str]:
+    """Return ``'A'`` … ``'G'``, ``'exento'``, ``'en_tramite'``, or None.
+
+    Matches in priority order: explicit label + letter > generic
+    "energético: X" > exempt/pending phrasings.  Falsey on missing.
+    """
+    for rx in (_ENERGY_LETTER_RE, _ENERGY_LABELLED_RE):
+        m = rx.search(text)
+        if m:
+            return m.group(1).upper()
+    m = _ENERGY_EXEMPT_RE.search(text)
+    if m:
+        return "exento" if "exento" in m.group(0).lower() or "exenta" in m.group(0).lower() else "en_tramite"
+    return None
+
+
+def _extract_condition(text: str) -> Optional[str]:
+    """Return one of the five condition labels or None.
+
+    Walks the pattern table in priority order so a description with both
+    "obra nueva" and "a reformar" (e.g. quoting comparables) gets the
+    stronger primary signal.
+    """
+    text_lower = text.lower()
+    for label, patterns in _CONDITION_PATTERNS:
+        if any(re.search(p, text_lower) for p in patterns):
+            return label
+    return None
 
 
 # ── Core analysis ──────────────────────────────────────────────────────────────
@@ -335,17 +474,22 @@ def signals_to_badges(signals: Dict) -> str:
 
 def extract_amenities(text: Optional[str]) -> Dict:
     """
-    Extract physical amenities, proximity flags and construction year from
-    a Spanish listing description.
+    Extract physical amenities, proximity flags, construction year,
+    energy certification and condition from a Spanish listing description.
 
     Returns a dict of:
       - 14 boolean flags  (has_*, near_*)
-      - construction_year:  int | None  (1800-2030)
-      - amenities_count:    int — how many of the boolean flags are True
+      - construction_year:    int | None  (1800-2030)
+      - energy_certification: str | None  ('A'..'G' | 'exento' | 'en_tramite')
+      - condition:            str | None  (one of the categorical labels
+                                            from ``_CONDITION_PATTERNS``)
+      - amenities_count:      int — how many of the boolean flags are True
     """
     result = {name: False for name in AMENITIES}
-    result["construction_year"] = None
-    result["amenities_count"] = 0
+    result["construction_year"]    = None
+    result["energy_certification"] = None
+    result["condition"]            = None
+    result["amenities_count"]      = 0
 
     if not text or not isinstance(text, str):
         return result
@@ -370,6 +514,9 @@ def extract_amenities(text: Optional[str]) -> Dict:
                     break
             except (ValueError, IndexError):
                 pass
+
+    result["energy_certification"] = _extract_energy_certification(text)
+    result["condition"]            = _extract_condition(text)
 
     result["amenities_count"] = sum(
         1 for k, v in result.items() if k.startswith(("has_", "near_")) and v
@@ -405,13 +552,35 @@ def amenities_to_badges(amenities: Dict) -> List[str]:
 # ── Database storage ───────────────────────────────────────────────────────────
 
 def _get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Backend-dispatching connection (shim).
+
+    Pre-cutover this module hardcoded ``sqlite3.connect("real_estate.db")``
+    which silently broke on Streamlit Cloud after Phase D: the cloud
+    container has no SQLite file, so the call created an empty one and
+    every read returned zero rows.  The detail page papered over this
+    with an in-Python ``extract_amenities`` fallback on the raw
+    description, but the actual ``listing_amenities`` rows on Supabase
+    (≈19k after backfill) were never consulted.
+
+    Now routed through the same shim every other module uses, so reads
+    and writes both hit the live Postgres on prod / SQLite locally.
+    Returns a context-manager-style connection from ``db.connection``.
+    """
+    from db.connection import get_connection
+    return get_connection()
 
 
 def init_signals_table():
-    """Create listing_signals table if it doesn't exist."""
+    """Create listing_signals table if it doesn't exist.
+
+    No-op on Postgres — Alembic owns the schema (see
+    ``alembic/versions/0001_initial_schema.py``).  SQLite branches keep
+    the inline CREATE so local dev workflows that bootstrap a fresh DB
+    don't need alembic.
+    """
+    from db.dialect import is_postgres
+    if is_postgres():
+        return
     with _get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS listing_signals (
@@ -426,12 +595,18 @@ def init_signals_table():
                 analyzed_at   TEXT    NOT NULL DEFAULT (datetime('now'))
             )
         """)
-        conn.commit()
     print("✓ listing_signals table ready")
 
 
 def init_amenities_table():
-    """Create listing_amenities table if it doesn't exist."""
+    """Create listing_amenities table if it doesn't exist.
+
+    No-op on Postgres — Alembic owns the schema (initial in 0001,
+    plus ``energy_certification`` / ``condition`` columns from 0005).
+    """
+    from db.dialect import is_postgres
+    if is_postgres():
+        return
     with _get_connection() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS listing_amenities (
@@ -452,6 +627,8 @@ def init_amenities_table():
                 near_hospital           INTEGER NOT NULL DEFAULT 0,
                 construction_year       INTEGER,
                 amenities_count         INTEGER NOT NULL DEFAULT 0,
+                energy_certification    TEXT,
+                condition               TEXT,
                 analyzed_at             TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -465,27 +642,28 @@ def init_amenities_table():
             ON listing_amenities(construction_year)
             WHERE construction_year IS NOT NULL
         """)
-        conn.commit()
     print("✓ listing_amenities table ready")
 
 
 def upsert_signals(listing_id: str, signals: Dict) -> None:
     """Insert or replace NLP signals for a listing."""
+    from db.dialect import current_timestamp
+    now = current_timestamp()
     with _get_connection() as conn:
-        conn.execute("""
+        conn.execute(f"""
             INSERT INTO listing_signals
                 (listing_id, urgency, direct, negotiable, renovated,
                  needs_work, nlp_bonus, signal_count, analyzed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, {now})
             ON CONFLICT(listing_id) DO UPDATE SET
-                urgency      = excluded.urgency,
-                direct       = excluded.direct,
-                negotiable   = excluded.negotiable,
-                renovated    = excluded.renovated,
-                needs_work   = excluded.needs_work,
-                nlp_bonus    = excluded.nlp_bonus,
-                signal_count = excluded.signal_count,
-                analyzed_at  = excluded.analyzed_at
+                urgency      = EXCLUDED.urgency,
+                direct       = EXCLUDED.direct,
+                negotiable   = EXCLUDED.negotiable,
+                renovated    = EXCLUDED.renovated,
+                needs_work   = EXCLUDED.needs_work,
+                nlp_bonus    = EXCLUDED.nlp_bonus,
+                signal_count = EXCLUDED.signal_count,
+                analyzed_at  = EXCLUDED.analyzed_at
         """, (
             listing_id,
             int(signals.get("urgency", False)),
@@ -496,7 +674,6 @@ def upsert_signals(listing_id: str, signals: Dict) -> None:
             signals.get("nlp_bonus", 0),
             signals.get("signal_count", 0),
         ))
-        conn.commit()
 
 
 def get_signals_for_listings(listing_ids: List[str]) -> Dict[str, Dict]:
@@ -531,47 +708,78 @@ def get_signals_for_listings(listing_ids: List[str]) -> Dict[str, Dict]:
 
 _AMENITY_BOOL_KEYS = [name for name in AMENITIES]
 
+# Order matters — columns lined up with the upsert / select code.
+# ``analyzed_at`` is set in SQL via ``current_timestamp()`` so the
+# dialect helper handles SQLite vs Postgres.
+_AMENITY_EXTRA_COLS = (
+    "construction_year",
+    "amenities_count",
+    "energy_certification",        # added in 0005
+    "condition",                   # added in 0005
+)
+
 
 def upsert_amenities(listing_id: str, amenities: Dict) -> None:
-    """Insert or replace amenity flags for a listing."""
-    cols = _AMENITY_BOOL_KEYS + ["construction_year", "amenities_count"]
-    values = [int(amenities.get(k, False)) for k in _AMENITY_BOOL_KEYS]
-    values += [amenities.get("construction_year"), amenities.get("amenities_count", 0)]
+    """Insert or replace amenity flags for a listing.
 
-    set_clause = ", ".join(f"{c} = excluded.{c}" for c in cols)
-    placeholders = ", ".join("?" * (len(cols) + 1))  # +1 for listing_id
+    Uses the shared ``ON CONFLICT`` upsert syntax which works on both
+    SQLite and Postgres.  ``analyzed_at`` is set via the dialect's
+    ``current_timestamp()`` helper so the same SQL string works on
+    both backends.
+    """
+    from db.dialect import current_timestamp
+
+    cols = _AMENITY_BOOL_KEYS + list(_AMENITY_EXTRA_COLS)
+    values: list = [int(amenities.get(k, False)) for k in _AMENITY_BOOL_KEYS]
+    values += [amenities.get(c) for c in _AMENITY_EXTRA_COLS]
+    # ``amenities_count`` should default to 0 — never NULL.
+    idx = _AMENITY_BOOL_KEYS.__len__() + 1  # construction_year=0, amenities_count=1
+    if values[idx] is None:
+        values[idx] = 0
+
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
+    placeholders = ", ".join(["?"] * (len(cols) + 1))
+    now = current_timestamp()
 
     with _get_connection() as conn:
         conn.execute(f"""
             INSERT INTO listing_amenities
                 (listing_id, {", ".join(cols)}, analyzed_at)
-            VALUES ({placeholders}, datetime('now'))
+            VALUES ({placeholders}, {now})
             ON CONFLICT(listing_id) DO UPDATE SET
                 {set_clause},
-                analyzed_at = datetime('now')
+                analyzed_at = {now}
         """, (listing_id, *values))
-        conn.commit()
 
 
 def get_amenities_for_listings(listing_ids: List[str]) -> Dict[str, Dict]:
-    """Return amenity dict keyed by listing_id for a list of IDs."""
+    """Return amenity dict keyed by listing_id for a list of IDs.
+
+    Output dict includes every flag, ``construction_year``,
+    ``amenities_count``, plus the v2 fields ``energy_certification``
+    and ``condition`` (both nullable).
+    """
     if not listing_ids:
         return {}
-    placeholders = ",".join("?" * len(listing_ids))
-    cols = _AMENITY_BOOL_KEYS + ["construction_year", "amenities_count"]
+    placeholders = ",".join(["?"] * len(listing_ids))
+    cols = _AMENITY_BOOL_KEYS + list(_AMENITY_EXTRA_COLS)
     select_cols = "listing_id, " + ", ".join(cols)
     with _get_connection() as conn:
-        rows = conn.execute(f"""
+        cur = conn.cursor()
+        cur.execute(f"""
             SELECT {select_cols}
             FROM listing_amenities
             WHERE listing_id IN ({placeholders})
-        """, tuple(listing_ids)).fetchall()
+        """, tuple(listing_ids))
+        rows = cur.fetchall()
 
-    result = {}
+    result: Dict[str, Dict] = {}
     for row in rows:
         d = {k: bool(row[k]) for k in _AMENITY_BOOL_KEYS}
-        d["construction_year"] = row["construction_year"]
-        d["amenities_count"] = row["amenities_count"]
+        d["construction_year"]    = row["construction_year"]
+        d["amenities_count"]      = row["amenities_count"] or 0
+        d["energy_certification"] = row["energy_certification"]
+        d["condition"]            = row["condition"]
         result[row["listing_id"]] = d
     return result
 
