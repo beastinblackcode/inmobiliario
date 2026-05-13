@@ -99,7 +99,16 @@ class PropertyHistory:
     size_sqm:             Optional[float]
     rooms:                Optional[int]
     floor:                Optional[str]
+    # Matcher v2: what kind of cluster this property is.
+    # ``singleton`` | ``temporal`` | ``parallel`` | ``obra_nueva``
+    # Defaults to ``singleton`` so callers reading old data (before
+    # the Alembic 0004 migration ran) don't blow up.
+    cluster_type:         str = "singleton"
     listings:             list[ListingHistoryEntry] = field(default_factory=list)
+
+    @property
+    def is_real_republication(self) -> bool:
+        return self.cluster_type == "temporal"
 
     @property
     def initial_price_overall(self) -> Optional[int]:
@@ -206,7 +215,8 @@ def _load_property_meta(conn, property_id: int) -> Optional[dict]:
         """
         SELECT property_id, listing_count, republication_count,
                first_seen_date, last_seen_date, total_days_on_market,
-               distrito, barrio, size_sqm, rooms, floor
+               distrito, barrio, size_sqm, rooms, floor,
+               cluster_type
         FROM property_fingerprints
         WHERE property_id = ?
         """,
@@ -316,6 +326,7 @@ def get_property_history(listing_id: str) -> Optional[PropertyHistory]:
         size_sqm             = meta["size_sqm"],
         rooms                = meta["rooms"],
         floor                = meta["floor"],
+        cluster_type         = meta.get("cluster_type") or "singleton",
         listings             = entries,
     )
 
@@ -324,8 +335,9 @@ def get_republication_counts(listing_ids: Sequence[str]) -> dict[str, int]:
     """Bulk: ``listing_id → republication_count`` for cards / table views.
 
     One query for the whole page; entries missing from the map default
-    to 0.  The caller can drop a ``🔄 Nx`` chip with ``v > 0`` to flag
-    properties that have been republished.
+    to 0.  Includes every cluster type — callers that want only
+    *temporal* republications should use ``get_cluster_info`` and
+    filter by ``cluster_type == 'temporal'``.
     """
     listing_ids = list(listing_ids)
     if not listing_ids:
@@ -347,4 +359,38 @@ def get_republication_counts(listing_ids: Sequence[str]) -> dict[str, int]:
         )
         for r in cur.fetchall():
             out[r[0]] = r[1]
+    return out
+
+
+def get_cluster_info(listing_ids: Sequence[str]) -> dict[str, dict]:
+    """Bulk: ``listing_id → {"count": N, "type": "temporal"|...}``.
+
+    Matcher-v2 aware version of ``get_republication_counts``.  Lets
+    card views show a different chip per cluster type (real
+    republication vs parallel multi-listing vs obra-nueva noise).
+
+    Listings absent from the map (no fingerprint computed yet) map to
+    ``{"count": 0, "type": "singleton"}``.
+    """
+    listing_ids = list(listing_ids)
+    if not listing_ids:
+        return {}
+
+    placeholders = ",".join(["?"] * len(listing_ids))
+    out: dict[str, dict] = {
+        lid: {"count": 0, "type": "singleton"} for lid in listing_ids
+    }
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            SELECT m.listing_id, p.republication_count, p.cluster_type
+            FROM listing_property_map m
+            JOIN property_fingerprints p ON p.property_id = m.property_id
+            WHERE m.listing_id IN ({placeholders})
+            """,
+            listing_ids,
+        )
+        for r in cur.fetchall():
+            out[r[0]] = {"count": r[1], "type": r[2] or "singleton"}
     return out

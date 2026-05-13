@@ -251,9 +251,28 @@ def _render_property_banner(ph: PropertyHistory) -> None:
     the net price change from the *original* asking price to the
     current one.
 
-    Hidden for singletons — there's nothing useful to say.
+    Matcher v2: only renders the "fatigue" framing for the ``temporal``
+    cluster type (real delisted-then-republished).  For ``parallel``
+    (multi-agency simultaneous) it shows a calmer informational note;
+    for ``obra_nueva`` (different units in same development) it stays
+    silent — no signal to surface there.  Singletons of course also
+    skip.
     """
-    if ph.republication_count == 0:
+    if ph.republication_count == 0 or ph.cluster_type in ("singleton", "obra_nueva"):
+        return
+
+    if ph.cluster_type == "parallel":
+        st.markdown(
+            f"""<div style='background:#1e293b;border-left:4px solid #94a3b8;
+                padding:12px 16px;border-radius:8px;margin:12px 0;color:#cbd5e1;
+                font-size:13px;'>
+                🏷️ Esta propiedad aparece publicada por <b style='color:white;'>
+                {ph.listing_count}</b> anuncios simultáneos (probablemente varias
+                agencias o particular + agencia listándola en paralelo).  No es
+                fatiga del vendedor — solo más visibilidad.
+            </div>""",
+            unsafe_allow_html=True,
+        )
         return
 
     # Cumulative change: negative is good news for the buyer.
@@ -291,24 +310,44 @@ def _render_property_banner(ph: PropertyHistory) -> None:
 
 
 def _render_property_timeline(ph: PropertyHistory, current_listing_id: str) -> None:
-    """Expandable "Historial de la propiedad" section listing every
-    ``listing_id`` that ever pointed at this property, chronologically.
+    """Expandable history section.  Title + caption change based on
+    ``cluster_type`` so the framing matches reality:
 
-    For each listing we show the date range, vendor type, opening price
-    → final price (with drop info), days on market, and a link back to
-    Idealista.  The currently-displayed listing is highlighted.
-
-    Hidden for singletons.
+      * ``temporal``    — "Historial completo" with full fatigue framing.
+      * ``parallel``    — "Anuncios paralelos" — same flat, multiple posts.
+      * ``obra_nueva``  — collapsible group of same-development units.
+      * ``singleton``   — hidden (nothing to show).
     """
-    if ph.republication_count == 0:
+    if ph.republication_count == 0 or ph.cluster_type == "singleton":
         return
 
-    with st.expander(f"🕰️ Historial completo de esta propiedad ({ph.listing_count} anuncios)"):
-        st.caption(
+    if ph.cluster_type == "temporal":
+        title    = f"🕰️ Historial completo de esta propiedad ({ph.listing_count} anuncios)"
+        caption  = (
             "Mismo piso publicado bajo distintos `listing_id`. Te interesa "
             "como comprador para entender la verdadera trayectoria de precio "
             "y tiempo en mercado — datos que cada anuncio individual oculta."
         )
+    elif ph.cluster_type == "parallel":
+        title    = f"🏷️ Anuncios paralelos del mismo piso ({ph.listing_count})"
+        caption  = (
+            "El mismo piso publicado por varias agencias (o particular + agencia) "
+            "al mismo tiempo. Útil para detectar inconsistencias de precio entre "
+            "los anuncios — a veces una agencia lista por encima del particular."
+        )
+    elif ph.cluster_type == "obra_nueva":
+        title    = f"🏗️ Grupo de obra nueva ({ph.listing_count} unidades)"
+        caption  = (
+            "Pisos diferentes del mismo edificio/promoción (mismo tamaño y "
+            "habitaciones, IDs consecutivos, descripción genérica de promotora). "
+            "**No es la misma vivienda** — la lista te sirve solo para ver "
+            "alternativas dentro del bloque."
+        )
+    else:
+        return  # unknown type — be conservative, hide
+
+    with st.expander(title):
+        st.caption(caption)
 
         rows = []
         for i, l in enumerate(ph.listings, start=1):

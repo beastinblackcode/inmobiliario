@@ -437,12 +437,17 @@ def render_mi_zona_tab(df: pd.DataFrame) -> None:
         "señal de fatiga del vendedor."
     )
 
+    # Matcher v2: only ``temporal`` clusters count as real fatigue
+    # signals here.  Parallel multi-agency listings and obra-nueva
+    # noise get filtered out — both have ``republication_count > 0``
+    # but neither tells the buyer the seller is tired.
     try:
-        from property_history import get_republication_counts
-        rep_counts = get_republication_counts(matching["listing_id"].tolist())
+        from property_history import get_cluster_info
+        info = get_cluster_info(matching["listing_id"].tolist())
         republished = [
-            {"lid": lid, "n": n}
-            for lid, n in rep_counts.items() if n > 0
+            {"lid": lid, "n": v["count"]}
+            for lid, v in info.items()
+            if v["type"] == "temporal" and v["count"] > 0
         ]
         republished.sort(key=lambda r: r["n"], reverse=True)
     except Exception as e:

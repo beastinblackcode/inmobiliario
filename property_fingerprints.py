@@ -82,6 +82,21 @@ DEFAULT_THRESHOLD = 0.60
 DEFAULT_SIZE_TOLERANCE = 2.0          # m²
 DEFAULT_MIN_DESCRIPTION_CHARS = 50
 
+# Cluster-type classification thresholds (Matcher v2).
+#
+# ``GAP_DAYS`` — minimum days between one listing's ``last_seen_date``
+# and the next listing's ``first_seen_date`` to count as a "real"
+# delisting/republication gap.  Anything smaller is treated as the
+# same flat being re-posted by the same uploader within hours.
+GAP_DAYS = 7
+
+# Obra-nueva detection.  Idealista assigns numerically-near IDs to
+# listings uploaded close together by the same uploader; a tight ID
+# span + same-day first_seen + agency seller is a near-certain
+# "different units in the same development" signal.
+OBRA_NUEVA_ID_SPAN = 200
+OBRA_NUEVA_FIRST_SEEN_SPAN_DAYS = 3
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Data types
@@ -102,6 +117,13 @@ class Property:
     size_sqm:             Optional[float]                 = None
     rooms:                Optional[int]                   = None
     floor:                Optional[str]                   = None
+    # ``cluster_type`` classifies what kind of cluster this is.
+    # See ``_classify_cluster`` for the full rationale.  Values:
+    #   ``singleton``   — single listing
+    #   ``temporal``    — real republication after delisting
+    #   ``parallel``    — same flat listed in parallel by multiple agencies
+    #   ``obra_nueva``  — different units in same building/development
+    cluster_type:         str                             = "singleton"
 
     @property
     def listing_count(self) -> int:
@@ -111,6 +133,15 @@ class Property:
     def republication_count(self) -> int:
         # ``republications = additional listings beyond the first``.
         return max(0, self.listing_count - 1)
+
+    @property
+    def is_real_republication(self) -> bool:
+        """True only for the temporal case — what buyers should care about.
+
+        Convenience for UI callers so they don't have to know the
+        exact string values.
+        """
+        return self.cluster_type == "temporal"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -199,6 +230,78 @@ def _bucket_key(
     return (barrio, int(rooms), _size_band(float(size), size_tolerance), floor or "")
 
 
+def _classify_cluster(listings: Sequence[Mapping[str, Any]]) -> str:
+    """Classify a cluster of listings into ``cluster_type``.
+
+    The matcher already decided these listings describe the *same*
+    physical property (per the bucket + TF-IDF stage).  This function
+    decides *what kind* of multi-listing situation we're looking at:
+
+      * ``singleton``   — single listing.
+      * ``temporal``    — at least one pair of consecutive listings
+                          (ordered by first_seen_date) has a gap of
+                          ``GAP_DAYS+`` days between
+                          ``listing[i].last_seen`` and
+                          ``listing[i+1].first_seen``.  Real
+                          "delisted then republished" pattern.
+      * ``obra_nueva``  — all listings co-exist in time AND have
+                          numerically-near ids AND started within
+                          ``OBRA_NUEVA_FIRST_SEEN_SPAN_DAYS`` of each
+                          other AND share the agency seller_type.
+                          Different units in the same building with
+                          the matcher's TF-IDF mistakenly grouping
+                          them via generic developer descriptions.
+      * ``parallel``    — co-existing in time but doesn't fit the
+                          obra-nueva profile.  Typical case: same
+                          flat listed by 2-3 different agencies (or
+                          private + agency) at the same time.
+
+    The thresholds are tunable from the module constants at top.
+    """
+    if len(listings) <= 1:
+        return "singleton"
+
+    # ── Step 1: temporal vs co-existing ─────────────────────────────
+    # Sort by first_seen so gaps make sense.  Missing dates push the
+    # listing to the end (date.max) which is harmless for gap detection.
+    def _fs(l):
+        return _coerce_date(l.get("first_seen_date")) or date.max
+    sorted_l = sorted(listings, key=_fs)
+
+    for a, b in zip(sorted_l, sorted_l[1:]):
+        a_end   = _coerce_date(a.get("last_seen_date"))
+        b_start = _coerce_date(b.get("first_seen_date"))
+        if a_end and b_start and (b_start - a_end).days >= GAP_DAYS:
+            return "temporal"
+
+    # ── Step 2: obra_nueva detection within the co-existing set ─────
+    first_seens = [_coerce_date(l.get("first_seen_date")) for l in sorted_l]
+    if all(f is not None for f in first_seens):
+        first_seen_span = (max(first_seens) - min(first_seens)).days
+    else:
+        first_seen_span = 10 ** 9            # missing data — disqualifies
+
+    # Listing IDs in our dataset are numeric strings (Idealista).  When
+    # they don't parse (e.g. a future portal source), bail out to
+    # ``parallel`` rather than mislabel.
+    try:
+        ids = sorted(int(l["listing_id"]) for l in sorted_l)
+        id_span = ids[-1] - ids[0]
+    except (ValueError, KeyError, TypeError):
+        id_span = 10 ** 9
+
+    sellers = {l.get("seller_type") for l in sorted_l}
+    all_agency = sellers == {"Agencia"}
+
+    is_obra_nueva = (
+        first_seen_span <= OBRA_NUEVA_FIRST_SEEN_SPAN_DAYS
+        and id_span < OBRA_NUEVA_ID_SPAN
+        and all_agency
+    )
+
+    return "obra_nueva" if is_obra_nueva else "parallel"
+
+
 def _aggregate_property(listings: Sequence[Mapping[str, Any]]) -> Property:
     """Build a ``Property`` from a non-empty list of listings."""
     dates_first = [_coerce_date(l.get("first_seen_date")) for l in listings]
@@ -230,6 +333,7 @@ def _aggregate_property(listings: Sequence[Mapping[str, Any]]) -> Property:
         size_sqm             = canonical.get("size_sqm"),
         rooms                = canonical.get("rooms"),
         floor                = canonical.get("floor"),
+        cluster_type         = _classify_cluster(listings),
     )
 
 
