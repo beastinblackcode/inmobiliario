@@ -1,0 +1,50 @@
+name: Mi Zona Alerts
+
+# Daily emailer for the buyer-side "Mi Zona" pipeline.  For every user
+# with stored criteria in ``user_preferences``, queries new listings
+# since the last run, runs them through the offer engine, and emails
+# the top matches with margin ≥ 5%.
+#
+# Runs daily so the user gets a single morning digest.  No-op on days
+# the scraper didn't run (the watermark advances to ``today`` even
+# when nothing is found, so we never re-query the same empty window).
+
+on:
+  schedule:
+    # 07:00 UTC = 09:00 Madrid (CEST) / 08:00 (CET) — after the
+    # Mon/Thu scrape would have finished if it ran today.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    # Manual trigger from the Actions tab.
+
+permissions:
+  contents: read
+
+jobs:
+  alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      DB_BACKEND:   postgres
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send Mi Zona alerts
+        env:
+          GMAIL_APP_PASSWORD:   ${{ secrets.GMAIL_APP_PASSWORD }}
+          # Optional override; falls back to email_report.RECIPIENT_EMAIL.
+          MI_ZONA_ALERT_EMAIL:  ${{ secrets.MI_ZONA_ALERT_EMAIL }}
+        run: python mi_zona_alerts.py
