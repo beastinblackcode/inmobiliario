@@ -21,12 +21,19 @@ import pytest
 
 @pytest.fixture
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point ``CONFIG_DIR`` at a tmp path so tests don't touch the real one."""
+    """Point both ``CONFIG_DIR`` (legacy path) and ``user_preferences._FILE_DIR``
+    (current path) at a tmp dir so tests don't touch — or read leftover
+    state from — the real ``.streamlit/`` folder.
+    """
     from tabs import mi_zona_tab as mod
+    import user_preferences as up
     monkeypatch.setattr(mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(up,  "_FILE_DIR",  tmp_path)
     # Force a known username so tests don't depend on session state.
     import streamlit as st
     monkeypatch.setitem(st.session_state, "user", "pytest")
+    # Default to sqlite so we never hit the Postgres path during unit tests.
+    monkeypatch.setenv("DB_BACKEND", "sqlite")
     return tmp_path
 
 

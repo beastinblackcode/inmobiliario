@@ -43,6 +43,10 @@ import streamlit as st
 CONFIG_DIR  = Path(".streamlit")
 CONFIG_FILE_TEMPLATE = "mi_zona_{user}.json"
 
+# Storage key under ``user_preferences``.  Single key per user — the
+# whole criteria dict travels together.
+_PREF_KEY = "mi_zona_criteria"
+
 DEFAULT_CRITERIA: dict[str, Any] = {
     "barrios":    [],
     "max_price":  450_000,
@@ -68,24 +72,37 @@ def _config_path() -> Path:
 
 
 def _load_criteria() -> dict:
-    path = _config_path()
-    if not path.exists():
-        return DEFAULT_CRITERIA.copy()
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return DEFAULT_CRITERIA.copy()
-    # Merge over defaults so adding a new criterion later is backwards-safe.
+    """Load Mi Zona criteria from the user_preferences store.
+
+    Delegates to ``user_preferences.get_user_pref`` which tries
+    Postgres first and falls back to a local JSON file when the DB
+    is unavailable (SQLite local dev, fresh deploy without the new
+    Alembic migration applied yet).  Either way, missing keys are
+    backfilled with ``DEFAULT_CRITERIA`` so adding a new criterion
+    in a future version is always backwards-safe for existing rows.
+    """
+    from user_preferences import get_user_pref
+    data = get_user_pref(_current_user(), _PREF_KEY)
+    if not data:
+        # Legacy path: the previous version stored a per-user JSON
+        # file at ``.streamlit/mi_zona_<user>.json``.  Try to recover
+        # so a user who upgrades doesn't lose their criteria.
+        legacy = _config_path()
+        if legacy.exists():
+            try:
+                with legacy.open("r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                data = None
     merged = DEFAULT_CRITERIA.copy()
     merged.update(data or {})
     return merged
 
 
 def _save_criteria(criteria: dict) -> None:
-    CONFIG_DIR.mkdir(exist_ok=True)
-    with _config_path().open("w", encoding="utf-8") as f:
-        json.dump(criteria, f, indent=2, ensure_ascii=False)
+    """Persist Mi Zona criteria via ``user_preferences.set_user_pref``."""
+    from user_preferences import set_user_pref
+    set_user_pref(_current_user(), _PREF_KEY, criteria)
 
 
 # ──────────────────────────────────────────────────────────────────────

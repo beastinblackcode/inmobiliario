@@ -36,6 +36,7 @@ _EXPECTED_TABLES = {
     "cgpj_lanzamientos",
     "property_fingerprints",      # added in 0002
     "listing_property_map",       # added in 0002
+    "user_preferences",           # added in 0003
 }
 
 
