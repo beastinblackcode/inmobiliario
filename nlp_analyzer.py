@@ -649,6 +649,11 @@ def upsert_signals(listing_id: str, signals: Dict) -> None:
     """Insert or replace NLP signals for a listing."""
     from db.dialect import current_timestamp
     now = current_timestamp()
+    # ``urgency`` and friends are BOOLEAN in Postgres (per Alembic 0001)
+    # and INTEGER-acting-as-bool in SQLite.  psycopg accepts Python
+    # ``bool`` for BOOLEAN, and SQLite happily stores it as 0/1 — so
+    # passing native bools works for both backends.  ``int(...)`` blew
+    # up Postgres with ``smallint vs boolean`` type mismatches.
     with _get_connection() as conn:
         conn.execute(f"""
             INSERT INTO listing_signals
@@ -666,13 +671,13 @@ def upsert_signals(listing_id: str, signals: Dict) -> None:
                 analyzed_at  = EXCLUDED.analyzed_at
         """, (
             listing_id,
-            int(signals.get("urgency", False)),
-            int(signals.get("direct", False)),
-            int(signals.get("negotiable", False)),
-            int(signals.get("renovated", False)),
-            int(signals.get("needs_work", False)),
-            signals.get("nlp_bonus", 0),
-            signals.get("signal_count", 0),
+            bool(signals.get("urgency",    False)),
+            bool(signals.get("direct",     False)),
+            bool(signals.get("negotiable", False)),
+            bool(signals.get("renovated",  False)),
+            bool(signals.get("needs_work", False)),
+            int(signals.get("nlp_bonus",    0)),
+            int(signals.get("signal_count", 0)),
         ))
 
 
@@ -730,7 +735,11 @@ def upsert_amenities(listing_id: str, amenities: Dict) -> None:
     from db.dialect import current_timestamp
 
     cols = _AMENITY_BOOL_KEYS + list(_AMENITY_EXTRA_COLS)
-    values: list = [int(amenities.get(k, False)) for k in _AMENITY_BOOL_KEYS]
+    # All ``has_*`` / ``near_*`` columns are BOOLEAN in Postgres
+    # (per Alembic 0001) — pass Python bools so the binary protocol
+    # doesn't trip a ``smallint vs boolean`` type mismatch.  SQLite
+    # stores bool as 0/1 transparently.
+    values: list = [bool(amenities.get(k, False)) for k in _AMENITY_BOOL_KEYS]
     values += [amenities.get(c) for c in _AMENITY_EXTRA_COLS]
     # ``amenities_count`` should default to 0 — never NULL.
     idx = _AMENITY_BOOL_KEYS.__len__() + 1  # construction_year=0, amenities_count=1
