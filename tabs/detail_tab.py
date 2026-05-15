@@ -1,7 +1,8 @@
 """
 Tab: Detalle de Propiedad
 Vista completa de un piso: metadata, score desglosado factor a factor,
-histórico de precios y propiedades similares en el mismo barrio.
+sugerencia de oferta, histórico de precios, y comparables
+estructuralmente similares (mismo barrio + tamaño ±20% + habitaciones ±1).
 """
 
 import streamlit as st
@@ -227,20 +228,81 @@ def _build_chart_series(history: list, listing: dict) -> tuple[list, str]:
     return series, kind
 
 
-def _get_similar(listing: dict, exclude_id: str, limit: int = 5) -> list:
-    """Properties in same barrio, similar price range (±30%)."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        lo, hi = listing["price"] * 0.7, listing["price"] * 1.3
-        cursor.execute(
-            """SELECT listing_id, title, price, size_sqm, rooms, url
-               FROM listings
-               WHERE barrio = ? AND listing_id != ? AND status = 'active'
-                 AND price BETWEEN ? AND ?
-               ORDER BY ABS(price - ?) LIMIT ?""",
-            (listing["barrio"], exclude_id, lo, hi, listing["price"], limit),
-        )
-        return [dict(r) for r in cursor.fetchall()]
+def _get_comparables(listing: dict, limit: int = 5) -> tuple[list[dict], str]:
+    """Structurally similar listings to anchor the target's price.
+
+    Filter cascade — relaxes until we have enough rows:
+
+      1. **barrio + size ±20% + rooms ±1** — real comparables.
+      2. **distrito + size ±20% + rooms ±1** — broader area, used only
+         when the barrio itself can't supply a single match.
+
+    Returns ``(rows, scope)`` where ``scope`` is ``"barrio"`` or
+    ``"distrito"`` so the UI can label what the buyer is looking at.
+
+    Each row carries the columns a comparison table needs (price,
+    size, rooms, floor, seller, dates, URL, price_per_sqm).
+    Deliberately *no* offer-engine recomputation here — comparables
+    show **asking prices**; the offer engine sits separately as the
+    derived "what to actually offer" view.
+    """
+    size = listing.get("size_sqm")
+    if not size or size <= 0:
+        return [], "barrio"
+
+    rooms      = listing.get("rooms")
+    size_lo    = size * 0.80
+    size_hi    = size * 1.20
+    target_id  = listing["listing_id"]
+    barrio     = listing.get("barrio")
+    distrito   = listing.get("distrito")
+    target_pps = (listing["price"] / size) if size else 0.0
+
+    base_select = """
+        SELECT listing_id, title, url, price, distrito, barrio,
+               size_sqm, rooms, floor, seller_type,
+               first_seen_date, last_seen_date,
+               CASE WHEN size_sqm > 0
+                    THEN ROUND(CAST(price * 1.0 / size_sqm AS DECIMAL), 2)
+                    ELSE NULL END AS price_per_sqm
+        FROM listings
+        WHERE status = 'active' AND listing_id != ?
+          AND size_sqm BETWEEN ? AND ?
+    """
+
+    if rooms is not None:
+        rooms_clause = " AND rooms BETWEEN ? AND ?"
+        rooms_params: list = [rooms - 1, rooms + 1]
+    else:
+        rooms_clause = ""
+        rooms_params = []
+
+    # Order by structural similarity: smallest size delta first, then
+    # closest price-per-sqm so the most apples-to-apples rows surface.
+    order_by = " ORDER BY ABS(size_sqm - ?), ABS(price * 1.0/size_sqm - ?) LIMIT ?"
+
+    def _run(scope_clause: str, scope_value: str) -> list[dict]:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            sql = base_select + scope_clause + rooms_clause + order_by
+            params = (
+                [target_id, size_lo, size_hi, scope_value]
+                + rooms_params
+                + [size, target_pps, limit]
+            )
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+
+    if barrio:
+        rows = _run(" AND barrio = ?", barrio)
+        if rows:
+            return rows, "barrio"
+
+    if distrito:
+        rows = _run(" AND distrito = ?", distrito)
+        return rows, "distrito"
+
+    return [], "barrio"
 
 
 @st.fragment
@@ -1237,18 +1299,88 @@ def render_detail_tab() -> None:
 
     st.markdown("---")
 
-    # ── Similares en el mismo barrio ──────────────────────────────────────────
-    st.subheader(f"🏘️ Similares en {listing['barrio']}")
-    similares = _get_similar(listing, listing["listing_id"])
+    # ── Comparables (structurally-similar listings) ──────────────────────────
+    # The visual anchor that validates the suggested offer above.
+    # Buyers look at this to gut-check "is the offer engine asking me
+    # to underpay vs the market or are these properties really that
+    # cheap?".  Same filter as a real-estate appraiser: same barrio,
+    # comparable size + rooms.
+    comps, scope = _get_comparables(listing, limit=8)
+    st.subheader(
+        f"🏘️ Comparables en {listing['barrio']}"
+        if scope == "barrio"
+        else f"🏘️ Comparables en {listing['distrito']} (ampliado, sin matches en barrio)"
+    )
 
-    if similares:
-        for s in similares:
-            sqm_s = s["price"] / s["size_sqm"] if s.get("size_sqm") else None
-            with st.container(border=True):
-                c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-                c1.markdown(f"**{s['title'][:70]}**")
-                c2.metric("Precio", f"€{s['price']:,}")
-                c3.metric("€/m²", f"€{sqm_s:,.0f}" if sqm_s else "N/A")
-                c4.link_button("Ver", s["url"])
+    if not comps:
+        st.info(
+            "Sin pisos similares activos (mismo barrio + tamaño ±20% + "
+            "habitaciones ±1) para comparar.  Prueba relajando el barrio en "
+            "la búsqueda o vuelve cuando haya más inventario."
+        )
     else:
-        st.info("No hay pisos similares activos en el mismo barrio.")
+        # ── Headline: median €/m² of the comparable set + delta vs target ─
+        import statistics
+        target_pps = (listing["price"] / listing["size_sqm"]) if listing.get("size_sqm") else None
+        ps_values  = [c["price_per_sqm"] for c in comps if c.get("price_per_sqm")]
+        median_pps = statistics.median(ps_values) if ps_values else None
+        median_p   = statistics.median([c["price"] for c in comps])
+
+        h1, h2, h3 = st.columns(3)
+        h1.metric(
+            "📊 Comparables",
+            f"{len(comps)}",
+            help="Filtrado: mismo barrio · tamaño ±20% · habitaciones ±1.",
+        )
+        if median_pps is not None and target_pps is not None:
+            gap_pct = (target_pps / median_pps - 1) * 100
+            h2.metric(
+                "💵 Mediana €/m² (comps)",
+                f"€{median_pps:,.0f}",
+                delta=f"{gap_pct:+.1f}% vs este piso",
+                delta_color="inverse" if gap_pct > 0 else "normal",
+            )
+            h3.metric(
+                "🏷️ Mediana precio (comps)",
+                f"€{median_p:,.0f}",
+                delta=f"{(listing['price']/median_p - 1)*100:+.1f}% vs este piso",
+                delta_color="inverse" if listing["price"] > median_p else "normal",
+            )
+
+        st.caption(
+            "Mediana cheaper-than-this = margen visible para ofertar por debajo. "
+            "Estas filas son **precios pedidos** (asking), no transacciones cerradas."
+        )
+
+        # ── Comparison table ────────────────────────────────────────────
+        import pandas as pd
+        df_comps = pd.DataFrame([
+            {
+                "ID":         c["listing_id"],
+                "Precio":     c["price"],
+                "Δ vs este":  c["price"] - listing["price"],
+                "€/m²":       c["price_per_sqm"],
+                "m²":         c["size_sqm"],
+                "Hab.":       int(c["rooms"]) if c.get("rooms") else None,
+                "Planta":     c.get("floor") or "—",
+                "Vendedor":   c.get("seller_type") or "—",
+                "URL":        c["url"],
+            }
+            for c in comps
+        ])
+        st.dataframe(
+            df_comps,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Precio":    st.column_config.NumberColumn(format="€%d"),
+                "Δ vs este": st.column_config.NumberColumn(
+                    format="€%+d",
+                    help="Diferencia en precio absoluto vs el piso actual.  "
+                         "Negativo = comparable más barato.",
+                ),
+                "€/m²":      st.column_config.NumberColumn(format="€%d"),
+                "m²":        st.column_config.NumberColumn(format="%.0f"),
+                "URL":       st.column_config.LinkColumn("URL", display_text="Idealista"),
+            },
+        )
