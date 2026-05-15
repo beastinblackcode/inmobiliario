@@ -144,8 +144,9 @@ Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son ta
 | `email_report.py` | Resumen diario por email |
 | `tweet_daily.py` | Tweet automático diario con headline del mercado |
 | `export_public_metrics.py` | Genera `metrics.json` para el frontend público |
-| `ci_drive_upload.py` / `upload_to_drive.py` | Sube `real_estate.db` a Google Drive |
-| `migration_backfill_initial_history.py` | Backfill idempotente de `price_history` (corre en CI) |
+| `compute_property_fingerprints.py` | Agrupa listings en propiedades físicas + clasifica clusters |
+| `migration_sqlite_to_postgres.py` | One-shot backfill SQLite→Postgres (Phase C cutover) |
+| `mi_zona_alerts.py` | Job diario que envía email con matches de Mi Zona |
 
 ### Utilidades de Visualización
 
