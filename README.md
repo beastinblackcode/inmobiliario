@@ -41,15 +41,16 @@ El dashboard arranca en `http://localhost:8501`. Si `real_estate.db` no existe, 
 
 `.github/workflows/daily_scraper.yml` corre los lunes y jueves a las 06:00 UTC y ejecuta:
 
-1. Descarga `real_estate.db` desde Google Drive
-2. Backfill idempotente de `price_history` (`migration_backfill_initial_history.py`)
-3. Scraping de los 139 barrios
-4. Pre-cálculo de KPIs diarios (`compute_snapshots.py`)
-5. Email diario con el resumen
-6. Export del `metrics.json` y push al repo `market-thermometer`
-7. Upload de la DB actualizada a Google Drive
+1. Scraping de los ~184 barrios contra Idealista vía Bright Data
+2. Pre-cálculo de KPIs diarios (`compute_snapshots.py`)
+3. Email diario con el resumen
+4. Health-check final que falla el run si no se procesó suficiente data
 
-`.github/workflows/export-metrics.yml` permite regenerar solo el `metrics.json` sin scrapear (manual dispatch).
+`.github/workflows/export-metrics.yml` corre los lunes a las 07:00 UTC y regenera el `metrics.json` + `barrios_profiles.json` que alimentan el frontend público.
+
+`.github/workflows/mi_zona_alerts.yml` corre a diario a las 07:00 UTC y envía email con las propiedades nuevas en tus barrios que pasan el umbral de margen de oferta.
+
+Todos los workflows hablan directamente con la BD Postgres en Supabase (sin sincronización vía Google Drive — eso quedó atrás con la migración a Postgres en mayo 2026).
 
 ## Ética
 

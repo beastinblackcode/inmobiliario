@@ -37,120 +37,38 @@ def is_streamlit_cloud() -> bool:
         return False
 
 
-def _db_has_listings_table(db_path: str) -> bool:
-    """Cheap integrity check: True iff *db_path* opens as SQLite and the
-    ``listings`` table is present.
-
-    Used to decide whether the cached DB on Streamlit Cloud's container
-    disk is usable.  A previous run could have left behind a corrupt /
-    empty file (gdown half-write, OOM, etc.) — without this check, the
-    app would happily reuse it and every query would fail with
-    ``no such table: listings``.
-    """
-    try:
-        conn = sqlite3.connect(db_path)
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='table' AND name='listings' LIMIT 1"
-            ).fetchone()
-            return row is not None
-        finally:
-            conn.close()
-    except sqlite3.DatabaseError:
-        return False
-
-
 def download_database_from_cloud():
-    """
-    Download database from Google Drive if running on Streamlit Cloud.
-    Returns True if download was successful or not needed.
+    """Pre-flight DB availability check.  Name is a historical artefact.
 
-    No-op when ``DB_BACKEND=postgres`` — there is no SQLite file to
-    sync; the Streamlit app talks straight to Supabase.  Returning
-    ``True`` lets ``app.py`` proceed without changes.
+    Pre Phase D cutover this function pulled ``real_estate.db`` from
+    Google Drive when Streamlit Cloud booted with no DB file present.
+    Post-cutover that path is gone — the runtime talks directly to
+    Supabase Postgres — so the function reduces to a small sanity
+    guard:
+
+      * ``DB_BACKEND=postgres``  → True immediately.  Connection is
+        resolved later via ``db.connection_pg``; nothing to do here.
+      * ``DB_BACKEND=sqlite``    → verify the local file exists.
+        Reports the missing-DB case via ``st.error`` and returns
+        False so ``app.py`` can short-circuit gracefully.
+
+    The function name is preserved (rather than renamed to e.g.
+    ``ensure_database_available()``) to keep the ``app.py`` call
+    site unchanged.  A future refactor can drop the legacy name
+    when the SQLite branch is retired.
     """
     if os.environ.get("DB_BACKEND", "sqlite").lower() == "postgres":
         return True
 
-    # Only download if on Streamlit Cloud and DB doesn't exist
-    if not is_streamlit_cloud():
-        # Running locally - check if DB exists
-        if not Path(DATABASE_PATH).exists():
+    if not Path(DATABASE_PATH).exists():
+        try:
             import streamlit as st
             st.error(f"❌ Database file not found: {DATABASE_PATH}")
-            st.info("💡 Run the scraper first: `python scraper.py`")
-            return False
-        return True
-
-    # On Streamlit Cloud — reuse the cached DB only if it still has the
-    # core ``listings`` table.  If the file exists but is empty / corrupt
-    # (the failure mode that breaks every page with
-    # "no such table: listings"), drop it and re-download from Drive.
-    if Path(DATABASE_PATH).exists():
-        import streamlit as st
-        if _db_has_listings_table(DATABASE_PATH):
-            st.info("✅ Database already exists, using cached version")
-            return True
-        st.warning(
-            "⚠️ Cached database is missing core tables — "
-            "re-downloading from Drive…"
-        )
-        try:
-            Path(DATABASE_PATH).unlink()
-        except OSError:
+            st.info("💡 Run the scraper first or set `DB_BACKEND=postgres`.")
+        except Exception:
             pass
-    
-    try:
-        import streamlit as st
-        import gdown
-        
-        # Get Google Drive file ID from secrets
-        if "database" not in st.secrets:
-            st.error("❌ Database configuration missing in secrets")
-            st.info("💡 Add Google Drive file ID in Streamlit Cloud Settings → Secrets")
-            st.code("""[database]
-google_drive_file_id = "YOUR_FILE_ID_HERE" """, language="toml")
-            return False
-        
-        file_id = st.secrets["database"]["google_drive_file_id"]
-        
-        if not file_id or file_id == "YOUR_GOOGLE_DRIVE_FILE_ID_HERE":
-            st.error("❌ Please configure Google Drive file ID in Streamlit secrets")
-            st.info("💡 Get file ID from Google Drive share link")
-            return False
-        
-        # Download from Google Drive
-        st.info(f"📥 Downloading database from Google Drive...")
-        st.caption(f"File ID: {file_id[:10]}...")
-        url = f"https://drive.google.com/uc?id={file_id}"
-        
-        try:
-            output = gdown.download(url, DATABASE_PATH, quiet=False)
-            
-            if output and Path(DATABASE_PATH).exists():
-                file_size = Path(DATABASE_PATH).stat().st_size / (1024 * 1024)  # MB
-                st.success(f"✅ Database downloaded successfully ({file_size:.1f} MB)")
-                return True
-            else:
-                st.error("❌ Failed to download database")
-                st.info("💡 Check that the Google Drive file is shared publicly")
-                st.info(f"💡 Try this URL in your browser: {url}")
-                return False
-        except Exception as download_error:
-            st.error(f"❌ Download error: {str(download_error)}")
-            st.info("💡 Possible issues:")
-            st.info("  - File ID is incorrect")
-            st.info("  - File is not shared publicly")
-            st.info("  - File is too large")
-            return False
-            
-    except Exception as e:
-        import streamlit as st
-        st.error(f"❌ Error downloading database: {e}")
-        import traceback
-        st.code(traceback.format_exc())
         return False
+    return True
 
 
 @contextmanager

@@ -1505,10 +1505,11 @@ def run_scraper(retry_only: bool = False):
     except Exception as exc:
         print(f"⚠️  NLP analysis skipped: {exc}")
 
-    # -------------------------------------------------------------------------
-    # ☁️  AUTO-UPLOAD TO GOOGLE DRIVE
-    # -------------------------------------------------------------------------
-    _auto_upload_to_drive()
+    # NOTE: pre-cutover this block called ``_auto_upload_to_drive()`` to
+    # push the just-updated SQLite snapshot to Google Drive.  Post Phase
+    # D the DB lives in Supabase Postgres and writes hit it directly,
+    # so the upload step is unnecessary.  Removed in the post-cutover
+    # cleanup.
 
     # -------------------------------------------------------------------------
     # 📬  DAILY EMAIL REPORT
@@ -1695,43 +1696,6 @@ def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
     print(f"\n  ✅ Alquiler: {stored} barrios guardados, "
           f"{skipped} sin datos (sin anuncios), {errors} errores")
     return stored
-
-
-def _auto_upload_to_drive():
-    """
-    Upload real_estate.db to Google Drive automatically after scraping.
-    Skipped silently if credentials.json / token.json are not present,
-    so the scraper keeps working without the upload configured.
-    """
-    from pathlib import Path
-    credentials_file = Path(__file__).parent / "credentials.json"
-    token_file       = Path(__file__).parent / "token.json"
-
-    if not credentials_file.exists() and not token_file.exists():
-        print(
-            "\n💡 Upload automático no configurado. Para activarlo:\n"
-            "   python upload_to_drive.py\n"
-            "   (Solo necesitas hacerlo una vez)\n"
-        )
-        return
-
-    print("\n")
-    print("╔" + "═" * 58 + "╗")
-    print("║" + "  ☁️   SUBIENDO BASE DE DATOS A GOOGLE DRIVE".center(58) + "║")
-    print("╚" + "═" * 58 + "╝")
-
-    try:
-        from upload_to_drive import upload_db, get_credentials
-        get_credentials()
-        db_path = Path(__file__).parent / "real_estate.db"
-        success = upload_db(db_path)
-        if success:
-            print("✅ Dashboard actualizado con los datos del scraping de hoy.\n")
-        else:
-            print("⚠️  El upload falló. Sube real_estate.db manualmente a Drive.\n")
-    except Exception as exc:
-        print(f"⚠️  Error en upload automático: {exc}")
-        print("   Sube real_estate.db manualmente a Drive.\n")
 
 
 def _send_email_report():
