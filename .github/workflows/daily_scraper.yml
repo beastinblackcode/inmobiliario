@@ -12,8 +12,13 @@ name: Daily Scraper
 
 on:
   schedule:
-    # Runs every 3 days (Mon/Thu) at 06:00 UTC (08:00 Madrid CEST)
-    - cron: "0 6 * * 1,4"
+    # Daily at 06:00 UTC (08:00 Madrid CEST).
+    # Bumped from Mon/Thu after a data-quality analysis showed median
+    # days-on-market until sold = 6 days — half of properties leave
+    # the market within ≤ 6 days.  A 3-4 day scrape gap was missing
+    # ≈ 30 % of the chollos before we could see them.  Daily catches
+    # ≥ 99 % at a marginal Bright Data cost (~$1/mo extra).
+    - cron: "0 6 * * *"
   workflow_dispatch:
     # Manual trigger from the Actions tab.
 
