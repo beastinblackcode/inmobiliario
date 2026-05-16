@@ -109,14 +109,26 @@ if NumericBinaryLoader is not None:
     psycopg.adapters.register_loader("numeric", _NumericAsFloatBinaryLoader)
 
 
-# Pool sizing: Supabase free-tier transaction pooler exposes 200
-# pgbouncer connections shared across the project.  We deliberately stay
-# well below that — the scraper is single-threaded and Streamlit will
-# rarely have more than a handful of concurrent users.  Tune via env if
-# needed.
-_DEFAULT_MIN_SIZE = int(os.environ.get("PG_POOL_MIN", "1"))
+# Pool sizing.  Defaults are tuned for the post-migration deployment
+# on Neon (eu-central-1) which auto-suspends compute on the free tier
+# after a few minutes of idle.  The original Supabase defaults
+# (``min_size=1``, ``timeout=30``) caused ``PoolTimeout`` on Streamlit
+# Cloud when the app warmed up against a suspended Neon project: the
+# pool's background fill of the min_size conn raced against the
+# compute wake-up and lost.
+#
+# Changes:
+#   * ``min_size=0`` (was 1) — don't maintain idle conns.  Lets Neon
+#     auto-suspend cleanly and we open exactly one conn on demand.
+#   * ``timeout=60`` (was 30) — Neon wake-up usually 0.5-2 s but worst
+#     case observed ~20-30 s under cold cloud-to-cloud + TLS handshake.
+#     60 s leaves headroom without blocking the UI indefinitely.
+#
+# All three are env-overridable for tuning in production without a
+# code change.
+_DEFAULT_MIN_SIZE = int(os.environ.get("PG_POOL_MIN", "0"))
 _DEFAULT_MAX_SIZE = int(os.environ.get("PG_POOL_MAX", "5"))
-_DEFAULT_TIMEOUT  = float(os.environ.get("PG_POOL_TIMEOUT", "30"))
+_DEFAULT_TIMEOUT  = float(os.environ.get("PG_POOL_TIMEOUT", "60"))
 
 _pool_lock = threading.Lock()
 _pool: Optional[ConnectionPool] = None
