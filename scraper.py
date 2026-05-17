@@ -437,6 +437,43 @@ BARRIO_URLS = [
 ]
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Distrito exclusion — cost control
+# ──────────────────────────────────────────────────────────────────────
+#
+# Distritos we deliberately skip on each scrape run.  ``BARRIO_URLS``
+# above stays intact (the full Madrid universe is documented) so we
+# can toggle a distrito back in by simply removing it from this set.
+#
+# Each excluded distrito takes roughly its share of total listings out
+# of the Bright Data request budget.  As of May 2026 the five below
+# cover ~3,400 active listings (≈ 16 % of stock) → ≈ 17 % monthly cost
+# reduction at the new daily cadence.  Cost saving is modest in
+# absolute terms (~$0.25/mo) but free if the buyer isn't interested
+# in those zones.
+#
+# Rationale per distrito (all low buyer-priority for the current user):
+#   * Villaverde         — €3.0k/m², outer southern zone.
+#   * Puente de Vallecas — €3.3k/m², blue-collar southeast.
+#   * Villa de Vallecas  — €4.3k/m², far southeast.
+#   * Usera              — €3.0k/m², south.
+#   * Barajas            — airport zone, very low volume.
+EXCLUDED_DISTRITOS: set[str] = {
+    "Villaverde",
+    "Puente de Vallecas",
+    "Villa de Vallecas",
+    "Usera",
+    "Barajas",
+}
+
+# Pre-filtered list used by every iteration site below.  ``BARRIO_URLS``
+# is preserved as the canonical universe; ``BARRIOS_TO_SCRAPE`` is what
+# the scraper actually walks each run.
+BARRIOS_TO_SCRAPE: list[tuple[str, str, str]] = [
+    b for b in BARRIO_URLS if b[0] not in EXCLUDED_DISTRITOS
+]
+
+
 def _build_proxy_dict(user: str, password: str, host: str) -> Optional[Dict]:
     """Build a requests-compatible proxy dict from credentials."""
     if not all([user, password, host]):
@@ -1223,9 +1260,11 @@ def get_failed_barrios_from_log() -> List[tuple]:
             for row in cursor.fetchall():
                 missing_barrios.add((row[0], row[1]))
 
-        # Match against BARRIO_URLS to get the URL paths
+        # Match against BARRIOS_TO_SCRAPE (filtered universe) so a retry
+        # never resurrects a barrio that's been explicitly excluded from
+        # the regular run.
         result = []
-        for distrito, barrio, url_path in BARRIO_URLS:
+        for distrito, barrio, url_path in BARRIOS_TO_SCRAPE:
             if (distrito, barrio) in missing_barrios:
                 result.append((distrito, barrio, url_path))
 
@@ -1306,9 +1345,13 @@ def run_scraper(retry_only: bool = False):
             return
         print(f"\n🔄 Retrying {len(barrios_to_scrape)} failed barrios...")
     else:
-        # FULL MODE: scrape all barrios (NO district-level scraping — saves ~30% requests)
-        barrios_to_scrape = BARRIO_URLS
-        print(f"\n🏘️ Scraping {len(barrios_to_scrape)} barrios...")
+        # FULL MODE: scrape all barrios (NO district-level scraping — saves ~30% requests).
+        # Uses ``BARRIOS_TO_SCRAPE`` so the ``EXCLUDED_DISTRITOS`` set
+        # at the top of the module actually takes effect.
+        barrios_to_scrape = BARRIOS_TO_SCRAPE
+        n_excluded = len(BARRIO_URLS) - len(BARRIOS_TO_SCRAPE)
+        print(f"\n🏘️ Scraping {len(barrios_to_scrape)} barrios "
+              f"({n_excluded} excluidos por config)...")
         if LOW_ACTIVITY_INTERVAL_DAYS > 1:
             print(f"  💡 Low-activity barrios (≤{LOW_ACTIVITY_MAX_PAGES} pág) → every {LOW_ACTIVITY_INTERVAL_DAYS} days")
 
@@ -1594,7 +1637,7 @@ def _run_rental_if_due(proxies: Optional[Dict] = None) -> None:
         from datetime import date
         days_since = (date.today() - date.fromisoformat(last)).days
         days_left  = RENTAL_SCRAPE_INTERVAL_DAYS - days_since
-        rental_req_saved = len(BARRIO_URLS)
+        rental_req_saved = len(BARRIOS_TO_SCRAPE)
         rental_cost_saved = rental_req_saved * (4.0 / 1000)
         print("\n")
         print("╔" + "═" * 62 + "╗")
@@ -1621,7 +1664,7 @@ def _run_rental_if_due(proxies: Optional[Dict] = None) -> None:
 
 def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
     """
-    Scrape page-1 of rental listings for every barrio in BARRIO_URLS,
+    Scrape page-1 of rental listings for every barrio in BARRIOS_TO_SCRAPE,
     compute the median monthly rent, and store it in the rental_prices table.
 
     Only page 1 is requested per barrio (~184 extra Bright Data calls).
@@ -1647,9 +1690,9 @@ def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
     stored     = 0
     skipped    = 0
     errors     = 0
-    total      = len(BARRIO_URLS)
+    total      = len(BARRIOS_TO_SCRAPE)
 
-    for idx, (distrito, barrio, sale_url_path) in enumerate(BARRIO_URLS, 1):
+    for idx, (distrito, barrio, sale_url_path) in enumerate(BARRIOS_TO_SCRAPE, 1):
         # Progress every 20 barrios
         if idx == 1 or idx % 20 == 0 or idx == total:
             print(f"  [{idx}/{total}] {distrito} - {barrio}...")
