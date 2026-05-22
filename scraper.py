@@ -458,12 +458,18 @@ BARRIO_URLS = [
 #   * Villa de Vallecas  — €4.3k/m², far southeast.
 #   * Usera              — €3.0k/m², south.
 #   * Barajas            — airport zone, very low volume.
+#   * Vicálvaro          — far southeast, low buyer interest.
+#   * Carabanchel        — €2.5k/m², south.
+#   * Centro             — tourist core, low buyer interest for residence.
 EXCLUDED_DISTRITOS: set[str] = {
     "Villaverde",
     "Puente de Vallecas",
     "Villa de Vallecas",
     "Usera",
     "Barajas",
+    "Vicálvaro",
+    "Carabanchel",
+    "Centro",
 }
 
 # Pre-filtered list used by every iteration site below.  ``BARRIO_URLS``
