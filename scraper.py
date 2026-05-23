@@ -144,6 +144,27 @@ RENTAL_SCRAPE_INTERVAL_DAYS = int(os.getenv('RENTAL_SCRAPE_INTERVAL_DAYS', '7'))
 # File that records the last date rental scraping ran successfully.
 RENTAL_LAST_SCRAPED_FILE = "rental_last_scraped.txt"
 
+# ---------------------------------------------------------------------------
+# SCRAPE MODE  (request-count optimization)
+# ---------------------------------------------------------------------------
+# 'full' : walk every page of every barrio (current behavior, ~480 req/day).
+# 'lite' : fetch only p.1 per barrio sorted by ?ordenado-por=fecha-publicacion-desc.
+#          Inserts new listings, updates ones still visible at the top.
+#          Listings buried past p.1 don't get last_seen_date refreshed today —
+#          relies on the weekly full sweep to keep mark_stale_as_sold honest.
+# 'auto' : Sunday → 'full' sweep; rest of the week → 'lite'.
+#
+# CLI overrides: --full forces 'full', --lite forces 'lite'.
+SCRAPE_MODE = os.getenv('SCRAPE_MODE', 'auto').lower()
+
+# Query string appended in lite mode so the first article is always the
+# most recently published one. Confirmed via Idealista docs / scrapfly write-up.
+LITE_SORT_PARAM = "?ordenado-por=fecha-publicacion-desc"
+
+# Weekday index that triggers the full sweep when SCRAPE_MODE='auto'.
+# Python: Monday=0 … Sunday=6.
+FULL_SWEEP_WEEKDAY = int(os.getenv('FULL_SWEEP_WEEKDAY', '6'))
+
 
 def load_page_history() -> Dict:
     """Load historical page counts per barrio from JSON file."""
@@ -458,12 +479,18 @@ BARRIO_URLS = [
 #   * Villa de Vallecas  — €4.3k/m², far southeast.
 #   * Usera              — €3.0k/m², south.
 #   * Barajas            — airport zone, very low volume.
+#   * Vicálvaro          — far southeast, low buyer interest.
+#   * Carabanchel        — €2.5k/m², south.
+#   * Centro             — tourist core, low buyer interest for residence.
 EXCLUDED_DISTRITOS: set[str] = {
     "Villaverde",
     "Puente de Vallecas",
     "Villa de Vallecas",
     "Usera",
     "Barajas",
+    "Vicálvaro",
+    "Carabanchel",
+    "Centro",
 }
 
 # Pre-filtered list used by every iteration site below.  ``BARRIO_URLS``
@@ -989,13 +1016,94 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
         return None
 
 
+def resolve_scrape_mode(mode: str = SCRAPE_MODE) -> str:
+    """
+    Resolve SCRAPE_MODE='auto' against today's weekday.
+
+    Returns 'lite' or 'full'. 'auto' picks 'full' on FULL_SWEEP_WEEKDAY
+    (Sunday by default) and 'lite' the rest of the week.
+    """
+    if mode in ('lite', 'full'):
+        return mode
+    return 'full' if datetime.now().weekday() == FULL_SWEEP_WEEKDAY else 'lite'
+
+
+def _scrape_barrio_lite(
+    distrito: str, barrio: str, url_path: str,
+    proxies: Optional[Dict], seen_ids: set,
+) -> tuple[int, int, int, int]:
+    """
+    Lite-mode scrape: fetch only page 1 sorted by publication date desc.
+
+    Strategy:
+    - One request per barrio (instead of avg ~2.4 in full mode).
+    - Listings already in seen_ids → update (refresh last_seen_date + price).
+    - Listings NOT in seen_ids → insert as new.
+    - Stop at end of page 1; do not paginate. New listings beyond the top ~30
+      will be picked up by the next weekly full sweep.
+
+    Returns: (total_listings, new, updated, idealista_total=0)
+    """
+    url = BASE_URL + url_path + LITE_SORT_PARAM
+    print(f"  Page 1 [lite/newest]...", end=' ')
+
+    html, status_code = fetch_page(url, proxies)
+
+    if status_code in (404, 502):
+        error_msg = "404 Not Found" if status_code == 404 else "502 Bad Gateway"
+        print(f"❌ {error_msg} - skipping barrio")
+        entry = (distrito, barrio, url_path, status_code)
+        if entry not in retry_errors:
+            retry_errors.append(entry)
+        return 0, 0, 0, 0
+
+    if not html:
+        print(f"❌ Failed to fetch (Status: {status_code})")
+        return 0, 0, 0, 0
+
+    soup = BeautifulSoup(html, 'html.parser')
+    articles = soup.find_all('article', class_='item')
+
+    if not articles:
+        if soup.find('div', class_='no-results'):
+            print(f"✓ No listings found for this area")
+        else:
+            print(f"✓ Empty page 1")
+        return 0, 0, 0, 0
+
+    new_count = 0
+    updated_count = 0
+    for article in articles:
+        listing_data = parse_listing(article, distrito, barrio)
+        if not listing_data or not listing_data.get('listing_id'):
+            continue
+        listing_id = listing_data['listing_id']
+        if listing_id in seen_ids:
+            update_listing(listing_id, listing_data)
+            seen_ids.remove(listing_id)
+            updated_count += 1
+        else:
+            insert_listing(listing_data)
+            new_count += 1
+
+    total = new_count + updated_count
+    print(f"Found {len(articles)} listings ({new_count} new, {updated_count} updated)")
+    return total, new_count, updated_count, 0
+
+
 def scrape_barrio(
     distrito: str, barrio: str, url_path: str,
     proxies: Optional[Dict], seen_ids: set,
-    page_history: Optional[Dict] = None
+    page_history: Optional[Dict] = None,
+    mode: str = 'full',
 ) -> tuple[int, int, int, int]:
     """
-    Scrape all pages for a single barrio with optimizations:
+    Scrape a barrio in either 'full' or 'lite' mode.
+
+    Full mode: walk every page (smart-pagination + early-exit).
+    Lite mode: only page 1 sorted by publication date desc (see _scrape_barrio_lite).
+
+    Full-mode optimizations:
     - Smart pagination: uses historical page counts to limit requests
     - Early exit: skips remaining pages if all listings on page 1 already seen today
     - Tracks 502 errors globally for later retry
@@ -1031,6 +1139,9 @@ def scrape_barrio(
         return 0, 0, 0, 0
 
     print(f"\n📍 Scraping {distrito} - {barrio}...")
+
+    if mode == 'lite':
+        return _scrape_barrio_lite(distrito, barrio, url_path, proxies, seen_ids)
 
     # Smart pagination: get max pages from history
     if page_history is not None:
@@ -1164,7 +1275,8 @@ def scrape_barrio(
 
 def retry_failed_barrios(
     proxies: Optional[Dict], active_ids: set,
-    page_history: Optional[Dict] = None, auto: bool = False
+    page_history: Optional[Dict] = None, auto: bool = False,
+    mode: str = 'full',
 ) -> tuple[int, int, int]:
     """
     Retry scraping barrios that had 404 or 502 errors.
@@ -1175,6 +1287,8 @@ def retry_failed_barrios(
         active_ids: Set of active listing IDs (modified in place)
         page_history: Dict with historical page counts per barrio
         auto: If True, skip interactive prompt and retry automatically
+        mode: 'lite' or 'full' — preserved from the originating run so a lite
+              day stays cheap on retry.
 
     Returns:
         Tuple of (total_listings, new_listings, updated_listings)
@@ -1210,7 +1324,8 @@ def retry_failed_barrios(
 
     for distrito, barrio, url_path, error_code in barrios_to_retry:
         count, new_count, updated_count, _idealista = scrape_barrio(
-            distrito, barrio, url_path, proxies, active_ids, page_history
+            distrito, barrio, url_path, proxies, active_ids, page_history,
+            mode=mode,
         )
         total_listings += count
         total_new += new_count
@@ -1222,7 +1337,7 @@ def retry_failed_barrios(
     if retry_errors:
         print(f"\n⚠️  Still have {len(retry_errors)} barrios with errors.")
         retry_count, retry_new, retry_updated = retry_failed_barrios(
-            proxies, active_ids, page_history, auto
+            proxies, active_ids, page_history, auto, mode=mode,
         )
         return total_listings + retry_count, total_new + retry_new, total_updated + retry_updated
 
@@ -1275,7 +1390,7 @@ def get_failed_barrios_from_log() -> List[tuple]:
         return []
 
 
-def run_scraper(retry_only: bool = False):
+def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     """
     Main scraper orchestration function.
 
@@ -1284,17 +1399,28 @@ def run_scraper(retry_only: bool = False):
     - ADDED: Smart pagination using historical page counts
     - ADDED: Early exit when barrio already processed today
     - ADDED: --retry mode to only scrape previously failed barrios
+    - ADDED: SCRAPE_MODE=lite|full|auto — lite only fetches p.1 sorted newest
+            (saves ~70% of requests), auto picks full on Sundays.
 
     Args:
-        retry_only: If True, only scrape barrios that failed in last execution
+        retry_only:    If True, only scrape barrios that failed in last execution.
+        mode_override: 'lite' / 'full' to override SCRAPE_MODE env var.
     """
     start_time = datetime.now()
 
-    mode_label = "RETRY MODE" if retry_only else "FULL SCRAPE"
+    # Resolve scrape mode (lite vs full). Retry always uses full (we're trying
+    # to recover specific barrios that failed — pagination matters).
+    scrape_mode = mode_override or SCRAPE_MODE
+    resolved_mode = 'full' if retry_only else resolve_scrape_mode(scrape_mode)
+
+    mode_label = "RETRY MODE" if retry_only else f"{resolved_mode.upper()} SCRAPE"
     print("=" * 60)
     print(f"🏠 Madrid Real Estate Tracker - Scraper ({mode_label})")
     print("=" * 60)
     print(f"Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    if scrape_mode == 'auto' and not retry_only:
+        wd = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][datetime.now().weekday()]
+        print(f"SCRAPE_MODE=auto → resolved to '{resolved_mode}' ({wd})")
     if FETCH_DESCRIPTIONS:
         print("⚠ Description fetching ENABLED (extra API cost)")
     print()
@@ -1367,7 +1493,8 @@ def run_scraper(retry_only: bool = False):
             continue
 
         count, new_count, updated_count, idealista_count = scrape_barrio(
-            distrito, barrio, url_path, proxies, active_ids, page_history
+            distrito, barrio, url_path, proxies, active_ids, page_history,
+            mode=resolved_mode,
         )
         total_listings += count
         total_new += new_count
@@ -1398,26 +1525,34 @@ def run_scraper(retry_only: bool = False):
     # Retry failed barrios (retry phase)
     _set_phase('retry')
     retry_count, retry_new, retry_updated = retry_failed_barrios(
-        proxies, active_ids, page_history
+        proxies, active_ids, page_history, mode=resolved_mode,
     )
     total_listings += retry_count
     total_new += retry_new
     total_updated += retry_updated
 
     # Mark stale listings as sold using two-tier approach:
-    # Tier 1: 14 days + barrio coverage confirmed → sold
+    # Tier 1: N days + barrio coverage confirmed → sold
     # Tier 2: 21 days hard cutoff (no barrio coverage needed) → sold
+    #
+    # Threshold widens to 21d when lite-mode is in play: the weekly full
+    # sweep is the only time deep-page listings get last_seen_date
+    # refreshed, so a single skipped Sunday (CI failure, Idealista outage)
+    # would otherwise mark every back-page listing as sold on day 14.
+    # Setting Tier 1 = Tier 2 = 21d here gives one missed sweep of slack
+    # without changing behaviour on full-only configurations.
     if not retry_only:
+        stale_threshold = 21 if resolved_mode == 'lite' or SCRAPE_MODE == 'auto' else 14
         print(f"\n🔍 Checking for sold/removed properties...")
-        print(f"  Tier 1: properties not seen in 14+ days (barrio scraped recently)")
+        print(f"  Tier 1: properties not seen in {stale_threshold}+ days (barrio scraped recently)")
         print(f"  Tier 2: properties not seen in 21+ days (hard cutoff)")
 
-        sold_count = mark_stale_as_sold(days_threshold=14)
+        sold_count = mark_stale_as_sold(days_threshold=stale_threshold)
         print(f"  ✓ Marked {sold_count} listings as sold/removed")
 
         if active_ids:
             print(f"  ℹ️  {len(active_ids)} properties not seen in this scrape")
-            print(f"  ℹ️  These will be marked as sold if not seen within 14-21 days")
+            print(f"  ℹ️  These will be marked as sold if not seen within {stale_threshold}-21 days")
 
     # Bright Data usage report
     cost_data = get_brightdata_cost_estimate()
@@ -1964,6 +2099,13 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
 
 
 if __name__ == "__main__":
-    # Support --retry flag to only scrape previously failed barrios
+    # CLI flags:
+    #   --retry        Only scrape barrios that failed in last execution.
+    #   --lite/--full  Override SCRAPE_MODE env var for this run.
     retry_mode = '--retry' in sys.argv
-    run_scraper(retry_only=retry_mode)
+    cli_mode = None
+    if '--lite' in sys.argv:
+        cli_mode = 'lite'
+    elif '--full' in sys.argv:
+        cli_mode = 'full'
+    run_scraper(retry_only=retry_mode, mode_override=cli_mode)
