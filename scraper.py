@@ -1821,11 +1821,12 @@ def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
     # Ensure rental table exists (migration safe to run multiple times)
     migrate_create_rental_prices_table()
 
-    today      = datetime.now().strftime("%Y-%m-%d")
-    stored     = 0
-    skipped    = 0
-    errors     = 0
-    total      = len(BARRIOS_TO_SCRAPE)
+    today          = datetime.now().strftime("%Y-%m-%d")
+    stored         = 0
+    skipped        = 0
+    errors         = 0
+    upsert_failed  = 0
+    total          = len(BARRIOS_TO_SCRAPE)
 
     for idx, (distrito, barrio, sale_url_path) in enumerate(BARRIOS_TO_SCRAPE, 1):
         # Progress every 20 barrios
@@ -1867,12 +1868,25 @@ def run_rental_scraping(proxies: Optional[Dict] = None) -> int:
         )
         if ok:
             stored += 1
+        else:
+            # upsert_rental_snapshot already printed the exception in database.py;
+            # we just need to ensure the counter sees it so the summary doesn't
+            # show 0 fetch errors + 0 stored with no explanation (root cause
+            # of the silent-failure run on 2026-05-23 — pool of Postgres died
+            # mid-run and every upsert returned False without any line of the
+            # summary surfacing it).
+            upsert_failed += 1
 
         # Brief sleep to avoid hammering the proxy
         time.sleep(0.3)
 
-    print(f"\n  ✅ Alquiler: {stored} barrios guardados, "
-          f"{skipped} sin datos (sin anuncios), {errors} errores")
+    summary = (
+        f"  ✅ Alquiler: {stored} barrios guardados, "
+        f"{skipped} sin datos (sin anuncios), {errors} errores HTTP"
+    )
+    if upsert_failed:
+        summary += f", {upsert_failed} fallos al guardar (DB)"
+    print(f"\n{summary}")
     return stored
 
 

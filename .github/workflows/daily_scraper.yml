@@ -12,13 +12,15 @@ name: Daily Scraper
 
 on:
   schedule:
-    # Daily at 06:00 UTC (08:00 Madrid CEST).
-    # Bumped from Mon/Thu after a data-quality analysis showed median
-    # days-on-market until sold = 6 days — half of properties leave
-    # the market within ≤ 6 days.  A 3-4 day scrape gap was missing
-    # ≈ 30 % of the chollos before we could see them.  Daily catches
-    # ≥ 99 % at a marginal Bright Data cost (~$1/mo extra).
-    - cron: "0 6 * * *"
+    # Every 2 days at 06:00 UTC (08:00 Madrid CEST).
+    # Pulled back from daily (2026-05-20) to cut Bright Data spend roughly
+    # in half after costs climbed to ~$4-5/day.  Median days-on-market
+    # until sold = 6 days, so a 48 h gap still catches ≥ 95 % of chollos
+    # before they leave the market — acceptable trade-off vs. cost.
+    # Pattern ``*/2`` fires on odd days of month (1, 3, 5, …, 31).
+    # Caveat: 31-day months cause one back-to-back run at the month
+    # boundary (Jan 31 → Feb 1).  Up to ~4 extra runs/year; tolerable.
+    - cron: "0 6 */2 * *"
   workflow_dispatch:
     # Manual trigger from the Actions tab.
 
@@ -151,4 +153,35 @@ jobs:
               )
 
           print(f"✅ Verified: {n:,} properties · last ran {ran} ({age}d ago).")
+
+          # ── Rental freshness ────────────────────────────────────────────
+          # Rental scrape only runs every RENTAL_SCRAPE_INTERVAL_DAYS (=7),
+          # so accept up to 10 days of silence — one missed cycle of slack.
+          # When upserts started silently returning False on 2026-05-23
+          # (pool of Postgres died mid-run), the venta guard above stayed
+          # green and we kept paying for rental requests that never landed
+          # in the DB.  This sub-check would have caught it on day 11.
+          from database import get_connection
+          MAX_RENTAL_STALENESS_D = 10
+          try:
+              with get_connection() as conn:
+                  cur = conn.cursor()
+                  cur.execute("SELECT MAX(date_recorded) FROM rental_prices")
+                  last_rental = cur.fetchone()[0]
+          except Exception as exc:
+              sys.exit(f"❌ Could not query rental_prices freshness: {exc}")
+
+          if last_rental is None:
+              sys.exit("❌ rental_prices is empty — no rental snapshot has ever been stored.")
+
+          # ``date_recorded`` is DATE on Postgres, TEXT on SQLite.
+          last_rental_d = last_rental if hasattr(last_rental, "year") else date.fromisoformat(str(last_rental)[:10])
+          rental_age = (date.today() - last_rental_d).days
+          if rental_age > MAX_RENTAL_STALENESS_D:
+              sys.exit(
+                  f"❌ Latest rental_prices snapshot is {rental_age} days old "
+                  f"({last_rental_d}) — rental scraper has been silently "
+                  f"failing for > {MAX_RENTAL_STALENESS_D} days."
+              )
+          print(f"✅ Rental snapshots fresh · last on {last_rental_d} ({rental_age}d ago).")
           EOF
