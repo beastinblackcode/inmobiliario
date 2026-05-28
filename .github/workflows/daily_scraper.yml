@@ -11,18 +11,16 @@ name: Daily Scraper
 # ──────────────────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    # Every 2 days at 06:00 UTC (08:00 Madrid CEST).
-    # Pulled back from daily (2026-05-20) to cut Bright Data spend roughly
-    # in half after costs climbed to ~$4-5/day.  Median days-on-market
-    # until sold = 6 days, so a 48 h gap still catches ≥ 95 % of chollos
-    # before they leave the market — acceptable trade-off vs. cost.
-    # Pattern ``*/2`` fires on odd days of month (1, 3, 5, …, 31).
-    # Caveat: 31-day months cause one back-to-back run at the month
-    # boundary (Jan 31 → Feb 1).  Up to ~4 extra runs/year; tolerable.
-    - cron: "0 6 */2 * *"
+  # ──────────────────────────────────────────────────────────────────────
+  # Scheduled cron paused on 2026-05-28 — short break, no data needed for
+  # a few days.  Re-enable by uncommenting the schedule block below.
+  # Previous cadence: every 2 days at 06:00 UTC.
+  # ──────────────────────────────────────────────────────────────────────
+  # schedule:
+  #   - cron: "0 6 */2 * *"
   workflow_dispatch:
-    # Manual trigger from the Actions tab.
+    # Manual trigger from the Actions tab — still available while paused
+    # in case we want a one-off catch-up run.
 
 permissions:
   contents: read
