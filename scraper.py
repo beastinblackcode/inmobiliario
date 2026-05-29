@@ -953,17 +953,25 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
         detail_spans = article.find_all('span', class_='item-detail')
         for span in detail_spans:
             text = span.get_text(strip=True)
-            
-            if 'hab' in text.lower():
+            text_lower = text.lower()
+
+            if 'hab' in text_lower:
                 rooms = extract_number(text)
             elif 'm²' in text or 'm2' in text:
                 size_sqm = extract_float(text)
-            elif any(word in text.lower() for word in ['planta', 'bajo', 'ático', 'piso']):
-                floor = text
-            elif 'interior' in text.lower():
-                orientation = 'Interior'
-            elif 'exterior' in text.lower():
-                orientation = 'Exterior'
+            else:
+                # Idealista frequently bundles floor + orientation in the
+                # same span (e.g. "Piso exterior, 3ª planta"), so check
+                # them as independent matches rather than mutually-exclusive
+                # branches.  The legacy `elif` chain consumed the span at
+                # the floor branch and never re-evaluated orientation,
+                # which is why 96.7 % of active listings had orientation=NULL.
+                if any(w in text_lower for w in ('planta', 'bajo', 'ático', 'piso')):
+                    floor = text
+                if 'exterior' in text_lower:
+                    orientation = 'Exterior'
+                elif 'interior' in text_lower:
+                    orientation = 'Interior'
         
         
         # Determine seller type
