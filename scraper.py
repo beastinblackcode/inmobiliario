@@ -73,6 +73,24 @@ BRIGHTDATA_RESIDENTIAL_USER = os.getenv('BRIGHTDATA_RESIDENTIAL_USER', BRIGHTDAT
 BRIGHTDATA_RESIDENTIAL_PASS = os.getenv('BRIGHTDATA_RESIDENTIAL_PASS', BRIGHTDATA_PASS)
 BRIGHTDATA_RESIDENTIAL_HOST = os.getenv('BRIGHTDATA_RESIDENTIAL_HOST', '')
 
+# Oxylabs Web Scraper API — primary tier as of 2026-05-31 after a
+# 6-provider bench (see bench_scrapers.py). Wins on $/req over BrightData
+# Web Unlocker ($0.00135 vs $0.003) and ScrapingBee ($0.005); the others
+# (ZenRows free, ScraperAPI ultra_premium, BD residential) were ruled
+# out as either blocked by Idealista or priced out of range.
+#
+# Behaviour observed in the bench: ~60 % of raw attempts succeed
+# (HTTP 200 with full HTML), the other ~40 % land as HTTP 200 with
+# content="" when Oxylabs' internal anti-bot rotation gives up
+# mid-fetch. The wrapper treats empty payload as a retryable failure
+# and reissues up to OXYLABS_MAX_RETRIES attempts before falling
+# through to BrightData. Effective success rate with 3 retries ≈ 94 %,
+# effective cost ≈ $0.0021/req → ~$10/mo at lite-mode load.
+OXYLABS_USER = os.getenv('OXYLABS_USER')
+OXYLABS_PASS = os.getenv('OXYLABS_PASS')
+OXYLABS_ENDPOINT = os.getenv('OXYLABS_ENDPOINT', 'https://realtime.oxylabs.io/v1/queries')
+OXYLABS_MAX_RETRIES = int(os.getenv('OXYLABS_MAX_RETRIES', '3'))
+
 BASE_URL = "https://www.idealista.com"
 
 # ============================================================================
@@ -550,6 +568,11 @@ residential_counter = {'successful': 0, 'failed': 0, 'total': 0}
 # Direct (free) request counters
 direct_counter = {'successful': 0, 'failed': 0, 'total': 0}
 
+# Oxylabs Web Scraper API counters (primary tier).
+# `total` counts every call to Oxylabs API including retries; `successful`
+# only counts the call that actually returned usable HTML.
+oxylabs_counter = {'successful': 0, 'failed': 0, 'total': 0}
+
 # Consecutive direct failures (triggers auto-switch to proxy-only)
 _consecutive_direct_fails = 0
 
@@ -573,38 +596,55 @@ def _budget_exceeded() -> bool:
     """Return True if the configured request budget has been hit (all paid tiers)."""
     if BRIGHTDATA_REQUEST_BUDGET <= 0:
         return False
-    paid_total = request_counter['total'] + residential_counter['total']
+    paid_total = (request_counter['total'] + residential_counter['total']
+                  + oxylabs_counter['total'])
     return paid_total >= BRIGHTDATA_REQUEST_BUDGET
+
+
+# Per-request flat rate for Oxylabs Web Scraper API (entry tier).
+# Source: bench_scrapers.py, 2026-05-31. Update when Oxylabs invoice
+# diverges meaningfully from this estimate.
+OXYLABS_COST_PER_REQ = 0.00135
+
 
 def get_brightdata_cost_estimate():
     """
-    Calculate estimated Bright Data cost across all proxy tiers.
+    Calculate estimated cost across all paid tiers.
 
-    Pricing (per GB of bandwidth):
-    - Residential proxy:  $8/GB  (primary tier)
-    - Web Unlocker:       $15/GB (fallback tier)
-    - Direct (curl_cffi): free
+    Pricing:
+    - Direct (curl_cffi):  free
+    - Oxylabs Web Scraper: $0.00135 per request (flat, primary tier)
+    - Residential proxy:   $8/GB  (legacy, disabled in practice)
+    - Web Unlocker:        $15/GB (BrightData fallback)
 
-    NOTE: Actual cost depends on bandwidth, not request count.
-    We estimate ~200KB per request as average page size for Idealista listings.
+    Bandwidth-based tiers estimate ~200 KB per Idealista listing page.
+
+    Name kept as ``get_brightdata_cost_estimate`` for backwards
+    compatibility with callers that store it under that key in
+    scraping_log; the returned dict carries Oxylabs fields as well.
     """
     AVG_PAGE_SIZE_KB = 200  # Approximate HTML size per Idealista listing page
 
     residential_requests = residential_counter['total']
     unlocker_requests = request_counter['total']
     direct_requests = direct_counter['total']
-    total_all = residential_requests + unlocker_requests + direct_requests
+    oxylabs_requests = oxylabs_counter['total']
+    total_all = (residential_requests + unlocker_requests
+                 + direct_requests + oxylabs_requests)
 
-    # Estimate bandwidth in GB
+    # Bandwidth-based tier costs.
     residential_gb = (residential_requests * AVG_PAGE_SIZE_KB) / (1024 * 1024)
-    unlocker_gb = (unlocker_requests * AVG_PAGE_SIZE_KB) / (1024 * 1024)
+    unlocker_gb    = (unlocker_requests    * AVG_PAGE_SIZE_KB) / (1024 * 1024)
 
-    # Cost by tier
     residential_cost = residential_gb * 8.0    # $8/GB
-    unlocker_cost = unlocker_gb * 15.0         # $15/GB
-    actual_cost = residential_cost + unlocker_cost
+    unlocker_cost    = unlocker_gb    * 15.0   # $15/GB
 
-    # What it would have cost if ALL requests went through Web Unlocker
+    # Per-request tier (Oxylabs charges per call regardless of payload size).
+    oxylabs_cost = oxylabs_requests * OXYLABS_COST_PER_REQ
+
+    actual_cost = residential_cost + unlocker_cost + oxylabs_cost
+
+    # Counterfactual: what would BrightData Web Unlocker alone have cost?
     all_unlocker_gb = (total_all * AVG_PAGE_SIZE_KB) / (1024 * 1024)
     would_have_cost = all_unlocker_gb * 15.0
     savings = would_have_cost - actual_cost
@@ -617,14 +657,21 @@ def get_brightdata_cost_estimate():
         'residential_successful': residential_counter['successful'],
         'unlocker_requests': unlocker_requests,
         'unlocker_successful': request_counter['successful'],
-        'failed_requests': request_counter['failed'] + residential_counter['failed'] + direct_counter['failed'],
+        'oxylabs_requests': oxylabs_requests,
+        'oxylabs_successful': oxylabs_counter['successful'],
+        'failed_requests': (
+            request_counter['failed'] + residential_counter['failed']
+            + direct_counter['failed'] + oxylabs_counter['failed']
+        ),
         'estimated_cost_usd': round(actual_cost, 4),
         'residential_cost_usd': round(residential_cost, 4),
         'unlocker_cost_usd': round(unlocker_cost, 4),
+        'oxylabs_cost_usd': round(oxylabs_cost, 4),
         'savings_usd': round(savings, 4),
         'savings_pct': round((savings / would_have_cost * 100) if would_have_cost > 0 else 0, 1),
         'fetch_mode': FETCH_MODE,
         'residential_configured': bool(BRIGHTDATA_RESIDENTIAL_HOST),
+        'oxylabs_configured': bool(OXYLABS_USER and OXYLABS_PASS),
     }
 
 
@@ -709,6 +756,76 @@ def _is_challenge_page(html: str) -> bool:
     ]
     html_lower = html[:5000].lower()
     return any(signal in html_lower for signal in challenge_signals)
+
+
+def _fetch_via_oxylabs(url: str, silent_404: bool = False) -> tuple:
+    """
+    Fetch via Oxylabs Web Scraper API (primary tier).
+
+    Returns (html, status_code). On success: (html, 200). On total
+    failure after OXYLABS_MAX_RETRIES attempts: (None, last_status).
+
+    Empty payload (HTTP 200 + content="") is treated as a transient
+    failure and counted toward the retry budget, not as a real 200.
+    That's the failure mode observed in the bench — Oxylabs' anti-bot
+    rotator returns 200 anyway when its retries internally fail.
+    """
+    if not (OXYLABS_USER and OXYLABS_PASS):
+        return None, 0
+
+    payload = {
+        'source': 'universal',
+        'url': url,
+        'geo_location': 'Spain',
+    }
+
+    last_status = 0
+    for attempt in range(OXYLABS_MAX_RETRIES):
+        try:
+            oxylabs_counter['total'] += 1
+            phase_counters[_current_phase] = phase_counters.get(_current_phase, 0) + 1
+
+            r = requests.post(
+                OXYLABS_ENDPOINT,
+                auth=(OXYLABS_USER, OXYLABS_PASS),
+                json=payload,
+                timeout=120,
+            )
+            last_status = r.status_code
+
+            if r.status_code != 200:
+                oxylabs_counter['failed'] += 1
+                # 404 from Oxylabs means Idealista said 404 — definitive.
+                if r.status_code == 404:
+                    if not silent_404:
+                        with open('404_errors.log', 'a') as f:
+                            f.write(f"{url}\n")
+                        print(f"  ⚠ HTTP 404 [oxylabs] - logged (no retry)")
+                    return None, 404
+                # Other non-200 → retry.
+                continue
+
+            data = r.json() if r.content else {}
+            results = data.get('results') if isinstance(data, dict) else None
+            html = results[0].get('content', '') if results else ''
+
+            if not html:
+                # The bench-confirmed "empty payload" failure mode.
+                oxylabs_counter['failed'] += 1
+                continue
+            if _is_challenge_page(html):
+                oxylabs_counter['failed'] += 1
+                continue
+
+            oxylabs_counter['successful'] += 1
+            return html, 200
+
+        except requests.exceptions.RequestException as exc:
+            oxylabs_counter['failed'] += 1
+            print(f"  ⚠ Oxylabs request error (attempt {attempt + 1}/{OXYLABS_MAX_RETRIES}): {exc}")
+            continue
+
+    return None, last_status
 
 
 def _fetch_via_proxy(
@@ -835,13 +952,28 @@ def fetch_page(
         # hybrid mode: direct failed, try proxies
         print(f"  ↻ Direct blocked (HTTP {status}) — falling back to proxy")
 
-    # ----- PROXY: WEB UNLOCKER ($15/GB) -----
+    # ----- TIER 1: OXYLABS WEB SCRAPER API ($0.00135/req) -----
+    # Primary paid tier as of 2026-05-31 migration. Tries up to
+    # OXYLABS_MAX_RETRIES times internally for the empty-payload
+    # failure mode; falls through to BrightData only when all retries
+    # are exhausted or credentials are missing.
+    if OXYLABS_USER and OXYLABS_PASS:
+        html, status = _fetch_via_oxylabs(url, silent_404=silent_404)
+        if status == 200:
+            return html, 200
+        if status == 404:
+            return None, 404
+        # status == 0 or non-200 → fall through to BrightData
+        if BRIGHTDATA_USER and BRIGHTDATA_PASS:
+            print(f"  ↻ Oxylabs failed (status={status}) — falling back to BrightData")
+
+    # ----- TIER 2: BRIGHTDATA WEB UNLOCKER ($15/GB) — fallback -----
     # NOTE: Residential proxy disabled — Idealista blocks it (99% failure rate).
-    # All requests go directly to Web Unlocker which handles CAPTCHAs/challenges.
+    # Web Unlocker handles CAPTCHAs/challenges.
     if proxies is None:
         proxies = get_proxy_config()
     if proxies is None:
-        print("  ✗ No proxy configured and direct request failed")
+        print("  ✗ No paid tier configured (no Oxylabs, no BrightData)")
         return None, 0
 
     return _fetch_via_proxy(
@@ -1603,17 +1735,20 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     residential_ok  = cost_data.get('residential_successful', 0)
     unlocker_req    = cost_data.get('unlocker_requests', 0)
     unlocker_ok     = cost_data.get('unlocker_successful', 0)
+    oxylabs_req     = cost_data.get('oxylabs_requests', 0)
+    oxylabs_ok      = cost_data.get('oxylabs_successful', 0)
     fail_req        = cost_data['failed_requests']
     cost_usd        = cost_data['estimated_cost_usd']
     res_cost        = cost_data.get('residential_cost_usd', 0)
     unl_cost        = cost_data.get('unlocker_cost_usd', 0)
+    oxy_cost        = cost_data.get('oxylabs_cost_usd', 0)
     savings_usd     = cost_data['savings_usd']
     savings_pct     = cost_data['savings_pct']
     fetch_mode      = cost_data['fetch_mode']
     duration        = (end_time - start_time).total_seconds()
 
     # Budget warning if cap was reached
-    paid_req = residential_req + unlocker_req
+    paid_req = residential_req + unlocker_req + oxylabs_req
     if BRIGHTDATA_REQUEST_BUDGET > 0 and paid_req >= BRIGHTDATA_REQUEST_BUDGET:
         print(f"\n⚠️  PRESUPUESTO ALCANZADO: {paid_req:,} / {BRIGHTDATA_REQUEST_BUDGET:,} requests de proxy")
         print(f"   Aumenta BRIGHTDATA_REQUEST_BUDGET en .env o en GitHub Secrets si necesitas más.")
@@ -1630,13 +1765,17 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
             d_rate = direct_ok / direct_req * 100
             print(f"║  {'Tier 0 — directas (gratis):':<30} {direct_req:>8,}                   ║")
             print(f"║  {'  ✓ Exitosas:':<30} {direct_ok:>8,}  ({d_rate:4.1f}%)         ║")
+        if oxylabs_req > 0:
+            o_rate = oxylabs_ok / oxylabs_req * 100
+            print(f"║  {'Tier 1 — Oxylabs ($0.00135/r):':<30} {oxylabs_req:>8,}                   ║")
+            print(f"║  {'  ✓ Exitosas:':<30} {oxylabs_ok:>8,}  ({o_rate:4.1f}%)         ║")
         if residential_req > 0:
             r_rate = residential_ok / residential_req * 100
-            print(f"║  {'Tier 1 — residential ($8/GB):':<30} {residential_req:>8,}                   ║")
+            print(f"║  {'Tier 2 — residential ($8/GB):':<30} {residential_req:>8,}                   ║")
             print(f"║  {'  ✓ Exitosas:':<30} {residential_ok:>8,}  ({r_rate:4.1f}%)         ║")
         if unlocker_req > 0:
             u_rate = unlocker_ok / unlocker_req * 100
-            print(f"║  {'Tier 2 — unlocker ($15/GB):':<30} {unlocker_req:>8,}                   ║")
+            print(f"║  {'Tier 3 — unlocker ($15/GB):':<30} {unlocker_req:>8,}                   ║")
             print(f"║  {'  ✓ Exitosas:':<30} {unlocker_ok:>8,}  ({u_rate:4.1f}%)         ║")
         print(f"║  {'Requests totales:':<30} {total_req:>8,}                   ║")
         print(f"║  {'  ✗ Fallidas (total):':<30} {fail_req:>8,}                   ║")
@@ -1652,8 +1791,12 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
 
         # Cost by tier
         cost_per_listing = cost_usd / total_listings if total_listings > 0 else 0
-        print(f"║  {'Coste residential:':<30} {'$' + f'{res_cost:.4f}':>10} USD         ║")
-        print(f"║  {'Coste web unlocker:':<30} {'$' + f'{unl_cost:.4f}':>10} USD         ║")
+        if oxylabs_req > 0:
+            print(f"║  {'Coste Oxylabs:':<30} {'$' + f'{oxy_cost:.4f}':>10} USD         ║")
+        if residential_req > 0:
+            print(f"║  {'Coste residential:':<30} {'$' + f'{res_cost:.4f}':>10} USD         ║")
+        if unlocker_req > 0:
+            print(f"║  {'Coste web unlocker:':<30} {'$' + f'{unl_cost:.4f}':>10} USD         ║")
         print(f"║  {'Coste total (estimado):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
         if savings_usd > 0:
             print(f"║  {'Ahorro vs solo unlocker:':<30} {'$' + f'{savings_usd:.4f}':>10} USD ({savings_pct:.0f}%)  ║")
