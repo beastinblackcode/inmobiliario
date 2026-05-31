@@ -11,16 +11,14 @@ name: Daily Scraper
 # ──────────────────────────────────────────────────────────────────────────
 
 on:
-  # ──────────────────────────────────────────────────────────────────────
-  # Scheduled cron paused on 2026-05-28 — short break, no data needed for
-  # a few days.  Re-enable by uncommenting the schedule block below.
-  # Previous cadence: every 2 days at 06:00 UTC.
-  # ──────────────────────────────────────────────────────────────────────
-  # schedule:
-  #   - cron: "0 6 */2 * *"
+  schedule:
+    # Every 2 days at 06:00 UTC (08:00 Madrid CEST).
+    # Re-enabled on 2026-05-31 after the Oxylabs migration (PR #61).
+    # Cadence preserved verbatim from the pre-pause config.
+    - cron: "0 6 */2 * *"
   workflow_dispatch:
-    # Manual trigger from the Actions tab — still available while paused
-    # in case we want a one-off catch-up run.
+    # Manual trigger from the Actions tab — handy for catch-up runs and
+    # for validating new providers before letting the cron pick them up.
 
 permissions:
   contents: read
@@ -63,6 +61,14 @@ jobs:
       - name: Run scraper
         env:
           PYTHONUNBUFFERED: "1"
+          # Primary paid tier as of PR #61.  When set, scraper.py routes
+          # every fetch through Oxylabs Web Scraper API first and only
+          # falls back to BrightData when all retries are exhausted.
+          OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
+          OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
+          # BrightData kept wired as fallback. Recharge the account if
+          # the Oxylabs tier ever struggles in production — the fallback
+          # path only activates when both credentials AND balance are good.
           BRIGHTDATA_USER: ${{ secrets.BRIGHTDATA_USER }}
           BRIGHTDATA_PASS: ${{ secrets.BRIGHTDATA_PASS }}
           BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
