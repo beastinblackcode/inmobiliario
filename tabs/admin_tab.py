@@ -18,6 +18,8 @@ from database import (
     get_property_price_stats,
     get_stale_listings_count,
     purge_stale_listings,
+    get_provider_configs,
+    get_provider_stats,
 )
 from analytics import get_property_evolution_dataframe
 
@@ -607,3 +609,88 @@ def render_admin_tab(df: pd.DataFrame) -> None:
 
     elif search_button and not search_input:
         st.warning("⚠️ Por favor, introduce una URL o ID para buscar.")
+
+    # =========================================================================
+    # Proveedores de Scraping (Fase 1: read-only registry + last-30d snapshot)
+    # =========================================================================
+    _render_providers_section()
+
+
+def _render_providers_section() -> None:
+    """Read-only registry of scraping providers + 30-day usage snapshot.
+
+    Surfaces the four tiers ``fetch_page`` cycles through so admins can
+    see what's enabled, what each costs, and (once Phase 2 lands the
+    per-tier logging) how each performed.  Toggles / re-ordering ship
+    in Phase 4 — the table is informational for now.
+    """
+    import os
+
+    st.markdown("---")
+    st.subheader("🔌 Proveedores de Scraping")
+
+    providers = get_provider_configs()
+    if not providers:
+        st.info(
+            "No hay proveedores registrados. Ejecuta `alembic upgrade head` "
+            "(Postgres) o `scraper.py` una vez (SQLite) para inicializar la tabla."
+        )
+        return
+
+    # Credentials live in env vars; we check presence (never the value)
+    # so the admin can spot a tier that's "enabled" but unreachable.
+    env_checks = {
+        "direct":                 True,  # no creds needed
+        "oxylabs":                bool(os.getenv("OXYLABS_USER") and os.getenv("OXYLABS_PASS")),
+        "brightdata_unlocker":    bool(os.getenv("BRIGHTDATA_USER") and os.getenv("BRIGHTDATA_PASS")),
+        "brightdata_residential": bool(os.getenv("BRIGHTDATA_RESIDENTIAL_HOST")),
+    }
+
+    stats_by_provider = {row["provider"]: row for row in get_provider_stats(days=30)}
+
+    rows = []
+    for cfg in providers:
+        name = cfg["name"]
+        stats = stats_by_provider.get(name, {})
+        configured = env_checks.get(name, False)
+
+        if cfg["kind"] == "per_req":
+            unit_cost = f"${cfg['cost_per_req']:.5f} / req" if cfg["cost_per_req"] is not None else "—"
+        else:
+            unit_cost = f"${cfg['cost_per_gb']:.2f} / GB" if cfg["cost_per_gb"] is not None else "—"
+
+        if cfg["enabled"] and configured:
+            status = "🟢 Activo"
+        elif cfg["enabled"] and not configured:
+            status = "🟠 Faltan credenciales"
+        else:
+            status = "⚫ Deshabilitado"
+
+        requests = int(stats.get("requests") or 0)
+        successful = int(stats.get("successful") or 0)
+        success_rate = (successful / requests * 100) if requests else None
+
+        rows.append({
+            "Prioridad": cfg["priority"],
+            "Proveedor": cfg["display_name"],
+            "Estado": status,
+            "Modelo coste": cfg["kind"],
+            "Coste unitario": unit_cost,
+            "Requests (30d)": f"{requests:,}" if requests else "—",
+            "Éxito": f"{success_rate:.1f}%" if success_rate is not None else "—",
+            "Coste (30d)": f"${stats.get('cost_usd') or 0:.2f}" if stats else "—",
+            "Nota": cfg["notes"] or "",
+        })
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if not stats_by_provider:
+        st.caption(
+            "ℹ️ Aún no hay métricas por proveedor: el desglose por tier "
+            "se empieza a registrar en la Fase 2 (instrumentación de "
+            "`log_scraping_execution`)."
+        )

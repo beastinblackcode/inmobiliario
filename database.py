@@ -412,6 +412,209 @@ def get_scraping_log(limit: int = 50) -> List[Dict]:
         return []
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider registry (admin → Proveedores subtab).  Postgres owns the schema
+# via Alembic 0006/0007; the SQLite branches below keep local dev / tests
+# self-sufficient.  Seed is idempotent on both backends.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+_PROVIDER_SEED = [
+    # (name, display_name, enabled, priority, kind, cost_per_req, cost_per_gb, notes)
+    ("direct",                 "Direct (curl_cffi)",       1, 0,  "per_req", 0.0,     None, "Free tier. Hybrid mode only — auto-degrades after consecutive failures."),
+    ("oxylabs",                "Oxylabs Web Scraper API",  1, 10, "per_req", 0.00135, None, "Primary paid tier since 2026-05-31 (PR #61)."),
+    ("brightdata_unlocker",    "BrightData Web Unlocker",  1, 20, "per_gb",  None,    15.0, "Fallback when Oxylabs exhausts retries. ~200KB avg payload."),
+    ("brightdata_residential", "BrightData Residential",   0, 30, "per_gb",  None,    8.0,  "Disabled — Idealista blocks residential proxies (99% failure rate)."),
+]
+
+
+def migrate_create_provider_tables():
+    """Create provider_config + scraping_log_provider on SQLite, idempotent.
+
+    No-op under Postgres (Alembic 0006/0007 owns the schema).  Seeds the
+    registry with the four tiers wired into ``scraper.fetch_page`` as of
+    2026-06-02.  Safe to call repeatedly: ``CREATE … IF NOT EXISTS`` plus
+    ``INSERT OR IGNORE`` make this re-runnable without state checks.
+    """
+    from db.dialect import is_postgres
+    if is_postgres():
+        return
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS provider_config (
+                    name          TEXT PRIMARY KEY,
+                    display_name  TEXT NOT NULL,
+                    enabled       INTEGER NOT NULL DEFAULT 1,
+                    priority      INTEGER NOT NULL,
+                    kind          TEXT NOT NULL CHECK (kind IN ('per_req', 'per_gb')),
+                    cost_per_req  REAL,
+                    cost_per_gb   REAL,
+                    notes         TEXT,
+                    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_provider_config_enabled_priority
+                ON provider_config (enabled, priority)
+            """)
+            cursor.executemany("""
+                INSERT OR IGNORE INTO provider_config
+                    (name, display_name, enabled, priority, kind, cost_per_req, cost_per_gb, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, _PROVIDER_SEED)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scraping_log_provider (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scraping_log_id   INTEGER NOT NULL,
+                    provider          TEXT    NOT NULL,
+                    requests          INTEGER NOT NULL DEFAULT 0,
+                    successful        INTEGER NOT NULL DEFAULT 0,
+                    failed            INTEGER NOT NULL DEFAULT 0,
+                    empty_payload     INTEGER NOT NULL DEFAULT 0,
+                    bytes_downloaded  INTEGER NOT NULL DEFAULT 0,
+                    cost_usd          REAL    NOT NULL DEFAULT 0,
+                    p50_latency_ms    INTEGER,
+                    p95_latency_ms    INTEGER,
+                    FOREIGN KEY (scraping_log_id) REFERENCES scraping_log(id),
+                    FOREIGN KEY (provider) REFERENCES provider_config(name)
+                )
+            """)
+            cursor.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_slp_unique_run_provider
+                ON scraping_log_provider (scraping_log_id, provider)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_slp_provider
+                ON scraping_log_provider (provider)
+            """)
+            conn.commit()
+    except Exception as exc:
+        print(f"Migration error (provider tables): {exc}")
+
+
+def _ensure_provider_seed_postgres() -> None:
+    """Make sure the four baseline rows exist on Postgres too.
+
+    The 0006 migration seeds them already, but this guard lets the admin
+    subtab tolerate a partial Postgres deploy where the migration ran
+    against an empty DB before any row was committed (e.g. mid-cutover).
+    """
+    from db.dialect import is_postgres
+    if not is_postgres():
+        return
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM provider_config")
+            if cursor.fetchone()[0] > 0:
+                return
+            for row in _PROVIDER_SEED:
+                # SQLite tuple uses 0/1 for enabled; PG uses BOOLEAN.
+                pg_row = (row[0], row[1], bool(row[2]), row[3], row[4], row[5], row[6], row[7])
+                cursor.execute("""
+                    INSERT INTO provider_config
+                        (name, display_name, enabled, priority, kind, cost_per_req, cost_per_gb, notes)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (name) DO NOTHING
+                """, pg_row)
+            conn.commit()
+    except Exception as exc:
+        print(f"Provider seed (PG) error: {exc}")
+
+
+def get_provider_configs() -> List[Dict]:
+    """Return all rows of ``provider_config`` ordered by priority.
+
+    Lazy-creates the table on SQLite if it doesn't exist yet — that way
+    the admin subtab works on fresh local DBs without anyone having to
+    run the scraper first.  Returns ``[]`` if even that fails (e.g. the
+    table is missing on Postgres because the migration hasn't been
+    applied yet).
+    """
+    from db.dialect import has_table_sql
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            sql, params = has_table_sql("provider_config")
+            cursor.execute(sql, params)
+            if not cursor.fetchone():
+                migrate_create_provider_tables()
+                cursor.execute(sql, params)
+                if not cursor.fetchone():
+                    return []
+
+            _ensure_provider_seed_postgres()
+
+            cursor.execute("""
+                SELECT name, display_name, enabled, priority, kind,
+                       cost_per_req, cost_per_gb, notes, updated_at
+                  FROM provider_config
+                 ORDER BY priority
+            """)
+            columns = [
+                "name", "display_name", "enabled", "priority", "kind",
+                "cost_per_req", "cost_per_gb", "notes", "updated_at",
+            ]
+            return [
+                {**dict(zip(columns, row)), "enabled": bool(row[2])}
+                for row in cursor.fetchall()
+            ]
+    except Exception as exc:
+        print(f"Error retrieving provider configs: {exc}")
+        return []
+
+
+def get_provider_stats(days: int = 30) -> List[Dict]:
+    """Aggregated per-provider stats over the last *days* days.
+
+    Joins ``scraping_log_provider`` against ``scraping_log`` to filter on
+    ``start_time`` so we don't drag in pre-Phase-2 history once the
+    writer side lands.  Returns ``[]`` when the table is missing or
+    empty — the dashboard renders an info banner in that case.
+    """
+    from db.dialect import has_table_sql, date_offset_days
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            sql, params = has_table_sql("scraping_log_provider")
+            cursor.execute(sql, params)
+            if not cursor.fetchone():
+                return []
+
+            cutoff = date_offset_days("?")
+            cursor.execute(f"""
+                SELECT
+                    slp.provider,
+                    COUNT(DISTINCT slp.scraping_log_id) AS runs,
+                    SUM(slp.requests)                  AS requests,
+                    SUM(slp.successful)                AS successful,
+                    SUM(slp.failed)                    AS failed,
+                    SUM(slp.empty_payload)             AS empty_payload,
+                    SUM(slp.bytes_downloaded)          AS bytes_downloaded,
+                    SUM(slp.cost_usd)                  AS cost_usd,
+                    AVG(slp.p50_latency_ms)            AS avg_p50_latency_ms,
+                    MAX(sl.start_time)                 AS last_run
+                  FROM scraping_log_provider slp
+                  JOIN scraping_log sl ON sl.id = slp.scraping_log_id
+                 WHERE sl.start_time >= {cutoff}
+                 GROUP BY slp.provider
+            """, (f"-{int(days)}",))
+            columns = [
+                "provider", "runs", "requests", "successful", "failed",
+                "empty_payload", "bytes_downloaded", "cost_usd",
+                "avg_p50_latency_ms", "last_run",
+            ]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    except Exception as exc:
+        print(f"Error retrieving provider stats: {exc}")
+        return []
+
 
 def get_active_listing_ids() -> Set[str]:
     """
