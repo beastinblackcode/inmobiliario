@@ -37,6 +37,8 @@ _EXPECTED_TABLES = {
     "property_fingerprints",      # added in 0002
     "listing_property_map",       # added in 0002
     "user_preferences",           # added in 0003
+    "provider_config",            # added in 0006
+    "scraping_log_provider",      # added in 0007
 }
 
 
