@@ -73,19 +73,21 @@ BRIGHTDATA_RESIDENTIAL_USER = os.getenv('BRIGHTDATA_RESIDENTIAL_USER', BRIGHTDAT
 BRIGHTDATA_RESIDENTIAL_PASS = os.getenv('BRIGHTDATA_RESIDENTIAL_PASS', BRIGHTDATA_PASS)
 BRIGHTDATA_RESIDENTIAL_HOST = os.getenv('BRIGHTDATA_RESIDENTIAL_HOST', '')
 
-# Oxylabs Web Scraper API — primary tier as of 2026-05-31 after a
-# 6-provider bench (see bench_scrapers.py). Wins on $/req over BrightData
-# Web Unlocker ($0.00135 vs $0.003) and ScrapingBee ($0.005); the others
-# (ZenRows free, ScraperAPI ultra_premium, BD residential) were ruled
-# out as either blocked by Idealista or priced out of range.
+# Oxylabs Web Scraper API — DISABLED rescue tier as of 2026-06-03.
+# Was the primary tier (2026-05-31 → 2026-06-03) but its ~€50/mo
+# subscription floor dwarfed the ~$10/mo real usage, so we cancelled it
+# and promoted BrightData Web Unlocker (pay-as-you-go, no floor) back to
+# primary. The Oxylabs code path stays in place as a dormant fallback:
+# it only fires when OXYLABS_USER/PASS are present, so re-adding those
+# GH Actions secrets reactivates it without a code change.
 #
-# Behaviour observed in the bench: ~60 % of raw attempts succeed
-# (HTTP 200 with full HTML), the other ~40 % land as HTTP 200 with
-# content="" when Oxylabs' internal anti-bot rotation gives up
-# mid-fetch. The wrapper treats empty payload as a retryable failure
-# and reissues up to OXYLABS_MAX_RETRIES attempts before falling
-# through to BrightData. Effective success rate with 3 retries ≈ 94 %,
-# effective cost ≈ $0.0021/req → ~$10/mo at lite-mode load.
+# Behaviour when active (observed in the 6-provider bench, see
+# bench_scrapers.py): ~60 % of raw attempts succeed (HTTP 200 with full
+# HTML), the other ~40 % land as HTTP 200 with content="" when Oxylabs'
+# internal anti-bot rotation gives up mid-fetch. The wrapper treats
+# empty payload as a retryable failure and reissues up to
+# OXYLABS_MAX_RETRIES attempts. Effective success rate with 3 retries
+# ≈ 94 %, effective cost ≈ $0.0021/req.
 OXYLABS_USER = os.getenv('OXYLABS_USER')
 OXYLABS_PASS = os.getenv('OXYLABS_PASS')
 OXYLABS_ENDPOINT = os.getenv('OXYLABS_ENDPOINT', 'https://realtime.oxylabs.io/v1/queries')
@@ -905,12 +907,16 @@ def fetch_page(
     """
     Fetch HTML content with tiered strategy:
 
-        direct (free) → residential proxy ($8/GB) → web unlocker ($15/GB)
+        direct (free) → BrightData Web Unlocker ($15/GB) → Oxylabs (disabled)
 
     Strategy depends on FETCH_MODE:
-    - 'hybrid':  try direct first (free), then residential, then web unlocker
+    - 'hybrid':  try direct first (free), then Web Unlocker, then Oxylabs
     - 'direct':  only direct requests (free but risky)
-    - 'proxy':   skip direct, go residential → web unlocker
+    - 'proxy':   skip direct, go Web Unlocker → Oxylabs
+
+    Web Unlocker is the primary paid tier; Oxylabs is a dormant rescue
+    tier that only fires if its credentials are present (subscription
+    cancelled 2026-06-03 — see TIER 2 below).
 
     Auto-switches past direct if DIRECT_FAIL_THRESHOLD consecutive
     direct failures are detected (likely IP ban).
@@ -952,34 +958,42 @@ def fetch_page(
         # hybrid mode: direct failed, try proxies
         print(f"  ↻ Direct blocked (HTTP {status}) — falling back to proxy")
 
-    # ----- TIER 1: OXYLABS WEB SCRAPER API ($0.00135/req) -----
-    # Primary paid tier as of 2026-05-31 migration. Tries up to
-    # OXYLABS_MAX_RETRIES times internally for the empty-payload
-    # failure mode; falls through to BrightData only when all retries
-    # are exhausted or credentials are missing.
-    if OXYLABS_USER and OXYLABS_PASS:
-        html, status = _fetch_via_oxylabs(url, silent_404=silent_404)
-        if status == 200:
-            return html, 200
-        if status == 404:
-            return None, 404
-        # status == 0 or non-200 → fall through to BrightData
-        if BRIGHTDATA_USER and BRIGHTDATA_PASS:
-            print(f"  ↻ Oxylabs failed (status={status}) — falling back to BrightData")
-
-    # ----- TIER 2: BRIGHTDATA WEB UNLOCKER ($15/GB) — fallback -----
+    # ----- TIER 1: BRIGHTDATA WEB UNLOCKER ($15/GB) — primary paid tier -----
+    # Primary as of 2026-06-03: the Oxylabs subscription was cancelled to
+    # drop its ~€50/mo floor (real usage was ~$10/mo). Web Unlocker is
+    # pay-as-you-go with no monthly minimum and already proven on
+    # Idealista's DataDome challenges. A 404 is terminal (page genuinely
+    # gone); any other failure falls through to the Oxylabs rescue tier.
     # NOTE: Residential proxy disabled — Idealista blocks it (99% failure rate).
-    # Web Unlocker handles CAPTCHAs/challenges.
     if proxies is None:
         proxies = get_proxy_config()
+
+    bd_html, bd_status = None, None
+    if proxies is not None:
+        bd_html, bd_status = _fetch_via_proxy(
+            url, proxies, retries=retries, silent_404=silent_404,
+            counter=request_counter, tier_label="unlocker",
+        )
+        if bd_status == 200:
+            return bd_html, 200
+        if bd_status == 404:
+            return None, 404
+        if OXYLABS_USER and OXYLABS_PASS:
+            print(f"  ↻ BrightData failed (status={bd_status}) — falling back to Oxylabs")
+
+    # ----- TIER 2: OXYLABS WEB SCRAPER API ($0.00135/req) — disabled fallback -----
+    # Dormant rescue tier. Inert unless OXYLABS_USER/PASS are restored in
+    # the GH Actions secrets (subscription cancelled 2026-06-03). Re-adding
+    # the secrets reactivates it without a code change.
+    if OXYLABS_USER and OXYLABS_PASS:
+        return _fetch_via_oxylabs(url, silent_404=silent_404)
+
     if proxies is None:
-        print("  ✗ No paid tier configured (no Oxylabs, no BrightData)")
+        print("  ✗ No paid tier configured (no BrightData, no Oxylabs)")
         return None, 0
 
-    return _fetch_via_proxy(
-        url, proxies, retries=retries, silent_404=silent_404,
-        counter=request_counter, tier_label="unlocker",
-    )
+    # BrightData was tried and failed, no Oxylabs fallback available.
+    return bd_html, bd_status
 
 
 def extract_number(text: str) -> Optional[int]:
