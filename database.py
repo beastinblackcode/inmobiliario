@@ -422,8 +422,8 @@ def get_scraping_log(limit: int = 50) -> List[Dict]:
 _PROVIDER_SEED = [
     # (name, display_name, enabled, priority, kind, cost_per_req, cost_per_gb, notes)
     ("direct",                 "Direct (curl_cffi)",       1, 0,  "per_req", 0.0,     None, "Free tier. Hybrid mode only — auto-degrades after consecutive failures."),
-    ("oxylabs",                "Oxylabs Web Scraper API",  1, 10, "per_req", 0.00135, None, "Primary paid tier since 2026-05-31 (PR #61)."),
-    ("brightdata_unlocker",    "BrightData Web Unlocker",  1, 20, "per_gb",  None,    15.0, "Fallback when Oxylabs exhausts retries. ~200KB avg payload."),
+    ("brightdata_unlocker",    "BrightData Web Unlocker",  1, 10, "per_gb",  None,    15.0, "Primary paid tier since 2026-06-03. Pay-as-you-go, no monthly floor. ~200KB avg payload."),
+    ("oxylabs",                "Oxylabs Web Scraper API",  0, 20, "per_req", 0.00135, None, "Disabled rescue tier — subscription cancelled 2026-06-03 to drop the ~€50/mo floor. Re-add OXYLABS_* secrets to reactivate."),
     ("brightdata_residential", "BrightData Residential",   0, 30, "per_gb",  None,    8.0,  "Disabled — Idealista blocks residential proxies (99% failure rate)."),
 ]
 
