@@ -158,34 +158,8 @@ jobs:
 
           print(f"✅ Verified: {n:,} properties · last ran {ran} ({age}d ago).")
 
-          # ── Rental freshness ────────────────────────────────────────────
-          # Rental scrape only runs every RENTAL_SCRAPE_INTERVAL_DAYS (=7),
-          # so accept up to 10 days of silence — one missed cycle of slack.
-          # When upserts started silently returning False on 2026-05-23
-          # (pool of Postgres died mid-run), the venta guard above stayed
-          # green and we kept paying for rental requests that never landed
-          # in the DB.  This sub-check would have caught it on day 11.
-          from database import get_connection
-          MAX_RENTAL_STALENESS_D = 10
-          try:
-              with get_connection() as conn:
-                  cur = conn.cursor()
-                  cur.execute("SELECT MAX(date_recorded) FROM rental_prices")
-                  last_rental = cur.fetchone()[0]
-          except Exception as exc:
-              sys.exit(f"❌ Could not query rental_prices freshness: {exc}")
-
-          if last_rental is None:
-              sys.exit("❌ rental_prices is empty — no rental snapshot has ever been stored.")
-
-          # ``date_recorded`` is DATE on Postgres, TEXT on SQLite.
-          last_rental_d = last_rental if hasattr(last_rental, "year") else date.fromisoformat(str(last_rental)[:10])
-          rental_age = (date.today() - last_rental_d).days
-          if rental_age > MAX_RENTAL_STALENESS_D:
-              sys.exit(
-                  f"❌ Latest rental_prices snapshot is {rental_age} days old "
-                  f"({last_rental_d}) — rental scraper has been silently "
-                  f"failing for > {MAX_RENTAL_STALENESS_D} days."
-              )
-          print(f"✅ Rental snapshots fresh · last on {last_rental_d} ({rental_age}d ago).")
+          # NOTE: the rental-freshness sub-check was removed on 2026-06-03
+          # when rental scraping was disabled (RENTAL_SCRAPE_ENABLED=false).
+          # rental_prices is intentionally frozen now, so a staleness guard
+          # would fail every run. Re-add it if rental scraping is resumed.
           EOF

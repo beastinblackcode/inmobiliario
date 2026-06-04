@@ -157,8 +157,14 @@ DIRECT_REQUEST_DELAY = float(os.getenv('DIRECT_REQUEST_DELAY', '2.0'))
 # After this many consecutive direct failures, switch to proxy-only for rest of run
 DIRECT_FAIL_THRESHOLD = int(os.getenv('DIRECT_FAIL_THRESHOLD', '10'))
 
-# How often to re-scrape rental prices (days). Rental data changes slowly;
-# daily scraping wastes ~139 requests per run. Default: every 7 days.
+# Master switch for rental price scraping. Disabled 2026-06-03 — rental
+# medians move slowly and downstream consumers fall back to the static
+# rental_medians.py dataset, so the periodic scrape isn't worth its
+# ~139 requests/run. Set RENTAL_SCRAPE_ENABLED=true to resume it.
+RENTAL_SCRAPE_ENABLED = os.getenv('RENTAL_SCRAPE_ENABLED', 'false').lower() == 'true'
+
+# How often to re-scrape rental prices (days), once enabled. Rental data
+# changes slowly; daily scraping wastes ~139 requests per run. Default: 7.
 RENTAL_SCRAPE_INTERVAL_DAYS = int(os.getenv('RENTAL_SCRAPE_INTERVAL_DAYS', '7'))
 
 # File that records the last date rental scraping ran successfully.
@@ -1929,9 +1935,20 @@ def _rental_is_due() -> bool:
 
 def _run_rental_if_due(proxies: Optional[Dict] = None) -> None:
     """
-    Run rental scraping only when the configured interval has elapsed.
-    Prints a clear skip message when not due, so CI logs are easy to read.
+    Run rental scraping only when enabled *and* the configured interval
+    has elapsed. Prints a clear skip message otherwise, so CI logs are
+    easy to read.
     """
+    if not RENTAL_SCRAPE_ENABLED:
+        print("\n")
+        print("╔" + "═" * 62 + "╗")
+        print("║" + "  🏘️   ALQUILER — SCRAPING DESACTIVADO".center(62) + "║")
+        print("╠" + "═" * 62 + "╣")
+        print(f"║  {'Estado:':<30} {'desactivado (RENTAL_SCRAPE_ENABLED)':30} ║")
+        print(f"║  {'Reactivar con:':<30} {'RENTAL_SCRAPE_ENABLED=true':30} ║")
+        print("╚" + "═" * 62 + "╝")
+        return
+
     if not _rental_is_due():
         last = _rental_last_scraped_date()
         from datetime import date
