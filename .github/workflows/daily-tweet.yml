@@ -1,10 +1,12 @@
 name: Daily Tweet @Madridhometech
 
 on:
-  schedule:
-    # Cada día a las 9:00 hora de Madrid (UTC+1 en invierno, UTC+2 en verano)
-    # Usamos 8:00 UTC que equivale a 9:00 en España (horario invierno)
-    - cron: '0 8 * * *'
+  # Schedule desactivado (2026-06-09): el tweet diario fallaba a diario.
+  # Para reactivarlo, descomenta el bloque schedule de abajo.
+  # schedule:
+  #   # Cada día a las 9:00 hora de Madrid (UTC+1 en invierno, UTC+2 en verano)
+  #   # Usamos 8:00 UTC que equivale a 9:00 en España (horario invierno)
+  #   - cron: '0 8 * * *'
   workflow_dispatch:  # permite lanzarlo manualmente desde GitHub
 
 jobs:
