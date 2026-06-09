@@ -75,6 +75,8 @@ jobs:
           BRIGHTDATA_RESIDENTIAL_HOST: ${{ secrets.BRIGHTDATA_RESIDENTIAL_HOST }}
           BRIGHTDATA_RESIDENTIAL_USER: ${{ secrets.BRIGHTDATA_RESIDENTIAL_USER }}
           BRIGHTDATA_RESIDENTIAL_PASS: ${{ secrets.BRIGHTDATA_RESIDENTIAL_PASS }}
+          # Billing API token: enables real month-to-date cost in the email.
+          BRIGHTDATA_API_TOKEN: ${{ secrets.BRIGHTDATA_API_TOKEN }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python scraper.py
         continue-on-error: true    # Partial scrapes still provide valuable data

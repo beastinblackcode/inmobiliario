@@ -67,6 +67,14 @@ BRIGHTDATA_USER = os.getenv('BRIGHTDATA_USER')
 BRIGHTDATA_PASS = os.getenv('BRIGHTDATA_PASS')
 BRIGHTDATA_HOST = os.getenv('BRIGHTDATA_HOST', 'brd.superproxy.io:33335')
 
+# BrightData account API token (Account settings → Users and API keys).
+# Distinct from the proxy password above: it authenticates the billing
+# API so we can report *real* bandwidth/cost instead of a bandwidth
+# estimate. Optional — when absent the run falls back to the estimate.
+BRIGHTDATA_API_TOKEN = os.getenv('BRIGHTDATA_API_TOKEN', '')
+# Paid zone whose cost we report (the Web Unlocker tier we actually bill).
+BRIGHTDATA_ZONE = os.getenv('BRIGHTDATA_ZONE', 'web_unlocker2')
+
 # Residential proxy (cheaper, $8/GB) — tried first as primary proxy tier
 # Falls back to Web Unlocker (BRIGHTDATA_HOST, $15/GB) on failure
 BRIGHTDATA_RESIDENTIAL_USER = os.getenv('BRIGHTDATA_RESIDENTIAL_USER', BRIGHTDATA_USER)
@@ -625,13 +633,22 @@ def get_brightdata_cost_estimate():
     - Residential proxy:   $8/GB  (legacy, disabled in practice)
     - Web Unlocker:        $15/GB (BrightData fallback)
 
-    Bandwidth-based tiers estimate ~200 KB per Idealista listing page.
+    Bandwidth-based tiers estimate ~1.4 MB per Web Unlocker request.
+
+    NOTE on calibration: the Web Unlocker bills *all* unblocking traffic
+    (rendered page, internal retries, sub-resources), not just the final
+    HTML. The real figure measured against the BrightData billing API on
+    2026-06-09 was 4.11 GB across the 30-day window — roughly 1.4 MB per
+    request, ~7x the old 200 KB HTML-only assumption that made this
+    estimate read ~6x too low. The true cost is reported separately via
+    ``fetch_brightdata_real_cost`` when an API token is configured; this
+    estimate is only the fallback when it is not.
 
     Name kept as ``get_brightdata_cost_estimate`` for backwards
     compatibility with callers that store it under that key in
     scraping_log; the returned dict carries Oxylabs fields as well.
     """
-    AVG_PAGE_SIZE_KB = 200  # Approximate HTML size per Idealista listing page
+    AVG_PAGE_SIZE_KB = 1400  # Calibrated to real Web Unlocker billing (≈1.4 MB/req)
 
     residential_requests = residential_counter['total']
     unlocker_requests = request_counter['total']
@@ -680,6 +697,49 @@ def get_brightdata_cost_estimate():
         'fetch_mode': FETCH_MODE,
         'residential_configured': bool(BRIGHTDATA_RESIDENTIAL_HOST),
         'oxylabs_configured': bool(OXYLABS_USER and OXYLABS_PASS),
+    }
+
+
+def fetch_brightdata_real_cost(from_date: str, to_date: str,
+                               zone: str = None) -> Optional[Dict]:
+    """
+    Query the BrightData billing API for the *real* cost and bandwidth of
+    a zone over [from_date, to_date] (both 'YYYY-MM-DD', inclusive).
+
+    Returns ``{'cost_usd': float, 'gb': float, 'from': str, 'to': str,
+    'zone': str}`` or ``None`` when no API token is configured or the call
+    fails — callers must degrade gracefully to the bandwidth estimate.
+
+    The endpoint response is keyed by customer id, e.g.::
+
+        {"hl_813d27d6": {"custom": {"cost": 61.6, "gbs": 4.108, ...}}}
+    """
+    if not BRIGHTDATA_API_TOKEN:
+        return None
+
+    zone = zone or BRIGHTDATA_ZONE
+    try:
+        resp = requests.get(
+            'https://api.brightdata.com/zone/cost',
+            params={'zone': zone, 'from': from_date, 'to': to_date},
+            headers={'Authorization': f'Bearer {BRIGHTDATA_API_TOKEN}'},
+            timeout=25,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:  # network, auth, JSON — never break the run
+        print(f"⚠️  No se pudo obtener el coste real de BrightData: {exc}")
+        return None
+
+    # Unwrap the single customer entry → its 'custom' range bucket.
+    customer = next(iter(payload.values()), {}) if isinstance(payload, dict) else {}
+    bucket = customer.get('custom', {}) if isinstance(customer, dict) else {}
+    return {
+        'cost_usd': round(float(bucket.get('cost', 0.0)), 4),
+        'gb': round(float(bucket.get('gbs', 0.0)), 4),
+        'from': from_date,
+        'to': to_date,
+        'zone': zone,
     }
 
 
@@ -1718,6 +1778,19 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     cost_data = get_brightdata_cost_estimate()
     end_time = datetime.now()
 
+    # Real cost from the BrightData billing API (month-to-date), when an
+    # API token is configured. Reported alongside the estimate so the
+    # daily email reflects true spend, not the bandwidth approximation.
+    _mtd_from = end_time.replace(day=1).strftime('%Y-%m-%d')
+    _today = end_time.strftime('%Y-%m-%d')
+    real_mtd = fetch_brightdata_real_cost(_mtd_from, _today)
+    if real_mtd:
+        cost_data['real_cost_mtd_usd'] = real_mtd['cost_usd']
+        cost_data['real_gb_mtd'] = real_mtd['gb']
+        cost_data['real_cost_from'] = real_mtd['from']
+        print(f"\n💳 Coste real BrightData (mes en curso, {real_mtd['from']} → {_today}): "
+              f"${real_mtd['cost_usd']:.2f} USD · {real_mtd['gb']:.2f} GB")
+
     # Log execution to database
     log_scraping_execution(
         start_time=start_time,
@@ -1818,6 +1891,12 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
         if unlocker_req > 0:
             print(f"║  {'Coste web unlocker:':<30} {'$' + f'{unl_cost:.4f}':>10} USD         ║")
         print(f"║  {'Coste total (estimado):':<30} {'$' + f'{cost_usd:.4f}':>10} USD         ║")
+        real_mtd_usd = cost_data.get('real_cost_mtd_usd')
+        if real_mtd_usd is not None:
+            real_gb = cost_data.get('real_gb_mtd', 0)
+            print("╠" + "─" * 62 + "╣")
+            print(f"║  {'💳 Coste REAL (mes en curso):':<29} {'$' + f'{real_mtd_usd:.2f}':>10} USD         ║")
+            print(f"║  {'   Tráfico real (mes):':<30} {f'{real_gb:.2f} GB':>10}              ║")
         if savings_usd > 0:
             print(f"║  {'Ahorro vs solo unlocker:':<30} {'$' + f'{savings_usd:.4f}':>10} USD ({savings_pct:.0f}%)  ║")
         if total_listings > 0:
@@ -2135,6 +2214,16 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
             health_icon = "🔴"
             health_text = "Bajo — revisar"
 
+        # Cost cell: prefer the real month-to-date spend from the billing
+        # API, falling back to the per-run bandwidth estimate.
+        real_mtd_usd = cost_data.get('real_cost_mtd_usd')
+        if real_mtd_usd is not None:
+            cost_label = "Coste real (mes):"
+            cost_value = f"${real_mtd_usd:,.2f}"
+        else:
+            cost_label = "Coste proxy (est.):"
+            cost_value = f"${cost_data.get('estimated_cost_usd', 0):.4f}"
+
         # Build HTML email
         html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"></head>
@@ -2184,8 +2273,8 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
         <td style="padding: 8px 12px; font-size: 13px; font-weight: 600; color: {'#dc2626' if errors_count > 0 else '#16a34a'};">{errors_count}</td>
       </tr>
       <tr>
-        <td style="padding: 8px 12px; font-size: 13px; color: #666;">Coste proxy:</td>
-        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">${cost_data.get('estimated_cost_usd', 0):.4f}</td>
+        <td style="padding: 8px 12px; font-size: 13px; color: #666;">{cost_label}</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">{cost_value}</td>
         <td style="padding: 8px 12px; font-size: 13px; color: #666;">Requests:</td>
         <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">{cost_data.get('total_requests', 0):,}</td>
         <td style="padding: 8px 12px; font-size: 13px; color: #666;">Discrepancia:</td>
