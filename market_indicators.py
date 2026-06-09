@@ -1483,14 +1483,12 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
                 """
                 SELECT
                     COUNT(DISTINCT ph.listing_id)                          AS listings_with_drop,
-                    AVG(CAST(ph.price_change AS REAL)
-                        / CAST(ph.new_price - ph.price_change AS REAL)
-                        * 100)                                              AS avg_drop_pct
+                    AVG(ph.change_percent)                                 AS avg_drop_pct
                 FROM price_history ph
                 INNER JOIN listings l ON l.listing_id = ph.listing_id
                 WHERE l.status = 'active'
-                  AND ph.price_change < 0
-                  AND ph.date >= """ + date_offset_days('?') + """
+                  AND ph.change_amount < 0
+                  AND ph.date_recorded >= """ + date_offset_days('?') + """
                 """,
                 (f"-{window_days}",),
             )
@@ -1512,9 +1510,9 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
                 FROM price_history ph
                 INNER JOIN listings l ON l.listing_id = ph.listing_id
                 WHERE l.status = 'active'
-                  AND ph.price_change < 0
-                  AND ph.date >= """ + date_offset_days('?') + """
-                  AND ph.date <  """ + date_offset_days('?') + """
+                  AND ph.change_amount < 0
+                  AND ph.date_recorded >= """ + date_offset_days('?') + """
+                  AND ph.date_recorded <  """ + date_offset_days('?') + """
                 """,
                 (f"-{window_days * 2}", f"-{window_days}"),
             )
