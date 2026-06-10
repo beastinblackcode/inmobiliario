@@ -10,7 +10,13 @@ from typing import List, Dict, Optional, Set
 from contextlib import contextmanager
 from pathlib import Path
 
-from db.connection import get_db, set_database_path, close_db
+# ``get_connection`` is the canonical pool-aware context manager defined in
+# db.connection: it returns the pooled Postgres connection on outermost
+# scope exit so Streamlit session threads don't leak pool slots.  Re-exported
+# here because most call sites do ``from database import get_connection``.
+from db.connection import (
+    get_db, set_database_path, close_db, get_connection,
+)
 
 
 DATABASE_PATH = "real_estate.db"
@@ -71,26 +77,11 @@ def download_database_from_cloud():
     return True
 
 
-@contextmanager
-def get_connection():
-    """
-    Context manager for database connections.
-
-    Uses a thread-local singleton (see db/connection.py) so that PRAGMAs
-    are executed only once per thread and the connection is reused across
-    all calls within the same Streamlit session or scraper run.
-
-    The connection is **not** closed on exit — it stays alive for the
-    thread's lifetime and is reused on the next call.
-    """
-    conn = get_db()
-    try:
-        yield conn
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        raise e
-    # NOTE: no conn.close() — the singleton keeps the connection alive
+# NOTE: ``get_connection`` is imported from db.connection (see top of file).
+# It is the single pool-aware context manager shared by every call site,
+# whether imported from ``database`` or ``db.connection`` — a single
+# thread-local depth counter there guarantees nested scopes release the
+# pooled connection exactly once, at the outermost exit.
 
 
 def init_database():

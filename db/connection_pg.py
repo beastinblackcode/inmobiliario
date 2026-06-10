@@ -127,8 +127,17 @@ if NumericBinaryLoader is not None:
 # All three are env-overridable for tuning in production without a
 # code change.
 _DEFAULT_MIN_SIZE = int(os.environ.get("PG_POOL_MIN", "0"))
-_DEFAULT_MAX_SIZE = int(os.environ.get("PG_POOL_MAX", "5"))
+# Bumped 5 → 10: with connections now returned to the pool on every
+# get_connection() scope exit (see db/connection.release_db), 10 gives
+# ample headroom for concurrent Streamlit sessions/fragments without
+# approaching Neon's connection ceiling.
+_DEFAULT_MAX_SIZE = int(os.environ.get("PG_POOL_MAX", "10"))
 _DEFAULT_TIMEOUT  = float(os.environ.get("PG_POOL_TIMEOUT", "60"))
+# Recycle hygiene: drop idle conns after 5 min (lets Neon auto-suspend),
+# and hard-recycle any conn older than 30 min so we never reuse a stale
+# socket the server has silently dropped.
+_DEFAULT_MAX_IDLE     = float(os.environ.get("PG_POOL_MAX_IDLE", "300"))
+_DEFAULT_MAX_LIFETIME = float(os.environ.get("PG_POOL_MAX_LIFETIME", "1800"))
 
 _pool_lock = threading.Lock()
 _pool: Optional[ConnectionPool] = None
@@ -253,6 +262,8 @@ def get_pool() -> ConnectionPool:
             min_size=_DEFAULT_MIN_SIZE,
             max_size=_DEFAULT_MAX_SIZE,
             timeout=_DEFAULT_TIMEOUT,
+            max_idle=_DEFAULT_MAX_IDLE,
+            max_lifetime=_DEFAULT_MAX_LIFETIME,
             kwargs={"row_factory": dict_row, "autocommit": False},
             open=False,
         )

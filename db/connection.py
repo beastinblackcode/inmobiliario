@@ -352,14 +352,47 @@ def close_db() -> None:
         _close_sqlite_db()
 
 
+def release_db() -> None:
+    """Return the thread-local Postgres connection to the pool.
+
+    Called at the end of the outermost ``get_connection`` scope so pooled
+    connections don't leak when a Streamlit session thread ends.  Unlike
+    ``close_db``/``_close_pg_db`` (which forcibly *closes* the raw conn to
+    discard a possibly-broken one), this returns a healthy, just-committed
+    connection so the pool can reuse it — no reconnection overhead.
+
+    No-op on SQLite: the file-based connection is intentionally kept
+    thread-local and reused across calls.
+    """
+    if _active_backend() != "postgres":
+        return
+    conn: Optional[_PgConnection] = getattr(_local, "conn", None)
+    if isinstance(conn, _PgConnection):
+        try:
+            from db.connection_pg import get_pool
+            # putconn rolls back any leftover tx and returns the slot.
+            get_pool().putconn(conn._raw)
+        except Exception:
+            # Pool unreachable — close the raw conn so it isn't leaked.
+            try:
+                conn._raw.close()
+            except Exception:
+                pass
+        finally:
+            _local.conn = None
+
+
 @contextmanager
 def get_connection() -> Iterator[Any]:
     """Context manager around the thread-local connection.
 
-    Commits on clean exit, rolls back on exception. Mirrors the
-    pre-Phase-B behaviour exactly so the database.py call sites need
-    no edits.
+    Commits on clean exit, rolls back on exception.  On Postgres the
+    connection is returned to the pool when the **outermost** scope exits
+    (re-entrancy tracked via a thread-local depth counter) so long-lived
+    Streamlit threads don't exhaust the pool.  No-op release on SQLite.
     """
+    depth = getattr(_local, "scope_depth", 0)
+    _local.scope_depth = depth + 1
     conn = get_db()
     try:
         yield conn
@@ -367,3 +400,7 @@ def get_connection() -> Iterator[Any]:
     except Exception:
         conn.rollback()
         raise
+    finally:
+        _local.scope_depth -= 1
+        if _local.scope_depth == 0:
+            release_db()
