@@ -1948,7 +1948,8 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     # 📊  SCRAPING QUALITY REPORT EMAIL
     # -------------------------------------------------------------------------
     _send_scraping_quality_email(coverage_data, total_listings, total_new, total_updated,
-                                  len(retry_errors), cost_data, start_time, end_time)
+                                  len(retry_errors), cost_data, start_time, end_time,
+                                  scrape_mode=resolved_mode)
 
 
 # ============================================================================
@@ -2170,10 +2171,17 @@ def _send_email_report():
 def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
                                   total_new: int, total_updated: int,
                                   errors_count: int, cost_data: dict,
-                                  start_time, end_time):
+                                  start_time, end_time, scrape_mode: str = 'full'):
     """
     Send a scraping quality report email with per-district coverage data.
     Shows: detected by Idealista vs actually scraped, per barrio and district.
+
+    ``scrape_mode`` ('lite'|'full'): lite runs only fetch page 1 (newest)
+    per barrio and never measure the "announced by Idealista" total, so the
+    coverage % is meaningless (always 0). In lite mode the email drops the
+    coverage/discrepancy framing — which otherwise fires a false
+    "🔴 0% — Bajo, revisar" alarm on every non-Sunday run — and reports a
+    scrape summary (new/updated/errors) instead.
     """
     try:
         from email_report import send_report
@@ -2203,16 +2211,41 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
         duration = (end_time - start_time).total_seconds()
         mins, secs = divmod(int(duration), 60)
 
-        # Determine overall health
-        if coverage_pct >= 90:
-            health_icon = "🟢"
-            health_text = "Excelente"
-        elif coverage_pct >= 70:
-            health_icon = "🟡"
-            health_text = "Aceptable"
+        is_lite = (scrape_mode or 'full').lower() == 'lite'
+
+        # Determine overall health + the mode-dependent display strings for
+        # the "Idealista anuncia", "Cobertura" and "Discrepancia" cells.
+        if is_lite:
+            # Coverage isn't measured in lite mode — judge health by errors
+            # and whether anything was scraped, never by the bogus 0%.
+            if total_scraped_sum == 0:
+                health_icon, health_text = "🔴", "Sin datos — revisar"
+            elif errors_count > 0:
+                health_icon, health_text = "🟡", f"{errors_count} errores"
+            else:
+                health_icon, health_text = "🟢", "OK (lite)"
+            mode_caption = "Modo lite — cobertura solo se mide en el barrido completo (domingos)"
+            idealista_display = "—"
+            coverage_display = "n/a"
+            coverage_color = "#7c3aed"
+            coverage_bg = "#faf5ff"
+            discrepancy_display = "—"
+            discrepancy_color = "#666"
         else:
-            health_icon = "🔴"
-            health_text = "Bajo — revisar"
+            if coverage_pct >= 90:
+                health_icon, health_text = "🟢", "Excelente"
+            elif coverage_pct >= 70:
+                health_icon, health_text = "🟡", "Aceptable"
+            else:
+                health_icon, health_text = "🔴", "Bajo — revisar"
+            mode_caption = "Barrido completo"
+            idealista_display = f"{total_idealista:,}"
+            coverage_display = f"{coverage_pct:.1f}%"
+            coverage_color = "#16a34a" if coverage_pct >= 90 else "#d97706" if coverage_pct >= 70 else "#dc2626"
+            coverage_bg = "#f0fff4" if coverage_pct >= 90 else "#fffbeb" if coverage_pct >= 70 else "#fef2f2"
+            _diff = total_idealista - total_scraped_sum
+            discrepancy_display = f"{_diff:,} pisos"
+            discrepancy_color = "#dc2626" if _diff > 500 else "#d97706"
 
         # Cost cell: prefer the real month-to-date spend from the billing
         # API, falling back to the per-run bandwidth estimate.
@@ -2233,7 +2266,7 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
   <!-- Header -->
   <div style="background: linear-gradient(135deg, #1a1a2e, #16213e); color: #fff; padding: 24px 30px;">
     <h1 style="margin: 0; font-size: 22px;">{health_icon} Informe de calidad — Scraping diario</h1>
-    <p style="margin: 8px 0 0; opacity: 0.8; font-size: 14px;">{start_time.strftime('%d/%m/%Y %H:%M')} — Duración: {mins}m {secs}s</p>
+    <p style="margin: 8px 0 0; opacity: 0.8; font-size: 14px;">{start_time.strftime('%d/%m/%Y %H:%M')} — Duración: {mins}m {secs}s · {mode_caption}</p>
   </div>
 
   <!-- KPIs -->
@@ -2241,7 +2274,7 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
     <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
       <tr>
         <td style="text-align: center; padding: 12px; background: #f0f4ff; border-radius: 8px; width: 25%;">
-          <div style="font-size: 24px; font-weight: 700; color: #1a1a2e;">{total_idealista:,}</div>
+          <div style="font-size: 24px; font-weight: 700; color: #1a1a2e;">{idealista_display}</div>
           <div style="font-size: 12px; color: #666; margin-top: 4px;">Idealista anuncia</div>
         </td>
         <td style="width: 8px;"></td>
@@ -2250,8 +2283,8 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
           <div style="font-size: 12px; color: #666; margin-top: 4px;">Scrapeados</div>
         </td>
         <td style="width: 8px;"></td>
-        <td style="text-align: center; padding: 12px; background: {'#f0fff4' if coverage_pct >= 90 else '#fffbeb' if coverage_pct >= 70 else '#fef2f2'}; border-radius: 8px; width: 25%;">
-          <div style="font-size: 24px; font-weight: 700; color: {'#16a34a' if coverage_pct >= 90 else '#d97706' if coverage_pct >= 70 else '#dc2626'};">{coverage_pct:.1f}%</div>
+        <td style="text-align: center; padding: 12px; background: {coverage_bg}; border-radius: 8px; width: 25%;">
+          <div style="font-size: 24px; font-weight: 700; color: {coverage_color};">{coverage_display}</div>
           <div style="font-size: 12px; color: #666; margin-top: 4px;">Cobertura</div>
         </td>
         <td style="width: 8px;"></td>
@@ -2278,10 +2311,39 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
         <td style="padding: 8px 12px; font-size: 13px; color: #666;">Requests:</td>
         <td style="padding: 8px 12px; font-size: 13px; font-weight: 600;">{cost_data.get('total_requests', 0):,}</td>
         <td style="padding: 8px 12px; font-size: 13px; color: #666;">Discrepancia:</td>
-        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600; color: {'#dc2626' if (total_idealista - total_scraped_sum) > 500 else '#d97706'};">{total_idealista - total_scraped_sum:,} pisos</td>
+        <td style="padding: 8px 12px; font-size: 13px; font-weight: 600; color: {discrepancy_color};">{discrepancy_display}</td>
       </tr>
-    </table>
+    </table>"""
 
+        # District table.  In lite mode the coverage/discrepancy columns are
+        # meaningless (no Idealista total measured), so show scraped-only.
+        if is_lite:
+            html += f"""
+    <h2 style="font-size: 16px; margin: 0 0 12px; color: #1a1a2e;">Scrapeados por distrito</h2>
+    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+      <thead>
+        <tr style="background: #f8fafc;">
+          <th style="text-align: left; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Distrito</th>
+          <th style="text-align: right; padding: 10px 8px; border-bottom: 2px solid #e2e8f0; color: #475569;">Scrapeados</th>
+        </tr>
+      </thead>
+      <tbody>"""
+            for distrito in sorted(district_agg.keys()):
+                d = district_agg[distrito]
+                html += f"""
+        <tr>
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; font-weight: 600;">{distrito}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right;">{d['scraped']:,}</td>
+        </tr>"""
+            html += f"""
+        <tr style="background: #f1f5f9; font-weight: 700;">
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1;">TOTAL MADRID</td>
+          <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1; text-align: right;">{total_scraped_sum:,}</td>
+        </tr>
+      </tbody>
+    </table>"""
+        else:
+            html += """
     <!-- District table -->
     <h2 style="font-size: 16px; margin: 0 0 12px; color: #1a1a2e;">Cobertura por distrito</h2>
     <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
@@ -2296,23 +2358,23 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
       </thead>
       <tbody>"""
 
-        # Sort districts by name
-        for distrito in sorted(district_agg.keys()):
-            d = district_agg[distrito]
-            d_pct = (d["scraped"] / d["idealista"] * 100) if d["idealista"] > 0 else 0
-            d_diff = d["idealista"] - d["scraped"]
+            # Sort districts by name
+            for distrito in sorted(district_agg.keys()):
+                d = district_agg[distrito]
+                d_pct = (d["scraped"] / d["idealista"] * 100) if d["idealista"] > 0 else 0
+                d_diff = d["idealista"] - d["scraped"]
 
-            if d_pct >= 90:
-                pct_color = "#16a34a"
-                row_bg = "#f0fff4"
-            elif d_pct >= 70:
-                pct_color = "#d97706"
-                row_bg = "#fffbeb"
-            else:
-                pct_color = "#dc2626"
-                row_bg = "#fef2f2"
+                if d_pct >= 90:
+                    pct_color = "#16a34a"
+                    row_bg = "#f0fff4"
+                elif d_pct >= 70:
+                    pct_color = "#d97706"
+                    row_bg = "#fffbeb"
+                else:
+                    pct_color = "#dc2626"
+                    row_bg = "#fef2f2"
 
-            html += f"""
+                html += f"""
         <tr style="background: {row_bg};">
           <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; font-weight: 600;">{distrito}</td>
           <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right;">{d['idealista']:,}</td>
@@ -2321,8 +2383,8 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
           <td style="padding: 8px; border-bottom: 1px solid #f1f5f9; text-align: right; color: {'#dc2626' if d_diff > 50 else '#666'};">{d_diff:+,}</td>
         </tr>"""
 
-        # Total row
-        html += f"""
+            # Total row
+            html += f"""
         <tr style="background: #f1f5f9; font-weight: 700;">
           <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1;">TOTAL MADRID</td>
           <td style="padding: 10px 8px; border-top: 2px solid #cbd5e1; text-align: right;">{total_idealista:,}</td>
@@ -2374,7 +2436,12 @@ def _send_scraping_quality_email(coverage_data: dict, total_scraped: int,
 </div>
 </body></html>"""
 
-        subject = f"{health_icon} Scraping {start_time.strftime('%d/%m')}: {coverage_pct:.0f}% cobertura — {total_scraped_sum:,}/{total_idealista:,} pisos"
+        if is_lite:
+            subject = (f"{health_icon} Scraping {start_time.strftime('%d/%m')} (lite): "
+                       f"{total_new:,} nuevos, {total_updated:,} act., {errors_count} err")
+        else:
+            subject = (f"{health_icon} Scraping {start_time.strftime('%d/%m')}: "
+                       f"{coverage_pct:.0f}% cobertura — {total_scraped_sum:,}/{total_idealista:,} pisos")
         send_report(html, subject)
 
     except Exception as exc:
