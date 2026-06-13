@@ -17,6 +17,9 @@ from pathlib import Path
 from db.connection import (
     get_db, set_database_path, close_db, get_connection,
 )
+# Backend-agnostic date coercion: Postgres returns date/datetime objects
+# where SQLite returned ISO strings, so datetime.strptime(...) crashes.
+from db.dialect import as_datetime
 
 
 DATABASE_PATH = "real_estate.db"
@@ -1649,8 +1652,8 @@ def get_recent_price_drops(days: int = 7, min_drop_percent: float = 5.0) -> List
             # Calculate old price
             record['old_price'] = record['new_price'] - record['change_amount']
             # Calculate days since change
-            change_date = datetime.strptime(record['date_recorded'], '%Y-%m-%d')
-            record['days_since_change'] = (datetime.now() - change_date).days
+            change_date = as_datetime(record['date_recorded'])
+            record['days_since_change'] = (datetime.now() - change_date).days if change_date else None
             results.append(record)
         
         return results
@@ -1683,9 +1686,9 @@ def get_property_price_stats(listing_id: str) -> Optional[Dict]:
     
     # Calculate average days between changes
     if num_changes > 0:
-        first_date = datetime.strptime(history[0]['date_recorded'], '%Y-%m-%d')
-        last_date = datetime.strptime(history[-1]['date_recorded'], '%Y-%m-%d')
-        total_days = (last_date - first_date).days
+        first_date = as_datetime(history[0]['date_recorded'])
+        last_date = as_datetime(history[-1]['date_recorded'])
+        total_days = (last_date - first_date).days if first_date and last_date else 0
         avg_days_between = total_days / num_changes if num_changes > 0 else 0
     else:
         avg_days_between = 0

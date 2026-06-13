@@ -5,9 +5,12 @@ Calculates market health metrics from scraped property data.
 
 import sqlite3
 import statistics
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional, Tuple
 from database import get_connection
+# Canonical, backend-agnostic date coercion (handles SQLite str vs Postgres
+# date/datetime). Aliased to keep the existing _as_datetime call sites.
+from db.dialect import as_datetime as _as_datetime
 
 
 # ============================================================================
@@ -197,11 +200,8 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
             # Guard 2: time-based — if the most recent week started less than 7
             # days ago it is still open (scraping may still add listings), so
             # treat it as incomplete regardless of the count.
-            try:
-                latest_start = datetime.strptime(latest["week_start"], "%Y-%m-%d")
-                open_week = (datetime.utcnow() - latest_start).days < 7
-            except Exception:
-                open_week = False
+            latest_start = _as_datetime(latest["week_start"])
+            open_week = bool(latest_start) and (datetime.utcnow() - latest_start).days < 7
 
             incomplete_week = count_incomplete or open_week
 
@@ -488,11 +488,9 @@ def _weekly_anchors(cursor, weeks: int) -> list:
     all_dates = [r[0] for r in cursor.fetchall()]
     sampled: list = []
     for d in all_dates:
-        try:
-            if datetime.strptime(d, "%Y-%m-%d").weekday() == 0:  # Monday
-                sampled.append(d)
-        except (ValueError, TypeError):
-            continue
+        dt = _as_datetime(d)
+        if dt is not None and dt.weekday() == 0:  # Monday
+            sampled.append(d)
     if all_dates and (not sampled or sampled[-1] != all_dates[-1]):
         sampled.append(all_dates[-1])
     return sampled[-weeks:]
@@ -543,14 +541,15 @@ def get_absorption_rate(window_days: int = 30, weeks: int = 8) -> Dict:
             active = cursor.fetchone()[0]
 
             # Sold during window [week_end - LAG - N, week_end - LAG]
-            cursor.execute("""
+            from db.dialect import date_plus_days
+            cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
-                  AND last_seen_date >= date(?, ?)
-                  AND last_seen_date <  date(?, ?)
+                  AND last_seen_date >= {date_plus_days('?', '?')}
+                  AND last_seen_date <  {date_plus_days('?', '?')}
             """, (
-                week_end, f"-{_STALE_LAG_DAYS + window_days} days",
-                week_end, f"-{_STALE_LAG_DAYS} days",
+                week_end, f"-{_STALE_LAG_DAYS + window_days}",
+                week_end, f"-{_STALE_LAG_DAYS}",
             ))
             sold = cursor.fetchone()[0]
 
@@ -633,14 +632,15 @@ def get_months_of_supply(lookback_months: int = 3, weeks: int = 8) -> Dict:
             """, (week_end, week_end))
             active = cursor.fetchone()[0]
 
-            cursor.execute("""
+            from db.dialect import date_plus_days
+            cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
-                  AND last_seen_date >= date(?, ?)
-                  AND last_seen_date <  date(?, ?)
+                  AND last_seen_date >= {date_plus_days('?', '?')}
+                  AND last_seen_date <  {date_plus_days('?', '?')}
             """, (
-                week_end, f"-{_STALE_LAG_DAYS + window_days} days",
-                week_end, f"-{_STALE_LAG_DAYS} days",
+                week_end, f"-{_STALE_LAG_DAYS + window_days}",
+                week_end, f"-{_STALE_LAG_DAYS}",
             ))
             sold = cursor.fetchone()[0]
 
@@ -711,12 +711,9 @@ def get_inventory_evolution(weeks: int = 8) -> Dict:
         # Sample weekly (Mondays + last date)
         sampled = []
         for d in all_dates:
-            try:
-                dt = datetime.strptime(d, '%Y-%m-%d')
-                if dt.weekday() == 0:  # Monday
-                    sampled.append(d)
-            except:
-                pass
+            dt = _as_datetime(d)
+            if dt is not None and dt.weekday() == 0:  # Monday
+                sampled.append(d)
         
         # Always include last date
         if all_dates and (not sampled or sampled[-1] != all_dates[-1]):
@@ -800,10 +797,8 @@ def get_rotation_rate(weeks: int = 4) -> Dict:
         if not row or not row[0]:
             return result
 
-        anchor_str = row[0]
-        try:
-            anchor = datetime.strptime(anchor_str, '%Y-%m-%d')
-        except ValueError:
+        anchor = _as_datetime(row[0])
+        if anchor is None:
             return result
 
         # Build rolling 1-week buckets going back `weeks` weeks
@@ -1082,7 +1077,7 @@ def get_rent_burden() -> Dict:
         cur = conn.cursor()
         cur.execute("""
             SELECT distrito,
-                   ROUND(AVG(median_rent), 0) AS district_rent,
+                   ROUND(CAST(AVG(median_rent) AS NUMERIC), 0) AS district_rent,
                    COUNT(*) AS barrios
             FROM rental_prices
             WHERE date_recorded = ?

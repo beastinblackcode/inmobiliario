@@ -40,7 +40,31 @@ wrapper in ``db.connection`` rewrites them to ``%s`` for psycopg.
 from __future__ import annotations
 
 import os
-from typing import Tuple
+from datetime import datetime, date
+from typing import Optional, Tuple
+
+
+def as_datetime(value) -> Optional[datetime]:
+    """Coerce a DB date value into a ``datetime`` regardless of backend.
+
+    SQLite returns date columns as ISO strings (``'2026-06-13'``) while
+    Postgres returns ``datetime.date`` / ``datetime`` objects.  Code that
+    blindly called ``datetime.strptime(value, '%Y-%m-%d')`` therefore
+    crashed (``TypeError``) or silently dropped every row after the
+    Postgres cutover.  Returns ``None`` when missing/unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    if isinstance(value, str):
+        try:
+            return datetime.strptime(value, '%Y-%m-%d')
+        except ValueError:
+            return None
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────
