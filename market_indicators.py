@@ -179,6 +179,25 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
                 if pt["count"] <= median_count * 3
             ]
 
+        # ── Guard: keep only the trailing run of CONTIGUOUS weeks ───────
+        # The Feb→May scraping outage (Postgres migration) leaves a hole in
+        # the series. Averaging a pre-gap week into the baseline produced a
+        # bogus trend (current Jun week vs a baseline that mixed a Feb week
+        # with May weeks → fake +11.7%). Restrict trend math (and the chart
+        # line, which would otherwise jump across the gap) to consecutive
+        # weeks — each within ~10 days of the next — ending at the latest.
+        if len(result["series"]) >= 2:
+            contiguous = [result["series"][-1]]
+            for pt in reversed(result["series"][:-1]):
+                kept_start = _as_datetime(contiguous[-1]["week_start"])
+                this_start = _as_datetime(pt["week_start"])
+                if kept_start and this_start and (kept_start - this_start).days <= 10:
+                    contiguous.append(pt)
+                else:
+                    break  # gap detected — stop; drop everything before it
+            contiguous.reverse()
+            result["series"] = contiguous
+
         if len(result["series"]) >= 2:
             # Guard: if the most recent week has < 40% of the average count
             # of the previous weeks, treat it as an incomplete scrape and
@@ -326,6 +345,20 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
                 pt for pt in result["series"]
                 if pt["sold_count"] <= med_sold * 3
             ]
+
+        # Keep only the trailing run of CONTIGUOUS weeks so the Feb→May
+        # scraping gap doesn't poison the current-vs-previous comparison.
+        if len(result["series"]) >= 2:
+            contiguous = [result["series"][-1]]
+            for pt in reversed(result["series"][:-1]):
+                kept_start = _as_datetime(contiguous[-1]["week_start"])
+                this_start = _as_datetime(pt["week_start"])
+                if kept_start and this_start and (kept_start - this_start).days <= 10:
+                    contiguous.append(pt)
+                else:
+                    break
+            contiguous.reverse()
+            result["series"] = contiguous
 
         if len(result["series"]) >= 2:
             avg_prev_count = statistics.mean(
