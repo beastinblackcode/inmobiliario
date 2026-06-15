@@ -2946,8 +2946,8 @@ def get_price_drop_stats() -> Dict:
                     l.distrito,
                     COUNT(DISTINCT l.listing_id)              AS total,
                     COUNT(DISTINCT ph.listing_id)             AS with_drops,
-                    ROUND(AVG(ph.change_percent), 2)          AS avg_drop_pct,
-                    ROUND(MIN(ph.change_percent), 2)          AS max_drop_pct,
+                    ROUND(CAST(AVG(ph.change_percent) AS DECIMAL), 2) AS avg_drop_pct,
+                    ROUND(CAST(MIN(ph.change_percent) AS DECIMAL), 2) AS max_drop_pct,
                     ROUND(
                         100.0 * COUNT(DISTINCT ph.listing_id)
                         / NULLIF(COUNT(DISTINCT l.listing_id), 0)
@@ -2956,8 +2956,8 @@ def get_price_drop_stats() -> Dict:
                 LEFT JOIN price_history ph
                     ON ph.listing_id = l.listing_id AND ph.change_amount < 0
                 WHERE l.status = 'active'
-                GROUP BY l.barrio
-                HAVING total >= 5
+                GROUP BY l.barrio, l.distrito
+                HAVING COUNT(DISTINCT l.listing_id) >= 5
                 ORDER BY drop_rate_pct DESC
             """)
             by_barrio = [dict(r) for r in cur.fetchall()]
@@ -3040,7 +3040,7 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
                     {iso_week('first_seen_date')}             AS week,
                     {week_start_expr('first_seen_date')}      AS week_start,
                     distrito,
-                    ROUND(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)), 0) AS avg_sqm,
+                    ROUND(CAST(AVG(CAST(price AS FLOAT) / NULLIF(size_sqm, 0)) AS DECIMAL), 0) AS avg_sqm,
                     COUNT(*) AS n_listings
                 FROM listings
                 WHERE size_sqm > 20
