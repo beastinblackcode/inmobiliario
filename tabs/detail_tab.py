@@ -1353,7 +1353,6 @@ def render_detail_tab() -> None:
         )
 
         # ── Comparison table ────────────────────────────────────────────
-        import pandas as pd
         df_comps = pd.DataFrame([
             {
                 "ID":         c["listing_id"],
