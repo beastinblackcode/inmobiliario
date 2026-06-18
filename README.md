@@ -2,9 +2,9 @@
 
 Pipeline de scraping, análisis y visualización del mercado inmobiliario de Madrid (idealista.com).
 
-- **Scraper**: 139 barrios via Bright Data Web Unlocker, ejecutado en GitHub Actions cada 3 días.
-- **BD**: SQLite (~19 MB) sincronizada con Google Drive entre runs.
-- **Dashboard interno** (Streamlit): análisis avanzado, vigilancia macro, oportunidades, alertas, modelo predictivo.
+- **Scraper**: barrios de Madrid vía **Bright Data Web Unlocker** (primario) con **Oxylabs** como fallback dormido. Ejecutado en GitHub Actions con cadencia diaria y modo `lite` (newest-first + early-stop) entre semana.
+- **BD**: **Neon Postgres** con pool de conexiones (`db/connection_pg.py`). Scraper y dashboard apuntan directos a la misma BD — sin sync vía Google Drive (retirado tras la migración a Postgres, mayo 2026).
+- **Dashboard interno** (Streamlit): análisis avanzado, vigilancia macro, oportunidades, alertas, modelo predictivo. Auth multi-usuario con bcrypt.
 - **Dashboard público** (Next.js → [madridhome.tech](https://madridhome.tech)): métricas agregadas con ISR, alimentado desde `metrics.json` regenerado por CI.
 
 ## Arranque rápido
@@ -24,7 +24,16 @@ python scraper.py
 streamlit run app.py
 ```
 
-El dashboard arranca en `http://localhost:8501`. Si `real_estate.db` no existe, el sistema descarga la última versión desde Google Drive (requiere `GOOGLE_DRIVE_FILE_ID` en `.env` o `.streamlit/secrets.toml`).
+El dashboard arranca en `http://localhost:8501`. Apunta a Neon Postgres vía `DATABASE_URL` (env) o `st.secrets["postgres"]["url"]` (Streamlit Cloud); con `DB_BACKEND=postgres` para forzarlo. Sin esa config, el shim cae a SQLite local (`db/connection.py`) para desarrollo aislado.
+
+### Verificación de queries contra Postgres
+
+Tras tocar SQL conviene ejecutar el barrido que ejercita todas las funciones de lectura contra Neon y delata SQLite-isms residuales (ver `ROADMAP.md` → deuda de migración):
+
+```bash
+python verify_pg_queries.py            # sale 1 si alguna query falla
+python verify_pg_queries.py --verbose  # muestra el error capturado
+```
 
 ## Documentación
 
@@ -50,7 +59,7 @@ El dashboard arranca en `http://localhost:8501`. Si `real_estate.db` no existe, 
 
 `.github/workflows/mi_zona_alerts.yml` corre a diario a las 07:00 UTC y envía email con las propiedades nuevas en tus barrios que pasan el umbral de margen de oferta.
 
-Todos los workflows hablan directamente con la BD Postgres en Supabase (sin sincronización vía Google Drive — eso quedó atrás con la migración a Postgres en mayo 2026).
+Todos los workflows hablan directamente con la BD **Neon Postgres** vía `DATABASE_URL` (sin sincronización vía Google Drive — eso quedó atrás con la migración a Postgres en mayo 2026).
 
 ## Ética
 

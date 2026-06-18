@@ -1,6 +1,6 @@
 # Arquitectura del Sistema: Madrid Real Estate Tracker
 
-> **Última actualización:** abril 2026
+> **Última actualización:** junio 2026
 
 ## 📋 Índice
 
@@ -31,50 +31,41 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    USUARIO (Navegador)                       │
-└────────────────────────┬────────────────────────────────────┘
-                         │ HTTPS
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
-│              STREAMLIT CLOUD (Dashboard Web)                 │
-│                                                             │
-│  app.py ──► tabs/dashboard_tab.py                           │
-│         ├──► tabs/map_tab.py                                │
-│         ├──► tabs/prediction_tab.py                         │
-│         ├──► tabs/search_tab.py                             │
-│         ├──► tabs/admin_tab.py                              │
-│         └──► market_surveillance.py                         │
-│                      │                                      │
-│              database.py / data_utils.py                    │
-│                      │                                      │
-│           analytics.py · market_indicators.py               │
-│           macro_data.py · predictive_model.py               │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ Descarga DB al iniciar
-                       ▼
-             ┌─────────────────────┐
-             │   GOOGLE DRIVE      │
-             │  real_estate.db     │
-             │  (~16 MB SQLite)    │
-             └─────────────────────┘
-                       ▲
-                       │ Upload tras scraping
-┌──────────────────────┴──────────────────────────────────────┐
-│              MÁQUINA LOCAL (Scraping)                        │
-│                                                             │
-│   scraper.py ──► database.py ──► real_estate.db             │
-│   retry_scraper.py                                          │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-                       ▼
-             ┌─────────────────────┐      ┌─────────────────┐
-             │   BRIGHT DATA       │      │  BCE / INE      │
-             │  Web Unlocker Proxy │      │  (APIs macro)   │
-             └─────────────────────┘      └─────────────────┘
-                       │
-                       ▼
-             ┌─────────────────────┐
-             │   IDEALISTA.COM     │
-             └─────────────────────┘
+└───────────────┬─────────────────────────────┬───────────────┘
+                │ HTTPS                         │ HTTPS
+                ▼                               ▼
+┌──────────────────────────────┐   ┌──────────────────────────┐
+│  STREAMLIT CLOUD (interno)   │   │  VERCEL (público)        │
+│  app.py → st.navigation      │   │  market-thermometer/     │
+│   pages/ + tabs/             │   │  Next.js 14 · ISR        │
+│   database.py · analytics.py │   │  madridhome.tech         │
+│   market_indicators.py       │   │  ← metrics.json (CI)     │
+│   macro_data.py · predictive │   └──────────────────────────┘
+└──────────────┬───────────────┘
+               │ DATABASE_URL (psycopg pool)
+               ▼
+       ┌─────────────────────┐
+       │   NEON POSTGRES     │  ◄── scraper y CI escriben aquí
+       │   (serverless)      │      directamente (sin Google Drive)
+       └─────────────────────┘
+               ▲
+               │ upsert listings / price_history / scraping_log
+┌──────────────┴──────────────────────────────────────────────┐
+│        GITHUB ACTIONS (scraping + pipeline, diario)          │
+│   scraper.py → compute_snapshots.py → email → export metrics │
+│   retry_scraper.py · mi_zona_alerts.py                       │
+└──────────────┬───────────────────────────────────────────────┘
+               │
+               ▼
+   ┌─────────────────────┐   ┌─────────────────┐
+   │  BRIGHT DATA (1º)   │   │  BCE / INE      │
+   │  Oxylabs (fallback) │   │  (APIs macro)   │
+   └─────────────────────┘   └─────────────────┘
+               │
+               ▼
+   ┌─────────────────────┐
+   │   IDEALISTA.COM     │
+   └─────────────────────┘
 ```
 
 ---
@@ -83,12 +74,13 @@ Sistema de monitorización del mercado inmobiliario de Madrid que:
 
 ### Núcleo del Dashboard
 
-| Archivo | Líneas | Función |
+| Archivo | Líneas (aprox.) | Función |
 |---------|--------|---------|
-| `app.py` | 287 | Orquestador: auth, sidebar, carga de datos, routing de tabs |
-| `data_utils.py` | 43 | `load_data()` con `@st.cache_data` compartido entre tabs |
-| `database.py` | 1,209 | Toda la capa de acceso a datos (CRUD, stats, historial) |
-| `analytics.py` | 559 | Análisis avanzado: chollos, velocidad, evolución de propiedades |
+| `app.py` | ~170 | Orquestador fino: bootstrap de backend, auth, `st.navigation`, sidebar |
+| `data_utils.py` | ~40 | `load_data()` con `@st.cache_data` compartido entre páginas |
+| `database.py` | ~3,640 | God-module de acceso a datos (CRUD, stats, historial). Candidato a partir — ver `ROADMAP.md` |
+| `analytics.py` | ~560 | Análisis avanzado: chollos, velocidad, evolución de propiedades |
+| `db/connection_pg.py` · `db/dialect.py` | — | Pool Postgres + shim de dialecto SQLite/Postgres |
 
 ### Páginas del Dashboard (`pages/`)
 
@@ -122,9 +114,9 @@ Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son ta
 
 | Archivo | Líneas | Función |
 |---------|--------|---------|
-| `market_surveillance.py` | 894 | Página completa de vigilancia: semáforo, KPIs, alertas, diagnóstico |
-| `market_indicators.py` | 1,530 | Cálculo de todos los indicadores internos y score de mercado |
-| `macro_data.py` | 569 | Datos macroeconómicos: Euríbor (BCE), desempleo (INE) |
+| `market_surveillance.py` | ~890 | Render de vigilancia: semáforo, KPIs, alertas, diagnóstico |
+| `market_indicators.py` | ~2,440 | Cálculo de todos los indicadores internos y score de mercado (incl. absorption, months-of-supply, yield, notarial gap, lanzamientos, morosidad) |
+| `macro_data.py` | ~570 | Datos macroeconómicos: Euríbor (BCE), desempleo (INE) |
 
 ### Modelo Predictivo
 
@@ -137,7 +129,7 @@ Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son ta
 
 | Archivo | Función |
 |---------|---------|
-| `scraper.py` | Scraping principal de 139 barrios vía Bright Data Web Unlocker |
+| `scraper.py` | Scraping principal de los barrios de Madrid; Bright Data primario + Oxylabs fallback, modo `lite`, coste real vía billing API |
 | `retry_scraper.py` | Reintento de barrios fallidos |
 | `compute_snapshots.py` | Pre-cálculo de KPIs diarios → tabla `market_snapshots` |
 | `nlp_analyzer.py` | Extracción de señales NLP de descripciones (urgencia, directo, negociable) |
@@ -167,16 +159,16 @@ Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son ta
 | `validate_barrio_urls.py` | Valida URLs de barrios |
 | `inspect_html.py` | Inspección de HTML de Idealista |
 | `find_oldest.py` | Busca propiedades más antiguas en BD |
-| `test_description.py` | Tests del scraper |
-| `test_sold_logic.py` | Tests de la lógica de vendidos |
+| `verify_pg_queries.py` | **Barrido de queries contra Postgres**: ejercita todas las funciones de lectura y delata SQLite-isms residuales (excepciones + errores tragados). Sale 1 si algo falla. |
+| `tests/` | Suite pytest (~305 tests): unit, integration, regression |
 
 ### Archivos de Configuración
 
 | Archivo | Contenido |
 |---------|-----------|
-| `.env` | Credenciales Bright Data (local, no en git) |
+| `.env` | `DATABASE_URL` (Neon) + credenciales de proveedores (local/CI, no en git) |
 | `.env.example` | Plantilla de variables de entorno |
-| `.streamlit/secrets.toml` | Secrets de Streamlit Cloud (no en git) |
+| `.streamlit/secrets.toml` | Secrets de Streamlit Cloud: `[postgres].url` + `[auth.users_hashed]` (no en git) |
 | `.streamlit/config.toml` | Config del servidor Streamlit |
 | `requirements.txt` | Dependencias Python |
 | `.gitignore` | Archivos excluidos del repositorio |
@@ -208,21 +200,21 @@ Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son ta
 
 ## Componentes del Sistema
 
-### 1. Scraper (Ejecución Local)
+### 1. Scraper (GitHub Actions)
 
-**Archivo:** `scraper.py` (1,009 líneas)
+**Archivo:** `scraper.py` (~2,460 líneas)
 
 **Responsabilidades:**
-- Scraping de 184 barrios de Madrid
+- Scraping de los barrios de Madrid
 - Extracción de datos de propiedades
 - Detección de cambios (nuevas, actualizadas, vendidas)
-- Actualización de base de datos local
-- Registro de costes y duración por ejecución
+- Upsert directo a Neon Postgres
+- Registro de costes (real, vía billing API) y duración por ejecución y por proveedor
 
 **Tecnologías:**
 - Python 3.x + BeautifulSoup4 + Requests
-- Bright Data Web Unlocker (proxy anti-bot)
-- SQLite (base de datos local)
+- Bright Data Web Unlocker (primario) · Oxylabs (fallback dormido)
+- Neon Postgres vía `DATABASE_URL`
 
 **Datos extraídos por propiedad:**
 ```python
@@ -247,11 +239,23 @@ Lógica encapsulada llamada desde las páginas (legacy nombre `tabs/`, no son ta
 
 ---
 
-### 2. Base de Datos (SQLite)
+### 2. Base de Datos (Neon Postgres)
 
-**Archivo activo:** `real_estate.db` (~16 MB)
+**Producción:** Neon Postgres serverless, accedido vía `DATABASE_URL` con un
+pool de conexiones psycopg (`db/connection_pg.py`). El scraper, el CI y el
+dashboard escriben/leen **la misma BD** — desapareció el sync vía Google Drive.
 
-**Esquema completo:**
+**Compatibilidad SQLite (dev):** `db/connection.py` actúa de shim y cae a
+SQLite local si no hay `DATABASE_URL`/`DB_BACKEND=postgres`. `db/dialect.py`
+abstrae las diferencias de dialecto (`julianday_diff`, `iso_week`,
+`week_start`, `date_offset_days`, `as_datetime`, `current_date`, …).
+
+> ⚠️ **Deuda de migración:** quedan SQLite-isms residuales que rompen en
+> silencio sobre Postgres. Ejecuta `verify_pg_queries.py` tras tocar SQL —
+> barre todas las funciones de lectura contra Neon. Ver `ROADMAP.md` §1.
+
+**Esquema (forma SQLite original; en Postgres los tipos son nativos:
+`SERIAL`, `TIMESTAMP`, `BOOLEAN`, etc.):**
 
 ```sql
 -- Tabla principal de propiedades
@@ -321,59 +325,64 @@ El `app.py` solo gestiona: autenticación, sidebar con filtros, carga de datos v
 
 #### Estructura de navegación
 
+`app.py` usa `st.navigation` (Streamlit ≥1.36): solo la página seleccionada
+se ejecuta en cada run. Dos grupos en el sidebar:
+
 ```
-app.py
-├── Página: 🏠 Dashboard Principal
-│   ├── 📊 Dashboard     → tabs/dashboard_tab.py
-│   ├── 🗺️ Mapa          → tabs/map_tab.py
-│   ├── 🔮 Predicción    → tabs/prediction_tab.py
-│   ├── 🔍 Mis Búsquedas → tabs/search_tab.py
-│   └── ⚙️ Administración → tabs/admin_tab.py
-└── Página: 🛡️ Vigilancia del Mercado → market_surveillance.py
+app.py  →  st.navigation
+├── 🏠 Caza
+│   ├── 🎯 Mi Zona            → pages/mi_zona.py      (default)
+│   ├── 🏆 Oportunidades      → pages/oportunidades.py
+│   ├── 📉 Bajadas de Precio  → pages/bajadas.py
+│   ├── 🔍 Búsqueda           → pages/busqueda.py
+│   ├── 🔔 Mis Seguimientos   → pages/seguimientos.py
+│   └── 🔎 Detalle de Anuncio → pages/detalle.py
+└── ⚙️ Operaciones
+    ├── ⚙️ Administración      → pages/admin.py
+    └── 🛡️ Vigilancia          → pages/vigilancia.py
 ```
 
-#### Tab: 📊 Dashboard (`tabs/dashboard_tab.py`)
+Cada `pages/*.py` es una vista fina que delega el render al paquete `tabs/`
+(`mi_zona_tab`, `opportunities_tab`, `price_drops_tab`, `search_tab`,
+`watchlist_tab`, `detail_tab`, `admin_tab`, `alerts_tab`).
 
-- KPIs principales: precio mediano, €/m², activos, vendidos 30d
-- Evolución de bajadas de precio diarias
-- Top barrios por precio/m²
-- Distribución por tipo de vendedor (pie chart)
-- Precio por distrito (grouped bar)
-- Evolución del precio/m² semanal con filtros
-- Analytics avanzado: velocidad de venta, oportunidades, chollos
-- Tiempo en mercado por distrito
-- Zonas con bajadas de precio
-- Historial: bajadas, evolución de propiedades, vendedores desesperados
+#### 🎯 Mi Zona (`pages/mi_zona.py` → `mi_zona_tab`)
 
-#### Tab: 🗺️ Mapa (`tabs/map_tab.py`)
+- Criterios guardados por usuario (`.streamlit/userpref_*`): barrios, precio, m², etc.
+- Nuevas propiedades en tus barrios que pasan el umbral de margen de oferta
+- Mismo motor que el cron `mi_zona_alerts.py` (email diario)
 
-- Mapa Folium interactivo con marcadores coloreados por precio
-- Heat layer de intensidad de precios
-- Selector de límite de propiedades (100/500/1000/Todos)
-- Solo muestra propiedades activas con coordenadas disponibles
+#### 🏆 Oportunidades (`pages/oportunidades.py` → `opportunities_tab`)
 
-#### Tab: 🔮 Predicción (`tabs/prediction_tab.py`)
+- Top propiedades por score calidad-precio (combina precio/m² vs barrio + señales NLP)
+- Detección de vendedor desesperado / gangas vs distrito
 
-- Modelo Random Forest entrenado sobre propiedades activas
-- Inputs: distrito, barrio, m², habitaciones, planta, ascensor, exterior
-- Output: precio estimado + intervalo P10-P90 por percentiles de árboles
-- Métricas de rendimiento: R², MAE, RMSE, MAPE
-- Importancia de variables
-- Comparación con precio medio de la zona
+#### 📉 Bajadas de Precio (`pages/bajadas.py` → `price_drops_tab`)
 
-#### Tab: 🔍 Mis Búsquedas (`tabs/search_tab.py`)
+- Overview de reducciones, ranking por barrio, bajadas recientes, histograma de magnitud
+- Heatmap semanal €/m² por distrito
 
-- Búsqueda fija: activos 250k-450k€, ≥40m², con ascensor, sin bajos
-- Distritos: Centro, Chamberí, Retiro, Salamanca, Chamartín, etc.
-- Seguimiento de evolución de precios de los resultados
-- Tabla de bajadas de precio recientes
+#### 🔍 Búsqueda (`pages/busqueda.py` → `search_tab`)
 
-#### Tab: ⚙️ Administración (`tabs/admin_tab.py`)
+- Búsquedas personalizadas con guardado y seguimiento de evolución de precios
 
-- Actividad de scraping (30 días): daily bar chart con alertas de días bajos
-- Control de costes: coste por ejecución y duración (últimas 30 ejecuciones)
-- Propiedades nuevas por distrito y fecha (tabla pivote / lista detallada)
-- Buscador de propiedad por URL o ID con historial completo de precios
+#### 🔔 Mis Seguimientos (`pages/seguimientos.py` → `watchlist_tab` + `alerts_tab`)
+
+- Watchlist de propiedades + alertas del usuario
+
+#### 🔎 Detalle de Anuncio (`pages/detalle.py` → `detail_tab`)
+
+- Histórico de precios (gráfico + KPIs), sugerencia de oferta, **vista rica de comparables**
+- Modelo predictivo (RF) con intervalo por percentiles de árboles
+
+#### ⚙️ Administración (`pages/admin.py` → `admin_tab`)
+
+- Actividad de scraping, control de costes (coste real Bright Data), subsección **Proveedores**
+- Propiedades nuevas por distrito/fecha, buscador por URL/ID con historial, purga de stale
+
+#### 🛡️ Vigilancia (`pages/vigilancia.py`)
+
+- Semáforo de mercado 0-100, indicadores internos + macro, alertas y diagnóstico
 
 ---
 
@@ -444,14 +453,16 @@ Página independiente que combina indicadores internos (calculados sobre la BD) 
 ### Flujo de Datos
 
 ```
-1. SCRAPING (Local, diario)
-   Idealista.com → Bright Data proxy → BeautifulSoup → real_estate.db (local)
+1. SCRAPING (GitHub Actions, diario)
+   Idealista.com → Bright Data (1º) / Oxylabs (fallback) → parsing
+   → upsert directo a Neon Postgres
    ↓
-2. UPLOAD (Manual tras scraping)
-   real_estate.db → Google Drive (File ID: 1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p)
+2. PRE-CÓMPUTO (mismo run de CI)
+   compute_snapshots.py → tabla market_snapshots
+   export_public_metrics.py → metrics.json (consumido por el front público)
    ↓
 3. DASHBOARD (Streamlit Cloud, bajo demanda)
-   Google Drive → download → Streamlit cache → visualización
+   Neon Postgres → psycopg pool → Streamlit cache → visualización
 ```
 
 ### Detección de Cambios en el Scraper
@@ -464,53 +475,46 @@ En cada ejecución el scraper:
 
 ### Semana ISO en SQL
 
-Todas las consultas semanales usan `strftime('%Y-%W', date)` para evitar el bug de agrupación cross-year (semana 01 de 2025 vs 2026).
+Las consultas semanales usan los helpers `iso_week()` / `week_start()` de
+`db/dialect.py` (que emiten `strftime('%Y-%W', …)` en SQLite y `TO_CHAR` /
+`date_trunc('week', …)` en Postgres) para evitar el bug de agrupación
+cross-year (semana 01 de 2025 vs 2026).
 
 ---
 
 ## Flujo de Operación
 
-### Ciclo Diario
+El ciclo es **automático vía GitHub Actions** — no hay pasos manuales de
+scraping ni de subida de BD.
 
 ```
-[ ] 1. Ejecutar scraper (2-4h)
-       cd ~/inmobiliario && source venv/bin/activate && python scraper.py
+daily_scraper.yml (cron diario)
+  1. scraper.py            → upsert a Neon (Bright Data 1º, Oxylabs fallback)
+  2. compute_snapshots.py  → market_snapshots
+  3. email_report.py       → resumen diario
+  4. export_public_metrics → metrics.json
+  5. health-check          → falla el run si no se procesó suficiente data
 
-[ ] 2. Verificar logs y días bajos en pestaña ⚙️ Administración
-
-[ ] 3. Subir real_estate.db a Google Drive (2 min)
-       - Opción manual: Drive → Gestionar versiones → Subir nueva versión
-       - Opción CLI: gdrive update 1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p real_estate.db
-
-[ ] 4. (Opcional) Reboot app en Streamlit Cloud si los datos no se actualizan
-
-[ ] 5. Verificar métricas en dashboard y score de vigilancia
+export-metrics.yml (lun 07:00 UTC)  → regenera metrics.json + barrios_profiles
+mi_zona_alerts.yml  (diario 07:00)   → email con matches de Mi Zona
 ```
 
-### Frecuencia Recomendada
-
-| Actividad | Frecuencia | Duración |
-|-----------|------------|----------|
-| Scraping completo | Diario (noche) | 2-4h |
-| Upload a Drive | Después de cada scraping | 2-5 min |
-| Revisión del score | Semanal | — |
+El operador solo revisa el panel ⚙️ Administración (días bajos, coste,
+proveedores) y el score de 🛡️ Vigilancia.
 
 ---
 
 ## Despliegue
 
-### Entorno Local (Scraping)
+### Scraping / CI (GitHub Actions)
 
-```bash
-cd ~/inmobiliario
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+Variables como secrets del repo (no en `.env` versionado):
 
-# Variables en .env
-BRIGHTDATA_USER=tu_usuario
-BRIGHTDATA_PASS=tu_contraseña
-BRIGHTDATA_HOST=brd.superproxy.io:33335
+```
+DATABASE_URL          # Neon Postgres
+BRIGHTDATA_*          # credenciales del proveedor primario
+OXYLABS_*             # fallback (dormido)
+SCRAPE_MODE=lite      # newest-first + early-stop entre semana
 ```
 
 ### Streamlit Cloud (Dashboard)
@@ -521,13 +525,16 @@ BRIGHTDATA_HOST=brd.superproxy.io:33335
 
 **Secrets necesarios (`.streamlit/secrets.toml`):**
 ```toml
-[database]
-google_drive_file_id = "1ajdgLaneXwb6OWl_S727gwyYZUfrdF7p"
+[postgres]
+url = "postgresql://…@…neon.tech/…?sslmode=require"
 
-[auth.users]
-admin = "ContraseñaAdmin"
-luis  = "ContraseñaLuis"
+[auth.users_hashed]   # bcrypt — generados con gen_password_hash.py
+admin = "$2b$12$…"
+luis  = "$2b$12$…"
 ```
+
+`app.py` detecta el bloque `[postgres]` y fija `DB_BACKEND=postgres`
+automáticamente.
 
 ---
 
@@ -535,11 +542,11 @@ luis  = "ContraseñaLuis"
 
 | Aspecto | Implementación |
 |---------|---------------|
-| Autenticación | Username + password en Streamlit Secrets |
-| Multi-usuario | Credenciales individuales por usuario |
-| HTTPS | Automático en Streamlit Cloud |
-| Credenciales Bright Data | Solo en `.env` local (en `.gitignore`) |
-| DB solo lectura | La DB de Google Drive es pública pero read-only |
+| Autenticación | bcrypt (`auth.py`): hashes en `st.secrets["auth"]["users_hashed"]`, verificación en tiempo constante |
+| Rate limiting | 5 intentos fallidos → bloqueo de 5 min por sesión |
+| Sesión | Expiry + audit log de accesos |
+| HTTPS | Automático en Streamlit Cloud / Vercel |
+| Credenciales (Bright Data, Neon) | Solo en secrets de CI / Streamlit (nunca en git) |
 | Indexación bots | `public/robots.txt` con `Disallow: /` |
 
 ---
@@ -550,31 +557,19 @@ luis  = "ContraseñaLuis"
 
 | Servicio | Coste |
 |----------|-------|
-| Bright Data | ~$0.02-0.04 por ejecución (post-optimización) |
+| Bright Data | coste real reportado desde la billing API (`get_brightdata_cost`); la estimación interna del scraper subestima ~6×, no usar como referencia |
 | Streamlit Cloud | Gratis (Community tier) |
-| Google Drive | Gratis (15 GB incluidos; DB actual ~16 MB) |
-
-> La optimización del scraper redujo el coste por ejecución de ~$20 a menos de $0.05 mediante uso de API JSON en lugar de parsing HTML completo donde es posible.
+| Neon Postgres | Free tier (con cold starts; el pool está tuneado para ello) |
+| Vercel (front público) | Gratis (Hobby) |
 
 ### Escalabilidad
 
 | Dimensión | Estado actual | Límite práctico |
 |-----------|--------------|-----------------|
-| Listings activos | ~20,000 | Sin límite relevante |
-| Tamaño DB | ~16 MB | SQLite aguanta hasta ~140 TB |
+| Listings activos | ~17-20 k | Sin límite relevante |
 | RAM Streamlit | <200 MB | ~1 GB disponible |
-| Proyección 5 años | ~250 MB | Sin problema |
+| Concurrencia | Pool tuneado para Neon free-tier | Subir plan Neon si crece |
 
----
-
-## Mejoras Futuras Pendientes
-
-| Mejora | Prioridad | Complejidad |
-|--------|-----------|-------------|
-| Indicador de precio de alquiler en score | Alta | Media (requiere nueva fuente) |
-| Indicador de rentabilidad bruta (yield) | Alta | Baja (precio alquiler / precio compra) |
-| Visados de obra nueva (INE trimestral) | Media | Media |
-| Automatización del upload a Drive (gdrive CLI) | Media | Baja |
-| Notificaciones Telegram / email por alertas | Media | Media |
-| Migración a PostgreSQL (eliminación upload manual) | Baja | Alta |
-| GitHub Actions para scraping automático | Baja | Media |
+> Para detalle de roadmap, deuda técnica y próximos pasos, ver
+> [`ROADMAP.md`](ROADMAP.md) — este documento describe el sistema **tal como
+> es hoy**, no lo que falta.
