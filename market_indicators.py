@@ -1968,7 +1968,8 @@ def get_price_by_zone(zone_type: str = "district", top_n: int = 10) -> Dict:
     Returns:
         Dict with 'zones' (list of dicts), 'zone_type', 'total_zones'
     """
-    col = "district" if zone_type == "district" else "barrio"
+    # Maps to the actual (Spanish) column names in the listings table.
+    col = "distrito" if zone_type == "district" else "barrio"
 
     result = {
         "name": f"Precio por {'Distrito' if zone_type == 'district' else 'Barrio'}",
@@ -1980,32 +1981,8 @@ def get_price_by_zone(zone_type: str = "district", top_n: int = 10) -> Dict:
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # Check column exists
-        cursor.execute("PRAGMA table_info(listings)")
-        cols = {row[1] for row in cursor.fetchall()}
-        if col not in cols:
-            result["error"] = f"Column '{col}' not found in listings table"
-            return result
-
-        cursor.execute(f"""
-            SELECT
-                {col}                                    AS zone,
-                COUNT(*)                                 AS count,
-                AVG(price)                               AS avg_price,
-                price                                    -- for median below
-            FROM listings
-            WHERE price > 0
-              AND status = 'active'
-              AND {col} IS NOT NULL
-              AND {col} != ''
-            GROUP BY {col}
-            ORDER BY AVG(price) DESC
-        """)
-        # SQLite doesn't have MEDIAN, so we fetch individual rows grouped
-        # and compute it in Python
-        pass
-
-        # Efficient: get all active listings with zone + price
+        # Pull all active listings with zone + price; median is computed in
+        # Python below (avoids relying on a SQL MEDIAN that SQLite lacks).
         cursor.execute(f"""
             SELECT {col}, price, size_sqm
             FROM listings

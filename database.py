@@ -1414,7 +1414,10 @@ def get_listing_by_url(url_or_id: str) -> Optional[Dict]:
         Dictionary with listing data or None if not found
     """
     import re
-    
+
+    if not url_or_id or not isinstance(url_or_id, str):
+        return None
+
     # Extract listing ID from URL if it's a URL
     if 'idealista.com' in url_or_id or '/inmueble/' in url_or_id:
         # Pattern: /inmueble/XXXXXXXX/
@@ -2260,7 +2263,7 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
                         WHERE rr.barrio = r.barrio
                     )
                       AND r.listing_count >= 3
-                    GROUP BY r.barrio
+                    GROUP BY r.barrio, r.median_rent
                     HAVING COUNT(l.listing_id) >= 3
                 """)
                 for row in cursor.fetchall():
