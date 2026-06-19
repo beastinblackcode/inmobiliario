@@ -44,7 +44,7 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 |---|---|---|---|
 | ✅ ~~**Absorption Rate**~~ | — | — | **Hecho** — `market_indicators.get_absorption_rate`. |
 | ✅ ~~**Months of Supply**~~ | — | — | **Hecho** — `market_indicators.get_months_of_supply`. |
-| **Score de Negociabilidad** | 🔥 | 6h | f(días_mercado, n_bajadas, gap_vs_mediana_distrito, seller_type). 0-100. Combinable con quality_score. |
+| ✅ ~~**Score de Negociabilidad**~~ | — | — | **Hecho** — `analytics.calculate_negotiability_score` (0-100): días_mercado 35 + bajadas 30 + gap vs mediana distrito 20 + seller_type 15. Cableado en Oportunidades (badges/expander/filtros) y en `offer_engine`. Verificado contra Neon: distribución 4-94 sobre 16.4k activos. |
 | **Yield bruto por alquiler** | ⭐ | Alto | Parcialmente hecho (`get_rental_yield` + `rental_prices`). Falta scraper de alquileres robusto (hoy tras flag `RENTAL_SCRAPE_ENABLED`, desactivado). |
 | **Price Pressure Index** | ⭐ | 4h | (% subidas - % bajadas) × velocidad. Leading indicator. |
 | **Coeficiente de Gini de precios** | ⭐ | 3h | Más preciso que la dispersión actual. Detecta gentrificación. |
@@ -187,5 +187,6 @@ Por orden de bang-for-buck:
 4. ✅ ~~Barrido sistemático de SQLite-isms~~ — `verify_pg_queries.py` (junio 2026). Ejercita 60 funciones de lectura contra Neon. Detectó y se corrigieron 3 (`get_barrio_ranking`, `get_price_by_zone`, `get_listing_by_url`).
 5. ✅ ~~Arreglar el N+1 de `get_properties_with_multiple_drops`~~ — reescrito como una sola query con window functions (commit `d90602a`, junio 2026). 216 props en ~2.8s, equivalencia verificada vs lógica antigua, barrido 61 ok / 0 fallos.
 6. **Logging estructurado + matar los `except Exception` mudos** (2-3 días). Es lo que hace que los SQLite-isms y el N+1 lleguen a producción invisibles. Prerrequisito para alertar de fallos en vez de mostrar "No hay datos disponibles".
-7. **Score de Negociabilidad** (medio día). Combina `days_on_market` + `n_bajadas` + gap vs mediana del distrito + seller_type. Se monta junto al `quality_score` existente sin tocar el modelo.
+7. ✅ ~~Score de Negociabilidad~~ — ya estaba implementado (`analytics.calculate_negotiability_score`) y verificado funcionando contra Neon (junio 2026). El roadmap lo listaba como pendiente por estar desactualizado.
 8. **Alertas por email en el front público** (1-2 semanas). Convierte madridhome.tech en producto con retención. El motor interno ya existe.
+9. **`verify_pg_queries.py` en CI** (~2h). Cierra el bucle de la deuda de migración.
