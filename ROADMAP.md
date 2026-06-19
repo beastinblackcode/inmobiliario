@@ -185,7 +185,7 @@ Por orden de bang-for-buck:
 2. ✅ ~~Subir threshold de `mark_stale_as_sold` a 14d~~ — hecho en abril 2026
 3. ✅ ~~Absorption Rate + Months of Supply~~ — implementados (`market_indicators.get_absorption_rate` / `get_months_of_supply`)
 4. ✅ ~~Barrido sistemático de SQLite-isms~~ — `verify_pg_queries.py` (junio 2026). Ejercita 60 funciones de lectura contra Neon. Detectó y se corrigieron 3 (`get_barrio_ranking`, `get_price_by_zone`, `get_listing_by_url`).
-5. **Arreglar el N+1 de `get_properties_with_multiple_drops`** (medio día). Único rojo que queda en el barrido: agota puertos efímeros contra Neon (`Can't assign requested address`) por hacer N+1 (`get_property_price_stats`→`get_price_history` por propiedad). Reescribir como un único JOIN/agregado. Afecta a la sección "chollos" del email y a Oportunidades.
+5. ✅ ~~Arreglar el N+1 de `get_properties_with_multiple_drops`~~ — reescrito como una sola query con window functions (commit `d90602a`, junio 2026). 216 props en ~2.8s, equivalencia verificada vs lógica antigua, barrido 61 ok / 0 fallos.
 6. **Logging estructurado + matar los `except Exception` mudos** (2-3 días). Es lo que hace que los SQLite-isms y el N+1 lleguen a producción invisibles. Prerrequisito para alertar de fallos en vez de mostrar "No hay datos disponibles".
 7. **Score de Negociabilidad** (medio día). Combina `days_on_market` + `n_bajadas` + gap vs mediana del distrito + seller_type. Se monta junto al `quality_score` existente sin tocar el modelo.
 8. **Alertas por email en el front público** (1-2 semanas). Convierte madridhome.tech en producto con retención. El motor interno ya existe.
