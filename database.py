@@ -1726,42 +1726,78 @@ def get_properties_with_multiple_drops(min_drops: int = 2, min_total_drop_pct: f
     Returns:
         List of properties with multiple drops
     """
+    # Single set-based query.  The previous implementation loaded every
+    # active listing and then called get_property_price_stats() per row
+    # (N+1) — thousands of round-trips that exhausted ephemeral ports
+    # against Neon.  Window functions pick the first/last price_history
+    # record per listing (by date, id as tie-breaker) and the aggregates
+    # count changes/drops, replicating get_property_price_stats exactly.
     with get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Get all active listings
-        cursor.execute("""
-            SELECT listing_id, title, distrito, barrio, price, url, size_sqm, rooms
-            FROM listings
-            WHERE status = 'active'
-        """)
-        
+        cursor.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    ph.listing_id,
+                    ph.price,
+                    ph.change_amount,
+                    ROW_NUMBER() OVER (PARTITION BY ph.listing_id
+                                       ORDER BY ph.date_recorded ASC, ph.id ASC)  AS rn_asc,
+                    ROW_NUMBER() OVER (PARTITION BY ph.listing_id
+                                       ORDER BY ph.date_recorded DESC, ph.id DESC) AS rn_desc
+                FROM price_history ph
+                JOIN listings l ON l.listing_id = ph.listing_id
+                WHERE l.status = 'active'
+            ),
+            agg AS (
+                SELECT
+                    listing_id,
+                    SUM(CASE WHEN change_amount IS NOT NULL THEN 1 ELSE 0 END) AS num_changes,
+                    SUM(CASE WHEN change_amount < 0           THEN 1 ELSE 0 END) AS num_drops,
+                    MAX(CASE WHEN rn_asc  = 1 THEN price END)                   AS initial_price,
+                    MAX(CASE WHEN rn_desc = 1 THEN price END)                   AS current_hist_price
+                FROM ranked
+                GROUP BY listing_id
+            )
+            SELECT
+                l.listing_id, l.title, l.distrito, l.barrio, l.price, l.url,
+                l.size_sqm, l.rooms,
+                a.initial_price, a.current_hist_price, a.num_changes, a.num_drops
+            FROM agg a
+            JOIN listings l ON l.listing_id = a.listing_id
+            WHERE a.num_drops >= ?
+              AND a.initial_price > 0
+              AND (a.current_hist_price - a.initial_price) * 100.0 / a.initial_price <= ?
+            """,
+            (min_drops, -min_total_drop_pct),
+        )
+
         results = []
         for row in cursor.fetchall():
-            listing_id = row[0]
-            stats = get_property_price_stats(listing_id)
-            
-            if stats and stats['num_drops'] >= min_drops and stats['total_change_pct'] <= -min_total_drop_pct:
-                results.append({
-                    'listing_id': listing_id,
-                    'title': row[1],
-                    'distrito': row[2],
-                    'barrio': row[3],
-                    'current_price': row[4],
-                    'url': row[5],
-                    'size_sqm': row[6],
-                    'rooms': row[7],
-                    'initial_price': stats['initial_price'],
-                    'total_drop': stats['total_change'],
-                    'total_drop_pct': stats['total_change_pct'],
-                    'num_drops': stats['num_drops'],
-                    'num_changes': stats['num_changes'],
-                    'urgency_score': min(100, int(abs(stats['total_change_pct']) * stats['num_drops']))
-                })
-        
+            (listing_id, title, distrito, barrio, price, url, size_sqm, rooms,
+             initial_price, current_hist_price, num_changes, num_drops) = row
+            total_change = current_hist_price - initial_price
+            total_change_pct = (total_change / initial_price) * 100
+            results.append({
+                'listing_id': listing_id,
+                'title': title,
+                'distrito': distrito,
+                'barrio': barrio,
+                'current_price': price,
+                'url': url,
+                'size_sqm': size_sqm,
+                'rooms': rooms,
+                'initial_price': initial_price,
+                'total_drop': total_change,
+                'total_drop_pct': total_change_pct,
+                'num_drops': num_drops,
+                'num_changes': num_changes,
+                'urgency_score': min(100, int(abs(total_change_pct) * num_drops)),
+            })
+
         # Sort by urgency score (highest first)
         results.sort(key=lambda x: x['urgency_score'], reverse=True)
-        
+
         return results
 
 
