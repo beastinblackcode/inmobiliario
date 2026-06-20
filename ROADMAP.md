@@ -84,7 +84,7 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 |---|---|---|---|
 | ✅ ~~**Tests automatizados con pytest**~~ | — | — | **Hecho** — ~305 tests en `tests/` (unit + integration + regression) con `conftest.py`. Falta ampliar cobertura de las queries Postgres (ver `verify_pg_queries.py`, candidato a meterse en CI). |
 | **Logging estructurado** (módulo `logging`, niveles, sustituir prints) | 🔥 | 2-3 días | Hoy hay `except Exception` que enmascaran errores — es lo que oculta los SQLite-isms y el N+1 en producción. |
-| **`verify_pg_queries.py` en CI** | ⭐ | 2h | Ya existe; falta wirearlo como step del workflow para que un SQLite-ism nuevo rompa el build en vez de producción. |
+| ✅ ~~**`verify_pg_queries.py` en CI**~~ | — | — | **Hecho** — job `pg-query-sweep` en `tests.yml`: postgres:16 efímero + `alembic upgrade head` + barrido (`--seed`). 61 ok / 0 fallos, verificado en CI real. Un SQLite-ism nuevo ahora rompe el build. |
 | **API REST pública** (FastAPI) | 💤 | 2-3 semanas | Ver Fase 2 del roadmap arquitectónico (sección 3). |
 | **Scraping multi-portal** (Fotocasa, Habitaclia, pisos.com) | 💤 | 4-6 semanas | Requiere deduplicación cross-portal, campo `source`, scraper abstracto por portal. |
 
@@ -189,4 +189,4 @@ Por orden de bang-for-buck:
 6. **Logging estructurado + matar los `except Exception` mudos** (2-3 días). Es lo que hace que los SQLite-isms y el N+1 lleguen a producción invisibles. Prerrequisito para alertar de fallos en vez de mostrar "No hay datos disponibles".
 7. ✅ ~~Score de Negociabilidad~~ — ya estaba implementado (`analytics.calculate_negotiability_score`) y verificado funcionando contra Neon (junio 2026). El roadmap lo listaba como pendiente por estar desactualizado.
 8. **Alertas por email en el front público** (1-2 semanas). Convierte madridhome.tech en producto con retención. El motor interno ya existe.
-9. **`verify_pg_queries.py` en CI** (~2h). Cierra el bucle de la deuda de migración.
+9. ✅ ~~`verify_pg_queries.py` en CI~~ — job `pg-query-sweep` en `tests.yml` (postgres:16 efímero + alembic + barrido con `--seed`), verificado en CI real (junio 2026).
