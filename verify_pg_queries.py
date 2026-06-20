@@ -117,6 +117,62 @@ def _run_one(label: str, call):
     return "PASS", "", captured
 
 
+def _seed_min(verbose: bool = False) -> None:
+    """Inserta un mínimo de datos (3 listings en 1 barrio + historial con una
+    bajada + 1 watchlist + 1 alerta) para que las funciones parametrizadas se
+    ejerciten en CI en vez de quedar SKIP.
+
+    **Guardado**: solo siembra si ``listings`` está vacía. En prod (Neon)
+    nunca lo está, así que ``--seed`` es inofensivo si se ejecuta por error.
+    """
+    with database.get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM listings")
+        if (cur.fetchone()[0] or 0) > 0:
+            if verbose:
+                print("seed: listings no está vacía → no se siembra (guard).")
+            return
+
+        today = "2026-06-01"
+        drop_day = "2026-06-10"
+        listings = [
+            ("PGSWEEP1", "Piso test 1", "https://example.com/inmueble/PGSWEEP1/",
+             300000, "TestDistrito", "TestBarrio", 3, 90.0, "Particular"),
+            ("PGSWEEP2", "Piso test 2", "https://example.com/inmueble/PGSWEEP2/",
+             250000, "TestDistrito", "TestBarrio", 2, 70.0, "Agencia"),
+            ("PGSWEEP3", "Piso test 3", "https://example.com/inmueble/PGSWEEP3/",
+             420000, "TestDistrito", "TestBarrio", 4, 120.0, "Particular"),
+        ]
+        for lid, title, url, price, dist, barrio, rooms, sqm, seller in listings:
+            cur.execute(
+                """
+                INSERT INTO listings
+                    (listing_id, title, url, price, distrito, barrio, rooms,
+                     size_sqm, seller_type, first_seen_date, last_seen_date, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (lid, title, url, price, dist, barrio, rooms, sqm, seller, today, drop_day),
+            )
+        # price_history for PGSWEEP1: initial + a drop
+        cur.execute(
+            "INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("PGSWEEP1", 330000, today, None, None),
+        )
+        cur.execute(
+            "INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("PGSWEEP1", 300000, drop_day, -30000, -9.09),
+        )
+        cur.execute(
+            "INSERT INTO watchlist (listing_id, price_at_add) VALUES (?, ?)",
+            ("PGSWEEP1", 330000),
+        )
+        conn.commit()
+        if verbose:
+            print("seed: 3 listings + 2 price_history + 1 watchlist insertados.")
+
+
 def _sample_args() -> dict:
     """Obtiene valores reales de la BD para las funciones parametrizadas.
     Si la BD está vacía o algo falla, los faltantes se omiten (la función
@@ -243,6 +299,11 @@ def _composite_calls():
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--verbose", action="store_true", help="muestra output capturado de los fallos")
+    ap.add_argument(
+        "--seed", action="store_true",
+        help="siembra datos mínimos si la BD está vacía (uso en CI; "
+             "inofensivo en prod gracias al guard de tabla vacía)",
+    )
     args = ap.parse_args()
 
     print(f"Backend: {os.environ.get('DB_BACKEND')}  ", end="")
@@ -251,6 +312,12 @@ def main() -> int:
         print(f"(active={active_backend()})")
     except Exception:
         print()
+
+    if args.seed:
+        try:
+            _seed_min(verbose=True)
+        except Exception as exc:
+            print(f"seed: error sembrando (continuo igualmente): {exc}")
 
     sample = _sample_args()
     print(f"Sample data: {', '.join(sorted(sample)) or '∅ (BD vacía?)'}\n")

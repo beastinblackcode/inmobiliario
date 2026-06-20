@@ -31,3 +31,53 @@ jobs:
 
       - name: Run pytest
         run: pytest -v --tb=short
+
+  # Exercises every read function in database.py / market_indicators.py
+  # against a real (ephemeral) Postgres to catch SQLite-isms that pass on
+  # SQLite but break on Neon (ROUND(double,int), PRAGMA, SELECT-alias in
+  # HAVING, non-grouped columns, …). Empty DB is fine: the sweep treats
+  # empty results as PASS and only fails on SQL errors. Schema comes from
+  # Alembic — the same source of truth as prod Neon.
+  pg-query-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: realestate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/realestate_test
+      DB_BACKEND: postgres
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Apply schema (Alembic)
+        run: alembic upgrade head
+
+      - name: Run Postgres query sweep
+        run: python verify_pg_queries.py --seed
