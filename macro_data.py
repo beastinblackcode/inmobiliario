@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import json
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 # ============================================================================
 # Constants
@@ -66,7 +70,7 @@ def _fetch_ine_table(table_id: str, nult: int = 12) -> Optional[list]:
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        print(f"⚠️ Error fetching INE table {table_id}: {e}")
+        logger.exception(f"Error fetching INE table {table_id}")
         return None
 
 
@@ -640,7 +644,7 @@ def get_afiliados_ss_data() -> Dict:
     except Exception as e:
         result["error"] = str(e)
         result["current"] = 3.2   # fallback ~3.2M ocupados Madrid
-        print(f"⚠️ Error processing ocupados EPA data: {e}")
+        logger.exception("Error processing ocupados EPA data")
 
     return result
 

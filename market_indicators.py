@@ -11,6 +11,9 @@ from database import get_connection
 # Canonical, backend-agnostic date coercion (handles SQLite str vs Postgres
 # date/datetime). Aliased to keep the existing _as_datetime call sites.
 from db.dialect import as_datetime as _as_datetime
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 # ============================================================================
@@ -1396,7 +1399,7 @@ def get_market_alerts(
                             params={"rate": round(euribor_val, 2), "diff": abs(diff),
                                     "past_rate": round(past_rate, 2), "past_date": past_date_str})
             except Exception:
-                pass
+                logger.debug("Euríbor impact alert enrichment failed", exc_info=True)
 
     # ── Notarial gap alerts ───────────────────────────────────────────────────
     if notarial_gap and notarial_gap.get("current") is not None:
@@ -1557,6 +1560,7 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
                 result["trend"] = "stable"
 
     except Exception as exc:
+        logger.exception("Error computing price-drop ratio")
         result["error"] = str(exc)
 
     return result
@@ -2201,6 +2205,7 @@ def get_notarial_gap_indicator() -> Dict:
             "all_gaps":        gap_data,
         }
     except Exception as e:
+        logger.exception("Error computing notarial gap indicator")
         return {"name": "Sobreprecio vs Notarial", "current": None, "unit": "%", "error": str(e)}
 
 
@@ -2293,6 +2298,7 @@ def get_lanzamientos_indicator() -> Dict:
             result["series"] = series
 
     except Exception as e:
+        logger.exception("Error computing lanzamientos indicator")
         result["error"] = str(e)
 
     return result

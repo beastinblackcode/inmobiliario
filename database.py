@@ -21,6 +21,10 @@ from db.connection import (
 # where SQLite returned ISO strings, so datetime.strptime(...) crashes.
 from db.dialect import as_datetime
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 DATABASE_PATH = "real_estate.db"
 
@@ -366,7 +370,7 @@ def log_scraping_execution(
             ))
             print(f"  📝 Logged execution: {duration_minutes:.1f} min, ${cost_estimate_usd:.4f}")
     except Exception as e:
-        print(f"Error logging execution: {e}")
+        logger.exception(f"Error logging execution")
 
 
 def get_scraping_log(limit: int = 50) -> List[Dict]:
@@ -402,7 +406,7 @@ def get_scraping_log(limit: int = 50) -> List[Dict]:
             
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
     except Exception as e:
-        print(f"Error retrieving scraping log: {e}")
+        logger.exception(f"Error retrieving scraping log")
         return []
 
 
@@ -487,7 +491,7 @@ def migrate_create_provider_tables():
             """)
             conn.commit()
     except Exception as exc:
-        print(f"Migration error (provider tables): {exc}")
+        logger.exception("Migration error (provider tables)")
 
 
 def _ensure_provider_seed_postgres() -> None:
@@ -517,7 +521,7 @@ def _ensure_provider_seed_postgres() -> None:
                 """, pg_row)
             conn.commit()
     except Exception as exc:
-        print(f"Provider seed (PG) error: {exc}")
+        logger.exception("Provider seed (PG) error")
 
 
 def get_provider_configs() -> List[Dict]:
@@ -559,7 +563,7 @@ def get_provider_configs() -> List[Dict]:
                 for row in cursor.fetchall()
             ]
     except Exception as exc:
-        print(f"Error retrieving provider configs: {exc}")
+        logger.exception(f"Error retrieving provider configs")
         return []
 
 
@@ -606,7 +610,7 @@ def get_provider_stats(days: int = 30) -> List[Dict]:
             ]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
     except Exception as exc:
-        print(f"Error retrieving provider stats: {exc}")
+        logger.exception(f"Error retrieving provider stats")
         return []
 
 
@@ -688,7 +692,7 @@ def insert_listing(data: Dict) -> bool:
         # avoid an explicit dialect import here.
         if type(e).__name__ in ("IntegrityError", "UniqueViolation"):
             return update_listing(data.get('listing_id'), data)
-        print(f"Error inserting listing {data.get('listing_id')}: {e}")
+        logger.exception(f"Error inserting listing {data.get('listing_id')}")
         return False
 
 
@@ -765,7 +769,7 @@ def update_listing(listing_id: str, data: Dict) -> bool:
             
             return True
     except Exception as e:
-        print(f"Error updating listing {listing_id}: {e}")
+        logger.exception(f"Error updating listing {listing_id}")
         return False
 
 
@@ -794,7 +798,7 @@ def mark_as_sold(listing_ids: Set[str]) -> int:
             """, tuple(listing_ids))
             return cursor.rowcount
     except Exception as e:
-        print(f"Error marking listings as sold: {e}")
+        logger.exception(f"Error marking listings as sold")
         return 0
 
 
@@ -898,7 +902,7 @@ def mark_stale_as_sold(days_threshold: int = 14) -> int:
 
             return marked
     except Exception as e:
-        print(f"Error marking stale listings as sold: {e}")
+        logger.exception(f"Error marking stale listings as sold")
         return 0
 
 
@@ -956,7 +960,7 @@ def get_stale_listings_count(days_threshold: int = 14) -> Dict:
 
             return {"tier1": tier1, "tier2": tier2, "total": total}
     except Exception as exc:
-        print(f"Error counting stale listings: {exc}")
+        logger.exception(f"Error counting stale listings")
         return {"tier1": 0, "tier2": 0, "total": 0}
 
 
@@ -1855,7 +1859,7 @@ def get_daily_price_drops(days: int = 30) -> List[Dict]:
             return stats
             
     except Exception as e:
-        print(f"Error getting daily price drops: {e}")
+        logger.exception(f"Error getting daily price drops")
         return []
 
 # ============================================================================
@@ -1899,7 +1903,7 @@ def get_barrio_price_stats(min_listings: int = 5) -> Dict[str, Dict]:
                 }
             return result
     except Exception as exc:
-        print(f"Error getting barrio price stats: {exc}")
+        logger.exception(f"Error getting barrio price stats")
         return {}
 
 
@@ -1930,7 +1934,7 @@ def get_drop_counts_for_listings(listing_ids: List[str]) -> Dict[str, int]:
             # Ensure every requested listing_id has an entry (default 0)
             return {lid: counts.get(lid, 0) for lid in listing_ids}
     except Exception as exc:
-        print(f"Error getting drop counts: {exc}")
+        logger.exception(f"Error getting drop counts")
         return {lid: 0 for lid in listing_ids}
 
 
@@ -1974,7 +1978,7 @@ def get_price_evolution_by_barrio(barrios: List[str], weeks: int = 16) -> List[D
             cols = ["barrio", "week", "week_start", "median_price_sqm", "listing_count"]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
     except Exception as exc:
-        print(f"Error getting barrio price evolution: {exc}")
+        logger.exception(f"Error getting barrio price evolution")
         return []
 
 
@@ -2016,7 +2020,7 @@ def get_barrio_summary(barrios: List[str]) -> List[Dict]:
             ]
             return [dict(zip(cols, row)) for row in cursor.fetchall()]
     except Exception as exc:
-        print(f"Error getting barrio summary: {exc}")
+        logger.exception(f"Error getting barrio summary")
         return []
 
 
@@ -2092,7 +2096,7 @@ def upsert_rental_snapshot(
             """, (distrito, barrio, date, round(median_rent, 2), listing_count))
         return True
     except Exception as exc:
-        print(f"Error upserting rental snapshot for {barrio}: {exc}")
+        logger.exception(f"Error upserting rental snapshot for {barrio}")
         return False
 
 
@@ -2200,7 +2204,7 @@ def get_rental_yields(min_listings: int = 3) -> List[Dict]:
             return results
 
     except Exception as exc:
-        print(f"Error computing rental yields: {exc}")
+        logger.exception(f"Error computing rental yields")
         return []
 
 
@@ -2411,7 +2415,7 @@ def get_barrio_ranking(min_listings: int = 5) -> List[Dict]:
         return results
 
     except Exception as exc:
-        print(f"Error computing barrio ranking: {exc}")
+        logger.exception(f"Error computing barrio ranking")
         return []
 
 
@@ -2451,7 +2455,7 @@ def migrate_create_watchlist_table():
             conn.commit()
             print("✓ Watchlist table ready")
     except Exception as exc:
-        print(f"Migration error (watchlist): {exc}")
+        logger.exception("Migration error (watchlist)")
 
 
 def add_to_watchlist(listing_id: str, note: str = "", alert_on_drop: bool = True) -> bool:
@@ -2483,7 +2487,7 @@ def add_to_watchlist(listing_id: str, note: str = "", alert_on_drop: bool = True
             conn.commit()
             return cursor.rowcount > 0
     except Exception as exc:
-        print(f"Error adding to watchlist: {exc}")
+        logger.exception(f"Error adding to watchlist")
         return False
 
 
@@ -2496,7 +2500,7 @@ def remove_from_watchlist(listing_id: str) -> bool:
             conn.commit()
             return cursor.rowcount > 0
     except Exception as exc:
-        print(f"Error removing from watchlist: {exc}")
+        logger.exception(f"Error removing from watchlist")
         return False
 
 
@@ -2600,7 +2604,7 @@ def get_watchlist(include_sold: bool = True) -> List[Dict]:
             })
         return results
     except Exception as exc:
-        print(f"Error getting watchlist: {exc}")
+        logger.exception(f"Error getting watchlist")
         return []
 
 
@@ -2660,7 +2664,7 @@ def get_watchlist_price_drops(since_days: int = 1) -> List[Dict]:
             })
         return results
     except Exception as exc:
-        print(f"Error getting watchlist price drops: {exc}")
+        logger.exception(f"Error getting watchlist price drops")
         return []
 
 
@@ -2778,7 +2782,7 @@ def get_new_opportunity_listings(hours: int = 24, min_score: int = 70) -> List[D
         return results
 
     except Exception as exc:
-        print(f"Error getting new opportunity listings: {exc}")
+        logger.exception(f"Error getting new opportunity listings")
         return []
 
 
@@ -2883,7 +2887,7 @@ def get_rental_yield_history(weeks: int = 12) -> List[Dict]:
         return results
 
     except Exception as exc:
-        print(f"Error getting rental yield history: {exc}")
+        logger.exception(f"Error getting rental yield history")
         return []
 
 
@@ -3055,7 +3059,7 @@ def get_price_drop_stats() -> Dict:
             }
 
     except Exception as exc:
-        print(f"Error getting price drop stats: {exc}")
+        logger.exception(f"Error getting price drop stats")
         return {
             "overview":               {},
             "by_barrio":              [],
@@ -3092,7 +3096,7 @@ def get_price_trend_by_district(weeks: int = 12) -> List[Dict]:
             """, (f"-{weeks * 7}",))
             return [dict(r) for r in cur.fetchall()]
     except Exception as exc:
-        print(f"Error getting price trend: {exc}")
+        logger.exception(f"Error getting price trend")
         return []
 
 
@@ -3154,7 +3158,7 @@ def get_market_summary_trend(weeks: int = 12) -> List[Dict]:
             """, (f"-{weeks * 7}",))
             rows = cur.fetchall()
     except Exception as exc:
-        print(f"Error getting market summary trend: {exc}")
+        logger.exception(f"Error getting market summary trend")
         return []
 
     # --- Group by week ---------------------------------------------------
@@ -3390,7 +3394,7 @@ def get_alert_matches(
         return rows[:20]
 
     except Exception as exc:
-        print(f"Error checking alert matches: {exc}")
+        logger.exception(f"Error checking alert matches")
         return []
 
 
@@ -3417,7 +3421,7 @@ def _auto_import_notarial() -> None:
         if csv_path.exists():
             import_notarial_csv(str(csv_path))
     except Exception as e:
-        print(f"Warning: could not auto-import notarial CSV: {e}")
+        logger.warning("Could not auto-import notarial CSV: %s", e)
 
 
 def import_notarial_csv(csv_path: str) -> int:
@@ -3474,7 +3478,7 @@ def get_notarial_prices(distrito: Optional[str] = None) -> List[Dict]:
                 """)
             return [dict(r) for r in cursor.fetchall()]
     except Exception as e:
-        print(f"Error in get_notarial_prices: {e}")
+        logger.exception(f"Error in get_notarial_prices")
         return []
 
 
@@ -3532,7 +3536,7 @@ def get_notarial_gap_by_district() -> List[Dict]:
                 })
         return sorted(results, key=lambda x: x["gap_pct"], reverse=True)
     except Exception as e:
-        print(f"Error in get_notarial_gap_by_district: {e}")
+        logger.exception(f"Error in get_notarial_gap_by_district")
         return []
 
 
