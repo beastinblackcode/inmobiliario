@@ -1326,8 +1326,11 @@ def get_price_volatility() -> Dict:
 
         series = get_snapshot_series("city", None, "median_price_sqm", days=30)
         # Keep only usable points, ordered by date (the query already orders).
+        # ``date_computed`` comes back as a str under SQLite but as a
+        # datetime.date under Postgres — normalise to an ISO string so the
+        # window cutoff comparison works on both backends.
         points = [
-            (row["date_computed"], row["metric_value"])
+            (str(row["date_computed"])[:10], row["metric_value"])
             for row in series
             if row.get("metric_value") and row["metric_value"] > 0
         ]
