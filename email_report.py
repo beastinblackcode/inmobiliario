@@ -710,6 +710,13 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"❌ Error: {e}")
             traceback.print_exc()
+            sys.exit(1)
     else:
         print("Enviando informe diario...")
-        send_daily_report()
+        # Exit non-zero on failure so the daily GitHub Action step turns red
+        # (it runs with continue-on-error: true, so this signals the failure
+        # without blocking the rest of the pipeline) instead of finishing
+        # green on a silently-failed email — the core of the logging/
+        # observability work (ROADMAP §2.4 "Logging estructurado").
+        if not send_daily_report():
+            sys.exit(1)
