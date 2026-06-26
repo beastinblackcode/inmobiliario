@@ -26,7 +26,7 @@
 ### Limitaciones estructurales conocidas
 
 - **🔴 Deuda de migración Postgres (riesgo #1)**: la migración SQLite→Postgres (mayo 2026) dejó SQL incompatible disperso (SQLite-isms) que rompe **en silencio** — funciones que envuelven su query en `except Exception`, imprimen el error y devuelven vacío. Las últimas semanas han sido fixes uno a uno (`ROUND(double,int)`, `strptime`, `date()`, alias en `HAVING`, columnas fuera de `GROUP BY`, conns no devueltas al pool). **`verify_pg_queries.py`** barre todas las funciones de lectura contra Neon para cerrar esto de raíz.
-- **Errores silenciosos**: `except Exception` genéricos en muchas funciones enmascaran fallos. `print()` en lugar de `logging`. Es lo que hace que los SQLite-isms lleguen a producción invisibles.
+- **Errores silenciosos** (✅ mitigado, junio 2026): los `except Exception` genéricos enmascaraban fallos con `print()` en lugar de `logging`. Convertidos a `logger.exception` (traceback a ERROR) en `database.py`, `market_indicators.py`, `macro_data.py` (commit `7e1076a`) vía `logging_config.get_logger`. Además el CLI del email diario (`email_report.py`) ahora sale con código ≠0 al fallar, así el step del workflow se pone en rojo en vez de terminar verde sobre un email fallido. Queda residual: prints en scripts CLI sueltos (`fetch_opendata`, `retry_scraper`) — intencionales, no errores tragados.
 - **`database.py` god-module**: ~3.640 líneas mezclan infraestructura, CRUD, lógica de negocio y utilidades de UI.
 - **Modelo predictivo**: sin validación cruzada visible al usuario, sin métricas de rendimiento expuestas en cada predicción, sin reentrenamiento programado (solo on-demand al detectar datos frescos).
 - **Frecuencia de scraping**: cadencia diaria con modo `lite` entre semana; `days_to_sell` mantiene un suelo estructural por la combinación cadencia + threshold stale.
@@ -46,9 +46,9 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 | ✅ ~~**Months of Supply**~~ | — | — | **Hecho** — `market_indicators.get_months_of_supply`. |
 | ✅ ~~**Score de Negociabilidad**~~ | — | — | **Hecho** — `analytics.calculate_negotiability_score` (0-100): días_mercado 35 + bajadas 30 + gap vs mediana distrito 20 + seller_type 15. Cableado en Oportunidades (badges/expander/filtros) y en `offer_engine`. Verificado contra Neon: distribución 4-94 sobre 16.4k activos. |
 | **Yield bruto por alquiler** | ⭐ | Alto | Parcialmente hecho (`get_rental_yield` + `rental_prices`). Falta scraper de alquileres robusto (hoy tras flag `RENTAL_SCRAPE_ENABLED`, desactivado). |
-| **Price Pressure Index** | ⭐ | 4h | (% subidas - % bajadas) × velocidad. Leading indicator. |
-| **Coeficiente de Gini de precios** | ⭐ | 3h | Más preciso que la dispersión actual. Detecta gentrificación. |
-| **Volatilidad móvil** (std en ventanas 7d/30d) | ⭐ | 2h | Anticipa cambios de tendencia. |
+| ✅ ~~**Price Pressure Index**~~ | — | — | **Hecho** — `market_indicators.get_price_pressure_index` (`(% subidas − % bajadas) × velocidad`, factor de absorción 0.5–2.0). Cableado en `get_all_internal_indicators` (reusa la absorción ya calculada) y en la página de Vigilancia (KPI #15). Verificado contra Neon: −25.6 (subidas 0.9% vs bajadas 13.7%, absorción alta → presión a la baja). Autocubierto por `verify_pg_queries.py` (62 ok). |
+| ✅ ~~**Coeficiente de Gini de precios**~~ | — | — | **Hecho** — `market_indicators.get_price_gini`: `G = Σ(2i−n−1)·x_i / (n·Σx_i)` sobre precios de activos (mismo origen que la dispersión). Más robusto que el gap media/mediana ante outliers de lujo; al alza = polarización/gentrificación. Cableado en `get_all_internal_indicators` y en Vigilancia (KPI #16). Tests en `tests/integration/test_price_gini.py` (valor exacto 0.170 sobre la semilla). Autocubierto por `verify_pg_queries.py`. |
+| ✅ ~~**Volatilidad móvil** (std en ventanas 7d/30d)~~ | — | — | **Hecho** — `market_indicators.get_price_volatility`: coef. de variación (std÷media×100) del €/m² mediano diario en ventanas 7d/30d, leyendo la serie `market_snapshots` (city, `median_price_sqm`) vía `get_snapshot_series` (sin query pesada extra). 7d ≫ 30d → turbulencia (señal adelantada de cambio de tendencia); 7d ≪ 30d → se calma. Cableado en `get_all_internal_indicators` y en Vigilancia (KPI #17). Tests en `tests/integration/test_price_volatility.py` (CV exacto sobre serie sembrada). Autocubierto por `verify_pg_queries.py`. |
 | **Ratio precio pedido vs vendido** | 💤 | 6h | Aproximación al descuento de negociación. Limitación: no conocemos precio final real. |
 
 ### 2.2 Funcionalidades de usuario
@@ -63,7 +63,7 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 | **Predicción probabilidad venta 30d** | ⭐ | 1-2 semanas | Modelo de clasificación binaria entrenado con `sold_removed`. Mostrar % en cada ficha. |
 | **Informes PDF/DOCX automatizados** | ⭐ | 1 semana | Semanal, mensual, por distrito. Cron + reportlab/python-docx. |
 | **Heatmap temporal animado** | ⭐ | 4 días | Slider que avanza semana a semana sobre el mapa de calor. |
-| **Exportación CSV/Excel** desde el dashboard | ⭐ | 4h | Botón de descarga de los listings filtrados. |
+| ✅ ~~**Exportación CSV/Excel** desde el dashboard~~ | — | — | **Hecho** — botones de descarga (CSV `utf-8-sig` + Excel vía openpyxl) en la pestaña 🔍 Búsquedas, exportan los listings filtrados con columnas renombradas. |
 | **i18n del Streamlit interno** | 💤 | 3-4 días | Centralizar textos. Hoy mezcla es/en. |
 | **Comparativa de distritos** | 💤 | 3 días | Radar chart superpuesto. |
 
@@ -72,7 +72,7 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 | Mejora | Prio | Esfuerzo |
 |---|---|---|
 | Features NLP de descripciones — ✅ estado, certificación energética y año **hechos** (`nlp_analyzer.py`); faltan terraza/garaje/trastero | ⭐ | 2 días |
-| **Features adicionales al RF**: precio/m² mediano del barrio, distancia a Sol, densidad de oferta, velocidad del barrio | 🔥 | 3 días |
+| ✅ ~~**Features adicionales al RF**: precio/m² mediano del barrio, distancia a Sol, densidad de oferta, velocidad del barrio~~ | — | — | **Hecho** — `predictive_model.PricePredictor` añade 4 features de contexto de barrio (`barrio_median_sqm`, `barrio_dist_sol` vía `coordinates.distance_to_sol`/haversine, `barrio_supply`, `barrio_velocity`), aprendidas en `train()` y persistidas para enriquecer `predict()` desde atributos crudos. A/B limpio sobre 42.767 activos+vendidos: R² 0.905→**0.915**, MAPE 16.8→**16.2%**, MAE −€5.270; `barrio_median_sqm` ya es la 2ª feature (imp. 0.18). Tests en `tests/unit/test_predictive_features.py`. Nota: el agregado de barrio se computa sobre todo el dataset (leve sesgo optimista en CV); un pipeline 100% leak-proof lo metería dentro de cada fold. |
 | **Modelo AVM con comparables**: 5 propiedades más similares + ajustes por característica + intervalo real | ⭐ | 1-2 semanas |
 | **Quantile Regression Forest** (intervalos de confianza reales en vez de ±10% heurístico) | ⭐ | 4 días |
 | **Métricas de rendimiento visibles** (R², MAE, MAPE) + reentrenamiento periódico | ⭐ | 3 días |
@@ -83,7 +83,7 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 | Item | Prio | Esfuerzo | Comentario |
 |---|---|---|---|
 | ✅ ~~**Tests automatizados con pytest**~~ | — | — | **Hecho** — ~305 tests en `tests/` (unit + integration + regression) con `conftest.py`. Falta ampliar cobertura de las queries Postgres (ver `verify_pg_queries.py`, candidato a meterse en CI). |
-| **Logging estructurado** (módulo `logging`, niveles, sustituir prints) | 🔥 | 2-3 días | Hoy hay `except Exception` que enmascaran errores — es lo que oculta los SQLite-isms y el N+1 en producción. |
+| ✅ ~~**Logging estructurado** (módulo `logging`, niveles, sustituir prints)~~ | — | — | **Hecho** — `logging_config.get_logger` (setup idempotente, `LOG_LEVEL` env). Los `except Exception: print(error)` de las funciones de librería pasan a `logger.exception` (traceback a ERROR) en `database.py`/`market_indicators.py`/`macro_data.py` (commit `7e1076a`). El email diario sale ≠0 al fallar → step en rojo en vez de verde silencioso. Pendiente opcional: enrutar logs a un sink agregado (hoy van a stdout/CI). |
 | ✅ ~~**`verify_pg_queries.py` en CI**~~ | — | — | **Hecho** — job `pg-query-sweep` en `tests.yml`: postgres:16 efímero + `alembic upgrade head` + barrido (`--seed`). 61 ok / 0 fallos, verificado en CI real. Un SQLite-ism nuevo ahora rompe el build. |
 | **API REST pública** (FastAPI) | 💤 | 2-3 semanas | Ver Fase 2 del roadmap arquitectónico (sección 3). |
 | **Scraping multi-portal** (Fotocasa, Habitaclia, pisos.com) | 💤 | 4-6 semanas | Requiere deduplicación cross-portal, campo `source`, scraper abstracto por portal. |
@@ -186,7 +186,7 @@ Por orden de bang-for-buck:
 3. ✅ ~~Absorption Rate + Months of Supply~~ — implementados (`market_indicators.get_absorption_rate` / `get_months_of_supply`)
 4. ✅ ~~Barrido sistemático de SQLite-isms~~ — `verify_pg_queries.py` (junio 2026). Ejercita 60 funciones de lectura contra Neon. Detectó y se corrigieron 3 (`get_barrio_ranking`, `get_price_by_zone`, `get_listing_by_url`).
 5. ✅ ~~Arreglar el N+1 de `get_properties_with_multiple_drops`~~ — reescrito como una sola query con window functions (commit `d90602a`, junio 2026). 216 props en ~2.8s, equivalencia verificada vs lógica antigua, barrido 61 ok / 0 fallos.
-6. **Logging estructurado + matar los `except Exception` mudos** (2-3 días). Es lo que hace que los SQLite-isms y el N+1 lleguen a producción invisibles. Prerrequisito para alertar de fallos en vez de mostrar "No hay datos disponibles".
+6. ✅ ~~**Logging estructurado + matar los `except Exception` mudos**~~ — `logging_config.get_logger` + conversión a `logger.exception` en los módulos de librería (commit `7e1076a`, junio 2026) y email diario con exit ≠0 al fallar (step en rojo en vez de verde silencioso). Cierra la observabilidad de los fallos que antes salían como "No hay datos disponibles".
 7. ✅ ~~Score de Negociabilidad~~ — ya estaba implementado (`analytics.calculate_negotiability_score`) y verificado funcionando contra Neon (junio 2026). El roadmap lo listaba como pendiente por estar desactualizado.
 8. **Alertas por email en el front público** (1-2 semanas). Convierte madridhome.tech en producto con retención. El motor interno ya existe.
 9. ✅ ~~`verify_pg_queries.py` en CI~~ — job `pg-query-sweep` en `tests.yml` (postgres:16 efímero + alembic + barrido con `--seed`), verificado en CI real (junio 2026).

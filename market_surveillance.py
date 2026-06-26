@@ -410,7 +410,7 @@ def _render_internal_kpis(indicators: dict):
             )
 
     # Fourth row — absorption metrics (added April 2026 — issue #3 of roadmap)
-    col13, col14, _, _ = st.columns(4)
+    col13, col14, col15, col16 = st.columns(4)
 
     # 13. Absorption rate (sold last 30 days / active inventory)
     ar = indicators.get("absorption_rate", {})
@@ -463,6 +463,83 @@ def _render_internal_kpis(indicators: dict):
                 label="⏳ Meses de Stock",
                 value="Sin datos",
                 help="Necesita ≥ 2 semanas con ventas en los últimos 3 meses."
+            )
+
+    # 15. Price pressure index (net repricing × velocity — leading indicator)
+    ppi = indicators.get("price_pressure", {})
+    with col15:
+        ppi_val = ppi.get("current")
+        ppi_change = ppi.get("change")
+        if ppi_val is not None:
+            # Positive = upward pressure (more hikes than cuts in a moving market)
+            badge = "🔥" if ppi_val > 1 else ("❄️" if ppi_val < -1 else "⚖️")
+            st.metric(
+                label=f"🧭 Presión de Precios {badge}",
+                value=f"{ppi_val:+.1f}",
+                delta=f"{ppi_change:+.1f}" if ppi_change is not None else None,
+                help=(f"(% subidas − % bajadas) × velocidad de mercado. "
+                      f"Subidas {ppi.get('pct_up', 0):.1f}% · bajadas {ppi.get('pct_down', 0):.1f}% "
+                      f"sobre {ppi.get('total_active', 0):,} activos (×{ppi.get('velocity_factor', 1):.2f}). "
+                      f"Indicador adelantado: >+1 presión al alza · <−1 a la baja.")
+            )
+        else:
+            st.metric(
+                label="🧭 Presión de Precios",
+                value="Sin datos",
+                help="Necesita historial de precios y absorción computable."
+            )
+
+    # 16. Gini coefficient of asking prices (inequality / gentrification signal)
+    gini = indicators.get("gini", {})
+    with col16:
+        gini_val = gini.get("current")
+        if gini_val is not None:
+            badge = "🔴" if gini_val > 0.45 else ("🟡" if gini_val >= 0.30 else "🟢")
+            st.metric(
+                label=f"⚖️ Gini de Precios {badge}",
+                value=f"{gini_val:.3f}",
+                help=(f"Desigualdad de los precios pedidos (0 = homogéneo, 1 = "
+                      f"polarizado) sobre {gini.get('n', 0):,} activos. Media "
+                      f"€{gini.get('mean_price', 0):,.0f} vs mediana "
+                      f"€{gini.get('median_price', 0):,.0f}. Más robusto que la "
+                      f"dispersión ante outliers de lujo; al alza = polarización.")
+            )
+        else:
+            st.metric(
+                label="⚖️ Gini de Precios",
+                value="Sin datos",
+                help="Necesita ≥2 propiedades activas con precio."
+            )
+
+    # Fifth row — rolling volatility (leading indicator of trend changes)
+    col17, _, _, _ = st.columns(4)
+
+    # 17. Rolling price volatility (7d short-term vs 30d baseline)
+    vol = indicators.get("volatility", {})
+    with col17:
+        vol_val = vol.get("current")
+        if vol_val is not None:
+            trend = vol.get("trend")
+            badge = "📈" if trend == "up" else ("📉" if trend == "down" else "➖")
+            change = vol.get("change")
+            v30 = vol.get("vol_30d")
+            v30_txt = f"{v30:.1f}%" if isinstance(v30, (int, float)) else "–"
+            st.metric(
+                label=f"🌡️ Volatilidad €/m² {badge}",
+                value=f"{vol_val:.1f}%",
+                delta=f"{change:+.1f} pp vs 30d" if change is not None else None,
+                delta_color="inverse",  # rising volatility = turbulence = bad
+                help=(f"Coef. de variación del €/m² mediano diario. "
+                      f"Ventana 7d {vol_val:.1f}% vs base 30d {v30_txt}. "
+                      f"Indicador adelantado: 7d ≫ 30d → turbulencia "
+                      f"(posible cambio de tendencia); 7d ≪ 30d → se calma. "
+                      f"Sobre {vol.get('n_7d', 0)}/{vol.get('n_30d', 0)} snapshots.")
+            )
+        else:
+            st.metric(
+                label="🌡️ Volatilidad €/m²",
+                value="Sin datos",
+                help="Necesita ≥2 snapshots diarios de €/m² (market_snapshots)."
             )
 
 

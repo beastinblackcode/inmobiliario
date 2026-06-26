@@ -1190,7 +1190,183 @@ def get_price_dispersion() -> Dict:
                 result["trend"] = "down"  # Homogeneous
             else:
                 result["trend"] = "stable"
-    
+
+    return result
+
+
+def get_price_gini() -> Dict:
+    """
+    Gini coefficient of active-listing prices: a single 0–1 measure of how
+    unequally asking prices are spread. More robust than the mean/median gap
+    in ``get_price_dispersion`` because it uses the whole distribution rather
+    than just two central moments — a handful of luxury outliers move the
+    mean/median dispersion sharply but barely nudge Gini.
+
+        0   → perfect equality (every flat priced the same)
+        ~0.3-0.5 → typical for a metropolitan housing market
+        1   → maximal inequality (all value in one listing)
+
+    A *rising* Gini over time is a gentrification / polarisation signal: the
+    high end pulls away from the rest of the stock.
+
+    Uses the same source as ``get_price_dispersion`` (active listings with a
+    positive price) so the two indicators are directly comparable.
+
+    Returns:
+        {"name", "unit": "índice", "current": float|None, "n": int,
+         "mean_price", "median_price", "trend", "error"}
+    """
+    result: Dict = {
+        "name": "Coeficiente de Gini",
+        "unit": "índice",
+        "current": None,
+        "n": 0,
+        "mean_price": None,
+        "median_price": None,
+        "trend": "stable",
+        "error": None,
+    }
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            # Sorted ascending so the rank weights line up with the prices.
+            cursor.execute("""
+                SELECT price FROM listings
+                WHERE price > 0 AND status = 'active'
+                ORDER BY price ASC
+            """)
+            prices = [row[0] for row in cursor.fetchall()]
+
+        n = len(prices)
+        result["n"] = n
+        if n < 2:
+            result["error"] = "Datos insuficientes para Gini (≥2 activos)"
+            return result
+
+        total = sum(prices)
+        if total <= 0:
+            result["error"] = "Suma de precios no positiva"
+            return result
+
+        # G = Σ (2·i − n − 1)·x_i / (n · Σ x_i), with i = 1..n over sorted x.
+        weighted = sum((2 * i - n - 1) * x for i, x in enumerate(prices, start=1))
+        gini = round(weighted / (n * total), 3)
+
+        result["current"] = gini
+        result["mean_price"] = round(total / n)
+        result["median_price"] = round(statistics.median(prices))
+
+        # Level bands (no historical Gini stored yet, so trend is by absolute
+        # polarisation rather than period-over-period change).
+        if gini > 0.45:
+            result["trend"] = "up"     # highly polarised
+        elif gini < 0.30:
+            result["trend"] = "down"   # homogeneous
+        else:
+            result["trend"] = "stable"
+
+    except Exception as exc:
+        logger.exception("Error computing price Gini coefficient")
+        result["error"] = str(exc)
+
+    return result
+
+
+def get_price_volatility() -> Dict:
+    """
+    Rolling volatility of the city-wide median €/m², in 7-day and 30-day
+    windows. Volatility = coefficient of variation (std ÷ mean × 100) of the
+    daily ``median_price_sqm`` snapshots, so it is comparable regardless of
+    the absolute price level.
+
+    A *short-term* volatility (7d) rising clearly above the *baseline* (30d)
+    is a leading signal: the market is becoming turbulent, which historically
+    precedes a change of trend. A 7d below the 30d baseline means it is
+    settling.
+
+    Source is ``market_snapshots`` (city scope, ``median_price_sqm``), the
+    same daily series the dashboard charts, so no extra heavy query. Windows
+    are filtered by *date* (not by count) to stay robust to the odd missing
+    snapshot day.
+
+    Returns:
+        {"name", "unit": "%", "current" (=7d CV), "vol_7d", "vol_30d",
+         "std_7d_sqm", "std_30d_sqm", "n_7d", "n_30d", "change" (7d−30d),
+         "trend", "error"}
+    """
+    result: Dict = {
+        "name": "Volatilidad de Precios",
+        "unit": "%",
+        "current": None,
+        "vol_7d": None,
+        "vol_30d": None,
+        "std_7d_sqm": None,
+        "std_30d_sqm": None,
+        "n_7d": 0,
+        "n_30d": 0,
+        "change": None,
+        "trend": "stable",
+        "error": None,
+    }
+
+    def _cv(values: List[float]) -> Tuple[Optional[float], Optional[float]]:
+        """(coefficient of variation %, absolute std). Needs ≥2 points and a
+        positive mean; otherwise (None, None)."""
+        if len(values) < 2:
+            return None, None
+        mean = statistics.mean(values)
+        if mean <= 0:
+            return None, None
+        std = statistics.stdev(values)
+        return round(std / mean * 100, 2), round(std, 1)
+
+    try:
+        from database import get_snapshot_series
+
+        series = get_snapshot_series("city", None, "median_price_sqm", days=30)
+        # Keep only usable points, ordered by date (the query already orders).
+        points = [
+            (row["date_computed"], row["metric_value"])
+            for row in series
+            if row.get("metric_value") and row["metric_value"] > 0
+        ]
+        if len(points) < 2:
+            result["error"] = "Serie de €/m² insuficiente (≥2 snapshots diarios)"
+            return result
+
+        cutoff_7d = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        vals_30d = [v for _, v in points]
+        vals_7d = [v for d, v in points if d >= cutoff_7d]
+
+        result["n_30d"] = len(vals_30d)
+        result["n_7d"] = len(vals_7d)
+
+        result["vol_30d"], result["std_30d_sqm"] = _cv(vals_30d)
+        result["vol_7d"], result["std_7d_sqm"] = _cv(vals_7d)
+        result["current"] = result["vol_7d"]
+
+        v7, v30 = result["vol_7d"], result["vol_30d"]
+        if v7 is not None and v30 is not None:
+            result["change"] = round(v7 - v30, 2)
+            # Ratio-based trend so it scales with the baseline. A near-flat
+            # baseline (v30≈0) would make any blip look explosive, so require
+            # a meaningful absolute 7d volatility before flagging turbulence.
+            if v30 > 0 and v7 > v30 * 1.2 and v7 > 1.0:
+                result["trend"] = "up"     # turbulence building → watch for a turn
+            elif v30 > 0 and v7 < v30 * 0.8:
+                result["trend"] = "down"   # settling
+            else:
+                result["trend"] = "stable"
+        elif v7 is None:
+            # Not enough points in the trailing week yet — fall back to the
+            # 30d figure as the headline so the KPI still shows something.
+            result["current"] = v30
+
+    except Exception as exc:
+        logger.exception("Error computing price volatility")
+        result["error"] = str(exc)
+
     return result
 
 
@@ -1561,6 +1737,128 @@ def get_price_drop_ratio(window_days: int = 30) -> Dict:
 
     except Exception as exc:
         logger.exception("Error computing price-drop ratio")
+        result["error"] = str(exc)
+
+    return result
+
+
+def get_price_pressure_index(window_days: int = 30, absorption: Dict = None) -> Dict:
+    """
+    Net repricing pressure, amplified by market velocity. Leading indicator:
+    it tends to move *before* the median price does.
+
+        pct_up   = % of active listings with ≥1 price increase in the window
+        pct_down = % of active listings with ≥1 price drop in the window
+        net      = pct_up − pct_down                       (pp)
+        velocity = clamp(absorption_pct / 15, 0.5, 2.0)    (15% ≈ balanced)
+        PPI      = net × velocity
+
+    Positive PPI → upward pressure (more hikes than cuts in a moving market).
+    Negative PPI → downward pressure (widespread cuts). The velocity factor
+    means the same repricing balance counts for more in a fast market and
+    less in a stagnant one.
+
+    Args:
+        window_days: size of the repricing window (default 30 — monthly).
+        absorption:  optional pre-computed get_absorption_rate() result, to
+                     avoid re-querying when called from get_all_internal_indicators.
+
+    Returns:
+        {
+            "name": str, "current": float, "unit": "índice",
+            "trend": "up"|"down"|"stable", "change": float,
+            "pct_up": float, "pct_down": float, "net_repricing": float,
+            "velocity_factor": float, "total_active": int,
+            "window_days": int, "error": None,
+        }
+    """
+    result: Dict = {
+        "name": "Presión de Precios",
+        "unit": "índice",
+        "current": None,
+        "trend": "stable",
+        "change": 0.0,
+        "pct_up": None,
+        "pct_down": None,
+        "net_repricing": None,
+        "velocity_factor": None,
+        "total_active": 0,
+        "window_days": window_days,
+        "error": None,
+    }
+
+    try:
+        from db.dialect import date_offset_days
+
+        # Velocity factor from absorption (sold/active). 15% ≈ balanced → 1.0.
+        if absorption is None:
+            absorption = get_absorption_rate()
+        absorption_pct = absorption.get("current") if absorption else None
+        if absorption_pct is None:
+            velocity_factor = 1.0  # neutral when absorption can't be computed
+        else:
+            velocity_factor = max(0.5, min(2.0, absorption_pct / 15.0))
+        result["velocity_factor"] = round(velocity_factor, 2)
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT COUNT(*) FROM listings WHERE status = 'active'")
+            total_active = cursor.fetchone()[0]
+            result["total_active"] = total_active
+
+            if total_active == 0:
+                result["error"] = "No hay propiedades activas"
+                return result
+
+            def _reprice_counts(lo_days: int, hi_days: int = None):
+                """DISTINCT active listings with an increase / a drop in
+                [lo_days ago, hi_days ago).  hi_days=None means 'until now'."""
+                where_hi = (
+                    " AND ph.date_recorded < " + date_offset_days('?')
+                    if hi_days is not None else ""
+                )
+                params = [f"-{lo_days}"] + ([f"-{hi_days}"] if hi_days is not None else [])
+                cursor.execute(
+                    """
+                    SELECT
+                        COUNT(DISTINCT CASE WHEN ph.change_amount > 0 THEN ph.listing_id END),
+                        COUNT(DISTINCT CASE WHEN ph.change_amount < 0 THEN ph.listing_id END)
+                    FROM price_history ph
+                    INNER JOIN listings l ON l.listing_id = ph.listing_id
+                    WHERE l.status = 'active'
+                      AND ph.date_recorded >= """ + date_offset_days('?') + where_hi,
+                    tuple(params),
+                )
+                row = cursor.fetchone()
+                return (row[0] or 0), (row[1] or 0)
+
+            up, down = _reprice_counts(window_days)
+            pct_up = round(up / total_active * 100, 1)
+            pct_down = round(down / total_active * 100, 1)
+            net = round(pct_up - pct_down, 1)
+            result["pct_up"] = pct_up
+            result["pct_down"] = pct_down
+            result["net_repricing"] = net
+            result["current"] = round(net * velocity_factor, 1)
+
+            # Previous window (same length, shifted back) for trend. Uses the
+            # current velocity factor — we care about the repricing swing.
+            prev_up, prev_down = _reprice_counts(window_days * 2, window_days)
+            prev_net = round(prev_up / total_active * 100 - prev_down / total_active * 100, 1)
+            prev_ppi = round(prev_net * velocity_factor, 1)
+            change = round(result["current"] - prev_ppi, 1)
+            result["change"] = change
+
+            if change > 0.5:
+                result["trend"] = "up"    # pressure building upward
+            elif change < -0.5:
+                result["trend"] = "down"  # pressure building downward
+            else:
+                result["trend"] = "stable"
+
+    except Exception as exc:
+        logger.exception("Error computing price-pressure index")
         result["error"] = str(exc)
 
     return result
@@ -2356,17 +2654,23 @@ def get_all_internal_indicators(euribor_rate: float = None) -> Dict[str, Dict]:
         euribor_rate: Current Euríbor 12m rate (%) for affordability calculation.
                       If None, a conservative 3.5 % fallback is used.
     """
+    # Computed once and reused so the price-pressure velocity factor doesn't
+    # re-query absorption.
+    absorption = get_absorption_rate()
     indicators = {
         "price_trend":       get_weekly_price_evolution(),
         "sales_speed":       get_weekly_sales_speed(),
         "supply_demand":     get_supply_demand_ratio(),
         "inventory":         get_inventory_evolution(),
         "rotation":          get_rotation_rate(),
-        "absorption_rate":   get_absorption_rate(),
+        "absorption_rate":   absorption,
         "months_of_supply":  get_months_of_supply(),
         "dispersion":        get_price_dispersion(),
+        "gini":              get_price_gini(),
+        "volatility":        get_price_volatility(),
         "affordability":     get_affordability_index(euribor_rate=euribor_rate),
         "price_drop_ratio":  get_price_drop_ratio(),
+        "price_pressure":    get_price_pressure_index(absorption=absorption),
         "rental_yield":      get_rental_yield(),
         "notarial_gap":      get_notarial_gap_indicator(),
         "rent_burden":       get_rent_burden(),

@@ -404,6 +404,48 @@ def render_search_tab() -> None:
         hide_index=True,
     )
 
+    # ── Descargar resultados (CSV / Excel) ────────────────────────────────────
+    export_df = df[[
+        "listing_id", "title", "price", "price_per_sqm",
+        "barrio_median_sqm", "vs_barrio_pct", "distrito", "barrio",
+        "size_sqm", "rooms", "dias_mercado", "bajadas", "score_oportunidad",
+        "floor", "seller_type", "url",
+    ]].rename(columns={
+        "listing_id": "ID", "title": "Título", "price": "Precio (€)",
+        "price_per_sqm": "€/m²", "barrio_median_sqm": "Mediana barrio €/m²",
+        "vs_barrio_pct": "vs Barrio %", "distrito": "Distrito", "barrio": "Barrio",
+        "size_sqm": "m²", "rooms": "Habitaciones", "dias_mercado": "Días en mercado",
+        "bajadas": "Bajadas", "score_oportunidad": "Score Oportunidad",
+        "floor": "Planta", "seller_type": "Vendedor", "url": "Enlace",
+    })
+
+    ts = datetime.now().strftime("%Y%m%d")
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            "⬇️ Descargar CSV",
+            data=export_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"busqueda_madrid_{ts}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            help="Descarga los inmuebles filtrados (todos, no solo los visibles).",
+        )
+    with dl2:
+        try:
+            import io
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                export_df.to_excel(writer, index=False, sheet_name="Búsqueda")
+            st.download_button(
+                "⬇️ Descargar Excel",
+                data=buf.getvalue(),
+                file_name=f"busqueda_madrid_{ts}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except Exception:
+            st.caption("Exporta en Excel no disponible (falta openpyxl).")
+
     # ── Top 5 oportunidades ───────────────────────────────────────────────────
     from database import add_to_watchlist, remove_from_watchlist, get_watchlist_ids
     watchlist_ids = get_watchlist_ids()
