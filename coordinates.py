@@ -196,8 +196,38 @@ def get_barrio_coordinates(distrito: str, barrio: str) -> Tuple[float, float]:
 def get_all_coordinates() -> dict:
     """
     Get all barrio coordinates as a dictionary.
-    
+
     Returns:
         Dictionary mapping (distrito, barrio) tuples to (lat, lon) tuples
     """
     return BARRIO_COORDINATES.copy()
+
+
+# Puerta del Sol — Madrid's km-0, the canonical city centre reference.
+SOL = (40.4168, -3.7038)
+
+
+def _haversine_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    """Great-circle distance (km) between two (lat, lon) points."""
+    from math import radians, sin, cos, asin, sqrt
+
+    lat1, lon1 = radians(a[0]), radians(a[1])
+    lat2, lon2 = radians(b[0]), radians(b[1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+    return 2 * 6371.0 * asin(sqrt(h))
+
+
+def distance_to_sol(distrito: str, barrio: str) -> Optional[float]:
+    """
+    Straight-line distance (km) from a barrio centroid to Puerta del Sol.
+
+    Returns ``None`` when the barrio has no known centroid, so callers can
+    impute rather than silently treating an unknown barrio as the city centre
+    (which is what ``get_barrio_coordinates`` would do via its MADRID_CENTER
+    fallback).
+    """
+    coords = BARRIO_COORDINATES.get((distrito, barrio))
+    if coords is None:
+        return None
+    return round(_haversine_km(coords, SOL), 2)

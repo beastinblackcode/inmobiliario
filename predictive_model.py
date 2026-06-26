@@ -33,6 +33,7 @@ from sklearn.metrics import (
 
 import streamlit as st
 from database import get_connection
+from coordinates import distance_to_sol
 
 
 # ============================================================================
@@ -66,11 +67,20 @@ class PricePredictor:
         self.feature_columns = [
             'distrito', 'barrio', 'size_sqm', 'rooms',
             'floor_level', 'has_lift', 'is_exterior',
+            # Barrio-context features (added June 2026, ROADMAP §2.3):
+            'barrio_median_sqm', 'barrio_dist_sol', 'barrio_supply', 'barrio_velocity',
         ]
         self.metrics: Dict = {}
         self.training_date: Optional[str] = None
         self.training_samples: int = 0
         self.feature_importances: Dict[str, float] = {}
+
+        # Barrio-level context learned at train time, keyed by "distrito||barrio".
+        # Persisted so predict() can enrich a single listing without re-querying
+        # the whole table. ``_barrio_default`` is the city-wide fallback for
+        # barrios unseen at training time.
+        self.barrio_context: Dict[str, Dict[str, float]] = {}
+        self._barrio_default: Dict[str, float] = {}
 
         # Try to load saved metadata
         self._load_metadata()
@@ -84,7 +94,8 @@ class PricePredictor:
         with get_connection() as conn:
             query = """
             SELECT price, distrito, barrio, size_sqm, rooms,
-                   floor, orientation, seller_type
+                   floor, orientation, seller_type,
+                   status, first_seen_date, last_seen_date
             FROM listings
             WHERE status IN ('active', 'sold_removed')
               AND price IS NOT NULL
@@ -136,12 +147,88 @@ class PricePredictor:
         df['rooms'] = df['rooms'].fillna(1)
         df['price_sqm'] = df['price'] / df['size_sqm']
 
+        # Days on market (only meaningful for sold listings → barrio velocity).
+        if 'first_seen_date' in df and 'last_seen_date' in df:
+            first = pd.to_datetime(df['first_seen_date'], errors='coerce')
+            last = pd.to_datetime(df['last_seen_date'], errors='coerce')
+            df['days_on_market'] = (last - first).dt.days
+        else:
+            df['days_on_market'] = np.nan
+
         # Remove extreme outliers (top/bottom 1%)
         q_low = df['price_sqm'].quantile(0.01)
         q_high = df['price_sqm'].quantile(0.99)
         df_clean = df[(df['price_sqm'] > q_low) & (df['price_sqm'] < q_high)].copy()
 
+        # Learn barrio context from the cleaned set, then attach the 4 context
+        # features to every row (and remember it for predict()).
+        self.barrio_context, self._barrio_default = self._compute_barrio_context(df_clean)
+        self._attach_barrio_features(df_clean)
+
         return df_clean
+
+    # ------------------------------------------------------------------
+    # BARRIO-CONTEXT FEATURES
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _barrio_key(distrito, barrio) -> str:
+        return f"{distrito}||{barrio}"
+
+    def _compute_barrio_context(
+        self, df: pd.DataFrame
+    ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, float]]:
+        """
+        Aggregate, per (distrito, barrio):
+            median_sqm  median €/m² of the barrio (price level)
+            supply      number of *active* listings (offer density)
+            velocity    median days-on-market of *sold* listings (how fast it moves)
+
+        Returns (context_by_key, city_default). The median is a barrio-level
+        aggregate, so a single listing barely moves it — but note the value is
+        computed over the full dataset (test rows included), a small optimistic
+        bias in CV that a fully leak-proof pipeline would fold inside each fold.
+        """
+        context: Dict[str, Dict[str, float]] = {}
+        for (distrito, barrio), g in df.groupby(['distrito', 'barrio'], dropna=False):
+            sold_days = g.loc[g['status'] == 'sold_removed', 'days_on_market'].dropna()
+            context[self._barrio_key(distrito, barrio)] = {
+                'median_sqm': float(g['price_sqm'].median()),
+                'supply': int((g['status'] == 'active').sum()),
+                'velocity': float(sold_days.median()) if len(sold_days) else None,
+            }
+
+        all_sold_days = df.loc[df['status'] == 'sold_removed', 'days_on_market'].dropna()
+        default = {
+            'median_sqm': float(df['price_sqm'].median()),
+            'supply': int(np.median([c['supply'] for c in context.values()])) if context else 0,
+            'velocity': float(all_sold_days.median()) if len(all_sold_days) else None,
+        }
+        return context, default
+
+    def _lookup_barrio(self, distrito, barrio) -> Dict[str, float]:
+        """Resolve the 4 context features for one listing, falling back to the
+        city-wide defaults for unseen barrios / missing velocity."""
+        ctx = self.barrio_context.get(self._barrio_key(distrito, barrio), {})
+        default = self._barrio_default or {}
+        velocity = ctx.get('velocity')
+        if velocity is None:
+            velocity = default.get('velocity')
+        return {
+            'barrio_median_sqm': ctx.get('median_sqm', default.get('median_sqm')),
+            'barrio_dist_sol': distance_to_sol(distrito, barrio),  # None → imputed
+            'barrio_supply': ctx.get('supply', default.get('supply')),
+            'barrio_velocity': velocity,
+        }
+
+    def _attach_barrio_features(self, df: pd.DataFrame) -> None:
+        """Vectorised attach of the 4 context features onto a training frame."""
+        rows = [
+            self._lookup_barrio(d, b)
+            for d, b in zip(df['distrito'], df['barrio'])
+        ]
+        for col in ('barrio_median_sqm', 'barrio_dist_sol', 'barrio_supply', 'barrio_velocity'):
+            df[col] = [r[col] for r in rows]
 
     # ------------------------------------------------------------------
     # TRAINING WITH CROSS-VALIDATION
@@ -149,7 +236,10 @@ class PricePredictor:
 
     def _build_pipeline(self) -> Pipeline:
         """Build the sklearn pipeline (preprocessor + regressor)."""
-        numeric_features = ['size_sqm', 'rooms', 'floor_level', 'has_lift', 'is_exterior']
+        numeric_features = [
+            'size_sqm', 'rooms', 'floor_level', 'has_lift', 'is_exterior',
+            'barrio_median_sqm', 'barrio_dist_sol', 'barrio_supply', 'barrio_velocity',
+        ]
         categorical_features = ['distrito', 'barrio']
 
         numeric_transformer = SimpleImputer(strategy='median')
@@ -256,8 +346,18 @@ class PricePredictor:
         for name, imp in zip(feature_names, importances):
             # Names look like 'num__size_sqm' or 'cat__barrio_Acacias'
             base = name.split('__')[-1].split('_')[0] if '__' in name else name
-            # Map back to recognisable group
-            if 'size' in name:
+            # Map back to recognisable group. Order matters: the barrio-context
+            # numeric features contain the substring 'barrio', so they must be
+            # matched BEFORE the categorical one-hot 'barrio' catch-all.
+            if 'barrio_median_sqm' in name:
+                base = 'barrio_median_sqm'
+            elif 'barrio_dist_sol' in name:
+                base = 'barrio_dist_sol'
+            elif 'barrio_supply' in name:
+                base = 'barrio_supply'
+            elif 'barrio_velocity' in name:
+                base = 'barrio_velocity'
+            elif 'size' in name:
                 base = 'size_sqm'
             elif 'rooms' in name:
                 base = 'rooms'
@@ -297,7 +397,11 @@ class PricePredictor:
         if not self.is_trained or self._is_stale():
             self.train()
 
-        input_df = pd.DataFrame([features])
+        # Enrich the listing with the learned barrio-context features so the
+        # caller only has to pass the raw attributes (distrito/barrio/size/…).
+        enriched = dict(features)
+        enriched.update(self._lookup_barrio(features.get('distrito'), features.get('barrio')))
+        input_df = pd.DataFrame([enriched])
 
         # Central prediction
         prediction = self.model.predict(input_df)[0]
@@ -368,6 +472,8 @@ class PricePredictor:
             'training_samples': self.training_samples,
             'metrics': self.metrics,
             'feature_importances': self.feature_importances,
+            'barrio_context': self.barrio_context,
+            'barrio_default': self._barrio_default,
             'config': {
                 'n_estimators': RF_N_ESTIMATORS,
                 'max_depth': RF_MAX_DEPTH,
@@ -392,6 +498,8 @@ class PricePredictor:
                 self.training_samples = meta.get('training_samples', 0)
                 self.metrics = meta.get('metrics', {})
                 self.feature_importances = meta.get('feature_importances', {})
+                self.barrio_context = meta.get('barrio_context', {})
+                self._barrio_default = meta.get('barrio_default', {})
         except (json.JSONDecodeError, IOError):
             pass
 
