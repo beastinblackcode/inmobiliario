@@ -1326,8 +1326,11 @@ def get_price_volatility() -> Dict:
 
         series = get_snapshot_series("city", None, "median_price_sqm", days=30)
         # Keep only usable points, ordered by date (the query already orders).
+        # ``date_computed`` comes back as a str under SQLite but as a
+        # datetime.date under Postgres — normalise to an ISO string so the
+        # window cutoff comparison works on both backends.
         points = [
-            (row["date_computed"], row["metric_value"])
+            (str(row["date_computed"])[:10], row["metric_value"])
             for row in series
             if row.get("metric_value") and row["metric_value"] > 0
         ]
@@ -1368,6 +1371,99 @@ def get_price_volatility() -> Dict:
         result["error"] = str(exc)
 
     return result
+
+
+def get_district_repricing_breakdown(
+    window_days: int = 35, min_active: int = 150
+) -> List[Dict]:
+    """
+    Per-district "where are sellers actively cutting *right now*" breakdown.
+
+    For every active listing it looks at the net of its price changes over the
+    trailing ``window_days`` and aggregates by distrito:
+
+        active        active listings (size>10, price>10k)
+        pct_cutting   % of them whose net repricing in the window is negative
+        avg_net_cut   mean € net change of those that cut (negative number)
+        drops / ups   total downward / upward repricing events in the window
+        median_sqm    median €/m² of the district's active stock
+
+    Complements the negotiability score (structural seller flexibility) with
+    *revealed behaviour* — districts where cuts are actually happening now.
+    Districts with fewer than ``min_active`` listings are dropped (thin,
+    unreliable samples), and the list is sorted by ``pct_cutting`` desc.
+
+    Returns a list of dicts (empty on error). Cross-backend: medians computed
+    in Python, window via db.dialect.date_offset_days.
+    """
+    try:
+        from db.dialect import date_offset_days
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT l.distrito,
+                       l.price,
+                       l.size_sqm,
+                       COALESCE(w.net, 0)   AS net_change,
+                       COALESCE(w.drops, 0) AS drops,
+                       COALESCE(w.ups, 0)   AS ups
+                FROM listings l
+                LEFT JOIN (
+                    SELECT listing_id,
+                           SUM(change_amount) AS net,
+                           SUM(CASE WHEN change_amount < 0 THEN 1 ELSE 0 END) AS drops,
+                           SUM(CASE WHEN change_amount > 0 THEN 1 ELSE 0 END) AS ups
+                    FROM price_history
+                    WHERE date_recorded >= """ + date_offset_days('?') + """
+                    GROUP BY listing_id
+                ) w ON w.listing_id = l.listing_id
+                WHERE l.status = 'active'
+                  AND l.size_sqm > 10
+                  AND l.price > 10000
+                  AND l.distrito IS NOT NULL
+                """,
+                (f"-{window_days}",),
+            )
+            rows = cursor.fetchall()
+
+        # Aggregate in Python (cross-backend medians, no PERCENTILE_CONT).
+        from collections import defaultdict
+        buckets: Dict[str, Dict] = defaultdict(
+            lambda: {"sqm": [], "cuts": [], "active": 0, "drops": 0, "ups": 0}
+        )
+        for distrito, price, size_sqm, net_change, drops, ups in rows:
+            b = buckets[distrito]
+            b["active"] += 1
+            b["drops"] += int(drops or 0)
+            b["ups"] += int(ups or 0)
+            if size_sqm and size_sqm > 0:
+                b["sqm"].append(price / size_sqm)
+            if (net_change or 0) < 0:
+                b["cuts"].append(net_change)
+
+        breakdown: List[Dict] = []
+        for distrito, b in buckets.items():
+            if b["active"] < min_active:
+                continue
+            cutters = len(b["cuts"])
+            breakdown.append({
+                "distrito": distrito,
+                "active": b["active"],
+                "pct_cutting": round(cutters / b["active"] * 100, 1),
+                "avg_net_cut": round(statistics.mean(b["cuts"])) if cutters else 0,
+                "drops": b["drops"],
+                "ups": b["ups"],
+                "median_sqm": round(statistics.median(b["sqm"])) if b["sqm"] else None,
+            })
+
+        breakdown.sort(key=lambda d: d["pct_cutting"], reverse=True)
+        return breakdown
+
+    except Exception:
+        logger.exception("Error computing district repricing breakdown")
+        return []
 
 
 # ============================================================================

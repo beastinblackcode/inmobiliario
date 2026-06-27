@@ -16,7 +16,7 @@
 | Calidad de datos | Auditoría cerrada al 100% (purga stale, mediana+IQR en trend, filtro warmup en velocidad de venta, gap-guard en tendencias semanales para el hueco feb-may 2026) |
 | Frontend interno | Streamlit multipage (`st.navigation`, 8 páginas en `pages/`): 🏠 Caza (`mi_zona`, `oportunidades`, `bajadas`, `busqueda`, `seguimientos`, `detalle`) · ⚙️ Operaciones (`admin`, `vigilancia`). Detalle con vista rica de comparables. |
 | Frontend público | Next.js 14 (`market-thermometer/`) en madridhome.tech con `metrics.json` regenerado por CI, ISR y i18n (es/en) |
-| Análisis | Score calidad-precio (NLP de descripciones: urgencia, estado, certificación energética, año), detección vendedor desesperado, gangas vs distrito |
+| Análisis | Score calidad-precio (NLP de descripciones: urgencia, estado, certificación energética, año), score de negociabilidad, detección vendedor desesperado, gangas vs distrito, **desglose de recortes activos por distrito** (`get_district_repricing_breakdown`: % del stock activo bajando precio + recorte medio € en ventana móvil) |
 | ML | Random Forest con OneHotEncoder + intervalo por percentiles de árboles, reentrenamiento automático cuando los datos son más recientes que el modelo |
 | Vigilancia macro | Indicadores internos (incluidos **Absorption Rate, Months of Supply, Rental Yield, notarial gap, lanzamientos CGPJ, morosidad, rent burden**) + macro (BCE Euríbor, INE paro) → market score 0-100 |
 | Auth | Multi-usuario con **bcrypt + rate-limit (5 intentos→5min) + expiry de sesión + audit log** (`auth.py`) |
@@ -56,14 +56,14 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 | Feature | Prio | Esfuerzo | Comentario |
 |---|---|---|---|
 | **Alertas por email para usuarios del front público** | 🔥 | 1-2 semanas | El motor interno ya existe (`alerts_tab.py`). Falta exponerlo en madridhome.tech con email + criterios básicos. Convierte el dashboard público en un producto con retención. |
-| **Comparador de propiedades** (2-4 lado a lado) | 🔥 | 3-4 días | Tabla + radar chart + mapa. Streamlit. La ficha de detalle ya tiene una vista de comparables; falta el comparador lado a lado seleccionable. |
-| **Calculadora ROI** (yield, cashflow, TIR, breakeven) | 🔥 | 1 semana | Inputs: precio, ITP, reforma, alquiler, gastos, financiación. Outputs: yield bruto/neto, cashflow, TIR a 5/10/15 años. |
+| ✅ ~~**Comparador de propiedades** (2-4 lado a lado)~~ | — | — | **Hecho** — página ⚖️ Comparador (`pages/comparador.py` + `tabs/compare_tab.py`): multiselect (2-4, filtrable por sidebar o por seguimientos), tabla lado a lado (precio, €/m², vs mediana barrio, m², hab., planta, días, vendedor, enlace), radar normalizado orientado a comprador-residente (más barato/grande/habitaciones/margen = mejor) y mini-mapa por centroide de barrio. Lógica pura testeada (`tests/unit/test_compare.py`). |
 | **Perfil de barrio inteligente** | ⭐ | 1 semana | Página dedicada con métricas, evolución temporal, comparativa, top oportunidades del barrio. |
 | **Detección de anomalías** | ⭐ | 4 días | Isolation Forest o Z-scores por barrio para flagear chollos / errores / sobreprecios. |
 | **Predicción probabilidad venta 30d** | ⭐ | 1-2 semanas | Modelo de clasificación binaria entrenado con `sold_removed`. Mostrar % en cada ficha. |
 | **Informes PDF/DOCX automatizados** | ⭐ | 1 semana | Semanal, mensual, por distrito. Cron + reportlab/python-docx. |
 | **Heatmap temporal animado** | ⭐ | 4 días | Slider que avanza semana a semana sobre el mapa de calor. |
 | ✅ ~~**Exportación CSV/Excel** desde el dashboard~~ | — | — | **Hecho** — botones de descarga (CSV `utf-8-sig` + Excel vía openpyxl) en la pestaña 🔍 Búsquedas, exportan los listings filtrados con columnas renombradas. |
+| ✅ ~~**Mapa de recortes activos por distrito**~~ | — | — | **Hecho** — `market_indicators.get_district_repricing_breakdown` + tabla "🗺️ Recortes Activos por Distrito" en Oportunidades: % del stock activo bajando precio, recorte medio €, ratio bajan:suben y €/m² mediano en ventana móvil (solo activos, guard de muestra `min_active`). 3ª lente de oportunidad junto al score de negociabilidad (margen estructural) y el ahorro absoluto €. Verificado contra Neon (Arganzuela 23% lidera en frecuencia; Retiro −€73k en euros). |
 | **i18n del Streamlit interno** | 💤 | 3-4 días | Centralizar textos. Hoy mezcla es/en. |
 | **Comparativa de distritos** | 💤 | 3 días | Radar chart superpuesto. |
 
