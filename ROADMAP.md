@@ -56,8 +56,7 @@ Priorización: **🔥 Alta · ⭐ Media · 💤 Baja** · esfuerzo en horas/día
 | Feature | Prio | Esfuerzo | Comentario |
 |---|---|---|---|
 | **Alertas por email para usuarios del front público** | 🔥 | 1-2 semanas | El motor interno ya existe (`alerts_tab.py`). Falta exponerlo en madridhome.tech con email + criterios básicos. Convierte el dashboard público en un producto con retención. |
-| **Comparador de propiedades** (2-4 lado a lado) | 🔥 | 3-4 días | Tabla + radar chart + mapa. Streamlit. La ficha de detalle ya tiene una vista de comparables; falta el comparador lado a lado seleccionable. |
-| **Calculadora ROI** (yield, cashflow, TIR, breakeven) | 🔥 | 1 semana | Inputs: precio, ITP, reforma, alquiler, gastos, financiación. Outputs: yield bruto/neto, cashflow, TIR a 5/10/15 años. |
+| ✅ ~~**Comparador de propiedades** (2-4 lado a lado)~~ | — | — | **Hecho** — página ⚖️ Comparador (`pages/comparador.py` + `tabs/compare_tab.py`): multiselect (2-4, filtrable por sidebar o por seguimientos), tabla lado a lado (precio, €/m², vs mediana barrio, m², hab., planta, días, vendedor, enlace), radar normalizado orientado a comprador-residente (más barato/grande/habitaciones/margen = mejor) y mini-mapa por centroide de barrio. Lógica pura testeada (`tests/unit/test_compare.py`). |
 | **Perfil de barrio inteligente** | ⭐ | 1 semana | Página dedicada con métricas, evolución temporal, comparativa, top oportunidades del barrio. |
 | **Detección de anomalías** | ⭐ | 4 días | Isolation Forest o Z-scores por barrio para flagear chollos / errores / sobreprecios. |
 | **Predicción probabilidad venta 30d** | ⭐ | 1-2 semanas | Modelo de clasificación binaria entrenado con `sold_removed`. Mostrar % en cada ficha. |
