@@ -385,6 +385,47 @@ def render_opportunities_tab(df: pd.DataFrame) -> None:
 
     st.markdown("---")
 
+    # ── Recortes activos por distrito (revealed seller behaviour) ─────────────
+    st.subheader("🗺️ Recortes Activos por Distrito (últimos 35 días)")
+    st.info(
+        "Dónde los vendedores **están bajando precios ahora mismo** (sobre el "
+        "stock activo). Complementa el score de negociabilidad —margen "
+        "*estructural*— con el comportamiento *revelado*: "
+        "**% recortando** = dónde es más probable un vendedor que ya cede · "
+        "**recorte medio €** = cuánto se está cediendo (mayor en premium)."
+    )
+    from market_indicators import get_district_repricing_breakdown
+    _rep = get_district_repricing_breakdown()
+    if _rep:
+        rep_df = pd.DataFrame(_rep)
+        rep_df["ratio"] = rep_df.apply(
+            lambda r: f"{int(r['drops'])}:{int(r['ups'])}", axis=1
+        )
+        show = rep_df[[
+            "distrito", "active", "pct_cutting", "avg_net_cut", "ratio", "median_sqm",
+        ]].rename(columns={
+            "distrito": "Distrito", "active": "Activos", "pct_cutting": "% recortando",
+            "avg_net_cut": "Recorte medio €", "ratio": "Bajan:Suben",
+            "median_sqm": "€/m² mediano",
+        })
+        st.dataframe(
+            show, hide_index=True, use_container_width=True,
+            column_config={
+                "% recortando": st.column_config.NumberColumn(format="%.1f %%"),
+                "Recorte medio €": st.column_config.NumberColumn(format="€%d"),
+                "€/m² mediano": st.column_config.NumberColumn(format="€%d"),
+            },
+        )
+        st.caption(
+            "💡 Tres lentes complementarias: **% recortando** (dónde se cede *ahora*) · "
+            "score de negociabilidad del panel anterior (margen *estructural*) · "
+            "**recorte medio €** (dónde el ahorro absoluto es mayor, típicamente premium)."
+        )
+    else:
+        st.info("Sin historial de precios suficiente para el desglose por distrito.")
+
+    st.markdown("---")
+
     # ── Gangas por distrito (precio/m² 15% bajo media) ────────────────────────
     st.subheader("💎 Gangas por Distrito")
     st.info("Propiedades con precio/m² **15% o más por debajo** del promedio de su distrito.")
