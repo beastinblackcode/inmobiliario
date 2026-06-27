@@ -4,7 +4,7 @@ market_snapshots table from a temporary DB and verifies the math.
 
 Critical metrics to guard:
     active_count        — straight COUNT
-    sold_count_30d/90d  — windowed, lag-shifted by 14 d
+    sold_count_30d/90d  — windowed, lag-shifted by 21 d
     absorption_rate     — sold_30d / active * 100
     months_of_supply    — active / (sold_90d / 3), capped at 36
 """
@@ -93,9 +93,9 @@ class TestComputeSnapshots:
     def test_absorption_rate_formula(self, tmp_db: Path):
         """
         absorption_rate = sold_30d / active_count × 100
-        sold_30d window is lag-shifted by 14 d.
-        So a listing sold 20 d ago counts in the window
-        [today - 14 - 30, today - 14) = [44d ago, 14d ago).
+        sold_30d window is lag-shifted by 21 d.
+        So a listing sold 25 d ago counts in the window
+        [today - 21 - 30, today - 21) = [51d ago, 21d ago).
         """
         conn = get_db()
         today_d = datetime.now().date()
@@ -106,9 +106,9 @@ class TestComputeSnapshots:
             _insert(conn, f"A{i}", "Centro", "Sol", 300_000, 80, today)
 
         # 4 sold listings whose last_seen falls inside the 30-d window
-        # (lag-shifted) → between 14d and 44d ago
+        # (lag-shifted by 21 d) → between 21d and 51d ago
         for i in range(4):
-            d = (today_d - timedelta(days=20 + i)).isoformat()
+            d = (today_d - timedelta(days=25 + i)).isoformat()
             _insert(conn, f"S{i}", "Centro", "Sol", 300_000, 80, d, status="sold_removed")
         conn.commit()
 
@@ -121,7 +121,7 @@ class TestComputeSnapshots:
     def test_months_of_supply_formula(self, tmp_db: Path):
         """
         months_of_supply = active / (sold_90d / 3)
-        Lag-shifted by 14 d, so window is [today-14-90, today-14) = [104d, 14d) ago.
+        Lag-shifted by 21 d, so window is [today-21-90, today-21) = [111d, 21d) ago.
         With active=18 and sold_90d=6 → 18 / (6/3) = 18 / 2 = 9 months.
         """
         conn = get_db()
@@ -132,7 +132,7 @@ class TestComputeSnapshots:
             _insert(conn, f"A{i}", "Centro", "Sol", 300_000, 80, today)
 
         for i in range(6):
-            d = (today_d - timedelta(days=20 + i * 5)).isoformat()
+            d = (today_d - timedelta(days=25 + i * 5)).isoformat()
             _insert(conn, f"S{i}", "Centro", "Sol", 300_000, 80, d, status="sold_removed")
         conn.commit()
 
@@ -158,6 +158,33 @@ class TestComputeSnapshots:
 
         mos = _get_metric(conn, "city", None, "months_of_supply")
         assert mos == pytest.approx(36.0, abs=0.01)
+
+    def test_sold_count_7d_uses_21d_lag(self, tmp_db: Path):
+        """
+        Regression guard for the sold_count (7-day) bug: with LAG=21 the 7-day
+        window is [today-28, today-21). A listing last seen 24 d ago must count;
+        one last seen 18 d ago (younger than the 21-day stale threshold, so not
+        yet eligible to be marked) must NOT — that gap is exactly what made the
+        old LAG=14 metric read a structural 0.
+        """
+        conn = get_db()
+        today_d = datetime.now().date()
+        today = today_d.isoformat()
+
+        for i in range(10):
+            _insert(conn, f"A{i}", "Centro", "Sol", 300_000, 80, today)
+        # In the 7-day window [today-28, today-21):
+        for i in range(3):
+            d = (today_d - timedelta(days=23 + i)).isoformat()   # 23,24,25 d ago
+            _insert(conn, f"IN{i}", "Centro", "Sol", 300_000, 80, d, status="sold_removed")
+        # Too recent (18 d ago, < 21-day threshold) → must be excluded:
+        _insert(conn, "TOO_NEW", "Centro", "Sol", 300_000, 80,
+                (today_d - timedelta(days=18)).isoformat(), status="sold_removed")
+        conn.commit()
+
+        cs.compute_all_snapshots(today)
+
+        assert _get_metric(conn, "city", None, "sold_count") == 3
 
     def test_idempotent_for_distrito_and_barrio_scope(self, tmp_db: Path):
         """

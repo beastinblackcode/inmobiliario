@@ -450,13 +450,13 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
             new_count = cursor.fetchone()[0]
 
             # Sold/removed this week.
-            # mark_stale_as_sold() uses a 14-day threshold before marking a
-            # property as sold_removed, and does NOT update last_seen_date —
-            # it stays as the last day the scraper found the listing active.
-            # So a property that disappeared in week W has last_seen_date ≈ W-2.
-            # We compensate by shifting the detection window +14 days:
-            # "absorbed in week W" ≡ last_seen_date falls in week W-2.
-            shifted_last_seen = date_plus_days('last_seen_date', "'+14'")
+            # mark_stale_as_sold() marks a property sold once its last_seen_date
+            # is older than the stale threshold, and does NOT update
+            # last_seen_date — it stays as the last day the scraper found the
+            # listing active. We compensate by shifting the detection window
+            # forward by that threshold: "absorbed in week W" ≡ last_seen_date
+            # falls _STALE_LAG_DAYS earlier. (21 d — see note on the constant.)
+            shifted_last_seen = date_plus_days('last_seen_date', f"'+{_STALE_LAG_DAYS}'")
             cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
@@ -506,10 +506,17 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
 # ============================================================================
 
 # mark_stale_as_sold() lag: a property's last_seen_date stays as the day
-# the scraper last saw it active.  We only learn it has gone ~14 days later.
-# Any window over sold_removed listings must therefore be shifted back 14
-# days to reflect "what was sold during this calendar window".
-_STALE_LAG_DAYS = 14
+# the scraper last saw it active.  We only learn it has gone ~21 days later.
+# Any window over sold_removed listings must therefore be shifted back by the
+# stale threshold to reflect "what was sold during this calendar window".
+#
+# 21, not 14: the scraper runs lite/auto most days and passes
+# days_threshold=21 (scraper.py), and Tier-2 of mark_stale_as_sold is a hard
+# 21-day cutoff regardless of mode. A 14-day lag left the most recent ~7 days
+# of every sold-window in the "not yet eligible to be marked" zone, so recent
+# sold/absorption counts read structurally low (and sold_count over a 7-day
+# window read 0). Kept in sync with compute_snapshots.py's LAG.
+_STALE_LAG_DAYS = 21
 
 
 def _weekly_anchors(cursor, weeks: int) -> list:
