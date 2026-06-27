@@ -109,6 +109,21 @@ def current_timestamp() -> str:
     return "CURRENT_TIMESTAMP" if is_postgres() else "datetime('now')"
 
 
+def as_date(col: str) -> str:
+    """Normalise a column/expression to a calendar date (drops any time part).
+
+    Postgres has no ``DATE(x)`` function (``DATE`` is a type), so the SQLite
+    idiom ``DATE(col)`` raises ``UndefinedFunction`` there — use this instead.
+
+    >>> as_date("first_seen_date")
+    # postgres → "first_seen_date::date"
+    # sqlite   → "date(first_seen_date)"
+    """
+    if is_postgres():
+        return f"{col}::date"
+    return f"date({col})"
+
+
 def julianday_diff(later: str, earlier: str) -> str:
     """Days between two date expressions, as an integer.
 
