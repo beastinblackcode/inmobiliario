@@ -12,6 +12,18 @@ import plotly.graph_objects as go
 from database import get_price_drop_stats, get_price_trend_by_district, get_daily_price_drops
 
 
+def default_trend_districts(trend_rows: list, n: int = 6) -> list:
+    """The *n* districts with the most listings across the window — a sensible
+    default for the evolution line chart (most data ⇒ least noisy trajectory).
+    Pure helper so the default selection is testable without Streamlit."""
+    totals: dict = {}
+    for r in trend_rows:
+        d = r.get("distrito")
+        if d:
+            totals[d] = totals.get(d, 0) + (r.get("n_listings") or 0)
+    return [d for d, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:n]]
+
+
 def render_price_drops_tab():
     st.header("📉 Bajadas de Precio")
     st.markdown("Monitorización de reducciones de precio en el mercado activo de Madrid.")
@@ -303,3 +315,46 @@ def render_price_drops_tab():
                 paper_bgcolor="rgba(0,0,0,0)",
             )
             st.plotly_chart(fig_heat, use_container_width=True)
+
+        # ── Líneas de evolución €/m² por distrito ─────────────────────────────
+        # Same series as the heatmap above, drawn as lines so trajectories
+        # between zones are directly comparable (the heatmap shows levels, the
+        # lines show direction/slope).
+        st.markdown("---")
+        st.subheader("📈 Líneas de evolución €/m² por distrito")
+        st.caption(
+            "Misma serie que el heatmap, en líneas para comparar la trayectoria "
+            "entre zonas. Por defecto, los distritos con más anuncios."
+        )
+
+        distritos_disp = sorted(df_trend["distrito"].dropna().unique().tolist())
+        seleccion = st.multiselect(
+            "Distritos a mostrar",
+            options=distritos_disp,
+            default=default_trend_districts(trend_data),
+            key="trend_lines_distritos",
+            help="Los distritos con más anuncios dan la serie menos ruidosa.",
+        )
+        if seleccion:
+            df_lines = (
+                df_trend[df_trend["distrito"].isin(seleccion)]
+                .sort_values("week_start")
+            )
+            fig_lines = px.line(
+                df_lines,
+                x="week_start", y="avg_sqm", color="distrito", markers=True,
+                labels={"week_start": "Semana", "avg_sqm": "€/m²", "distrito": "Distrito"},
+            )
+            fig_lines.update_layout(
+                height=450,
+                margin=dict(t=20, b=40),
+                xaxis_title="Semana",
+                yaxis_title="€/m²",
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                legend_title_text="Distrito",
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_lines, use_container_width=True)
+        else:
+            st.info("Selecciona al menos un distrito para ver la evolución.")
