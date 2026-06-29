@@ -223,18 +223,20 @@ def render_admin_tab(df: pd.DataFrame) -> None:
     st.markdown("---")
     st.subheader("📊 Propiedades Cargadas por Distrito y Fecha")
 
+    from db.dialect import as_date, date_offset_days
+
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """
+            f"""
             SELECT
-                DATE(first_seen_date) as date,
+                {as_date('first_seen_date')} as date,
                 distrito,
                 COUNT(*) as properties
             FROM listings
-            WHERE first_seen_date >= date('now', '-30 days')
+            WHERE first_seen_date >= {date_offset_days("'-30'")}
             AND distrito IS NOT NULL
-            GROUP BY DATE(first_seen_date), distrito
+            GROUP BY {as_date('first_seen_date')}, distrito
             ORDER BY date DESC, properties DESC
             """
         )

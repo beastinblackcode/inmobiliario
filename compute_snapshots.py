@@ -143,13 +143,22 @@ def _compute_scope_metrics(
         _upsert_snapshot(conn, date_str, scope_type, scope_value, "median_size_sqm", vals[len(vals) // 2])
         count += 1
 
-    # ── Sold counts (lag-shifted by 14 d) ────────────────────────────────
-    # mark_stale_as_sold() uses a 14-day threshold and does NOT update
-    # last_seen_date when marking sold, so the effective detection date is
-    # last_seen_date + 14 days. We shift each window back 14 days to count
-    # properties that were detected as sold within that window.
+    # ── Sold counts (lag-shifted by the stale threshold) ──────────────────
+    # mark_stale_as_sold() marks a listing sold once its last_seen_date is
+    # older than the stale threshold, and does NOT update last_seen_date when
+    # doing so — the effective detection date is last_seen_date + threshold.
+    # We shift each window back by that threshold to count listings detected
+    # as sold within the window.
+    #
+    # The threshold is 21 d, not 14: the scraper runs lite/auto most days and
+    # passes days_threshold=21 (scraper.py), and Tier-2 of mark_stale_as_sold
+    # is a hard 21-day cutoff regardless of mode. With LAG=14 the 7-day window
+    # [base-21, base-14) landed entirely in the "not yet eligible to be
+    # marked" zone, so sold_count (7 d) was structurally 0 while sold_count_30d
+    # (which reaches back past base-21) stayed non-zero. LAG=21 aligns the
+    # windows with when listings actually become sold.
     base = datetime.strptime(date_str, "%Y-%m-%d")
-    LAG = 14
+    LAG = 21
 
     def _sold_in_window(window_days: int) -> int | None:
         win_end   = (base - timedelta(days=LAG)).strftime("%Y-%m-%d")

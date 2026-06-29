@@ -95,3 +95,11 @@ jobs:
         run: |
           echo "::notice::metrics.json size: $(stat -c%s metrics.json) bytes"
           echo "::notice::barrios_profiles.json size: $(stat -c%s barrios_profiles.json) bytes"
+
+      # Email on any failure above (expired push token, DB outage, exporter
+      # regression, …) so the public-site update never goes stale silently.
+      - name: Notify on failure
+        if: failure()
+        env:
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python notify_failure.py "Export Public Metrics (clean)"
