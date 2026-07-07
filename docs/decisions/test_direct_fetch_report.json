@@ -1,0 +1,67 @@
+{
+  "date": "2026-03-23T19:33:30.840738",
+  "direct_success_rate": 0.0,
+  "results": [
+    {
+      "barrio": "Centro/Embajadores",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Salamanca/Recoletos",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Latina/Lucero",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Carabanchel/Vista Alegre",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Vallecas/Numancia",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Tetu\u00e1n/Bellas Vistas",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Chamber\u00ed/Trafalgar",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    },
+    {
+      "barrio": "Hortaleza/Pinar del Rey",
+      "direct_ok": false,
+      "proxy_ok": false,
+      "direct_listings": null,
+      "proxy_listings": null
+    }
+  ],
+  "cost_projection": {
+    "monthly_proxy_only": 39.6,
+    "monthly_hybrid": 39.6,
+    "savings_pct": 0.0
+  }
+}

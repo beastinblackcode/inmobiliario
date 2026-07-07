@@ -1,0 +1,175 @@
+{
+  "url": "https://www.idealista.com/venta-viviendas/madrid/moratalaz/",
+  "n_per_candidate": 5,
+  "date": "2026-05-31T18:47:02.696555",
+  "candidates": [
+    {
+      "name": "zenrows",
+      "success_rate": 0.0,
+      "p50_latency_s": 0.4,
+      "avg_listings": 0,
+      "avg_orientation_filled": 0,
+      "avg_bytes": 0,
+      "cost_per_req_usd": 0.003,
+      "attempts": [
+        {
+          "ok": false,
+          "status": 400,
+          "latency_s": 0.61,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "HTTP 400"
+        },
+        {
+          "ok": false,
+          "status": 400,
+          "latency_s": 0.4,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "HTTP 400"
+        },
+        {
+          "ok": false,
+          "status": 400,
+          "latency_s": 0.4,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "HTTP 400"
+        },
+        {
+          "ok": false,
+          "status": 400,
+          "latency_s": 0.44,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "HTTP 400"
+        },
+        {
+          "ok": false,
+          "status": 400,
+          "latency_s": 0.4,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "HTTP 400"
+        }
+      ]
+    },
+    {
+      "name": "oxylabs",
+      "success_rate": 0.6,
+      "p50_latency_s": 18.97,
+      "avg_listings": 30,
+      "avg_orientation_filled": 30,
+      "avg_bytes": 363199,
+      "cost_per_req_usd": 0.00135,
+      "attempts": [
+        {
+          "ok": false,
+          "status": 200,
+          "latency_s": 23.18,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "empty payload"
+        },
+        {
+          "ok": false,
+          "status": 200,
+          "latency_s": 22.61,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "empty payload"
+        },
+        {
+          "ok": true,
+          "status": 200,
+          "latency_s": 9.15,
+          "bytes": 363199,
+          "listings": 30,
+          "orientation": 30,
+          "reason": ""
+        },
+        {
+          "ok": true,
+          "status": 200,
+          "latency_s": 18.97,
+          "bytes": 363200,
+          "listings": 30,
+          "orientation": 30,
+          "reason": ""
+        },
+        {
+          "ok": true,
+          "status": 200,
+          "latency_s": 3.0,
+          "bytes": 363199,
+          "listings": 30,
+          "orientation": 30,
+          "reason": ""
+        }
+      ]
+    },
+    {
+      "name": "scrapingbee",
+      "success_rate": 0.2,
+      "p50_latency_s": 120.1,
+      "avg_listings": 32,
+      "avg_orientation_filled": 30,
+      "avg_bytes": 710939,
+      "cost_per_req_usd": 0.005,
+      "attempts": [
+        {
+          "ok": false,
+          "status": 0,
+          "latency_s": 120.12,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "ReadTimeout"
+        },
+        {
+          "ok": false,
+          "status": 0,
+          "latency_s": 120.11,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "ReadTimeout"
+        },
+        {
+          "ok": true,
+          "status": 200,
+          "latency_s": 12.35,
+          "bytes": 710939,
+          "listings": 32,
+          "orientation": 30,
+          "reason": ""
+        },
+        {
+          "ok": false,
+          "status": 0,
+          "latency_s": 120.08,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "ReadTimeout"
+        },
+        {
+          "ok": false,
+          "status": 0,
+          "latency_s": 120.1,
+          "bytes": 0,
+          "listings": 0,
+          "orientation": 0,
+          "reason": "ReadTimeout"
+        }
+      ]
+    }
+  ]
+}

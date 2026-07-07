@@ -21,6 +21,16 @@ real_estate.db
 
 # Mi Zona — per-user buyer criteria (local persistence)
 .streamlit/mi_zona_*.json
+.streamlit/userpref_*.json
+
+# Claude Code local settings
+.claude/
+
+# Data spreadsheets (kept locally, not versioned)
+*.xlsx
+
+# market-thermometer is its own git repo, not part of this project
+market-thermometer/
 
 # IDE
 .vscode/
