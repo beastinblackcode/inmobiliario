@@ -1,0 +1,76 @@
+{
+  "date": "2026-03-24T11:43:36.146563",
+  "playwright_success_rate": 0.0,
+  "stealth_enabled": false,
+  "results": [
+    {
+      "barrio": "Centro/Embajadores",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 1.8
+    },
+    {
+      "barrio": "Salamanca/Recoletos",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 1.98
+    },
+    {
+      "barrio": "Latina/Lucero",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 2.9
+    },
+    {
+      "barrio": "Carabanchel/Vista Alegre",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 1.81
+    },
+    {
+      "barrio": "Vallecas/Numancia",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 2.42
+    },
+    {
+      "barrio": "Tetu\u00e1n/Bellas Vistas",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 2.89
+    },
+    {
+      "barrio": "Chamber\u00ed/Trafalgar",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 1.9
+    },
+    {
+      "barrio": "Hortaleza/Pinar del Rey",
+      "playwright_ok": false,
+      "proxy_ok": false,
+      "playwright_listings": null,
+      "proxy_listings": null,
+      "playwright_time": 2.99
+    }
+  ],
+  "cost_projection": {
+    "monthly_proxy_only": 39.6,
+    "monthly_hybrid": 39.6,
+    "savings_pct": 0.0
+  }
+}

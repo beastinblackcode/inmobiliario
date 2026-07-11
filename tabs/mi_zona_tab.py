@@ -51,9 +51,11 @@ DEFAULT_CRITERIA: dict[str, Any] = {
     "barrios":    [],
     "max_price":  450_000,
     "min_size":   60,
+    "max_size":   None,                   # None → no upper bound
     "min_rooms":  2,
     "max_rooms":  4,
     "seller_any": True,                   # False → only Particular
+    "ascensor":   False,                  # True → only listings with a lift
 }
 
 
@@ -123,12 +125,26 @@ def _apply_criteria(df: pd.DataFrame, c: dict) -> pd.DataFrame:
         out = out[out["price"] <= c["max_price"]]
     if c.get("min_size"):
         out = out[out["size_sqm"].fillna(0) >= c["min_size"]]
+    if c.get("max_size"):
+        # ``fillna(0)`` so listings with an unknown size are treated as
+        # below any ceiling and kept — same tolerant stance as min_size.
+        out = out[out["size_sqm"].fillna(0) <= c["max_size"]]
     if c.get("min_rooms") is not None:
         out = out[out["rooms"].fillna(0) >= c["min_rooms"]]
     if c.get("max_rooms") is not None:
         out = out[out["rooms"].fillna(99) <= c["max_rooms"]]
     if not c.get("seller_any", True):
         out = out[out["seller_type"] == "Particular"]
+    if c.get("ascensor"):
+        # There's no dedicated lift column; the signal lives in the free-text
+        # ``floor`` field ("3ª planta exterior con ascensor" / "sin ascensor").
+        # Keep only rows whose floor explicitly says "con ascensor" — being
+        # strict here is deliberate: "sin ascensor" also contains the word
+        # "ascensor", and an unknown floor shouldn't sneak past a hard filter.
+        floor = out.get("floor")
+        if floor is None:
+            return out.iloc[0:0]
+        out = out[floor.fillna("").str.contains("con ascensor", case=False)]
     return out
 
 
@@ -255,13 +271,16 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                     step=5,
                 )
             with c3:
-                seller_any = st.selectbox(
-                    "Vendedor",
-                    options=["Cualquiera", "Solo particular"],
-                    index=0 if criteria.get("seller_any", True) else 1,
+                # 0 in the widget means "no upper bound" — mapped to None below.
+                max_size = st.number_input(
+                    "Tamaño máximo (m²)",
+                    min_value=0, max_value=500,
+                    value=int(criteria.get("max_size") or 0),
+                    step=5,
+                    help="0 = sin tope.",
                 )
 
-            c4, c5 = st.columns(2)
+            c4, c5, c6 = st.columns(3)
             with c4:
                 min_rooms = st.number_input(
                     "Habitaciones mín.",
@@ -276,6 +295,18 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                     value=int(criteria.get("max_rooms", 4)),
                     step=1,
                 )
+            with c6:
+                seller_any = st.selectbox(
+                    "Vendedor",
+                    options=["Cualquiera", "Solo particular"],
+                    index=0 if criteria.get("seller_any", True) else 1,
+                )
+
+            ascensor = st.checkbox(
+                "Solo con ascensor",
+                value=bool(criteria.get("ascensor", False)),
+                help="Filtra por la mención «con ascensor» en la planta del anuncio.",
+            )
 
             submitted = st.form_submit_button("💾 Guardar criterios", type="primary")
             if submitted:
@@ -283,9 +314,11 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                     "barrios":    picked_barrios,
                     "max_price":  int(max_price),
                     "min_size":   int(min_size),
+                    "max_size":   int(max_size) or None,
                     "min_rooms":  int(min_rooms),
                     "max_rooms":  int(max_rooms),
                     "seller_any": seller_any == "Cualquiera",
+                    "ascensor":   bool(ascensor),
                 }
                 _save_criteria(new_criteria)
                 # Clear the per-criteria ranking cache so the new
@@ -301,12 +334,18 @@ def _render_summary_chip(criteria: dict, n_matches: int) -> None:
         st.info("Aún no has definido barrios. Abre **Criterios** para empezar.")
         return
     seller_s = "particular" if not criteria["seller_any"] else "cualquier vendedor"
+    size_s = (
+        f"{criteria['min_size']}–{criteria['max_size']} m²"
+        if criteria.get("max_size")
+        else f"≥ {criteria['min_size']} m²"
+    )
+    lift_s = " · con ascensor" if criteria.get("ascensor") else ""
     st.caption(
         f"📍 **{len(criteria['barrios'])} barrios** · "
         f"≤ €{criteria['max_price']:,} · "
-        f"≥ {criteria['min_size']} m² · "
+        f"{size_s} · "
         f"{criteria['min_rooms']}–{criteria['max_rooms']} habitaciones · "
-        f"{seller_s} · "
+        f"{seller_s}{lift_s} · "
         f"**{n_matches} listings activos** en el universo"
     )
 

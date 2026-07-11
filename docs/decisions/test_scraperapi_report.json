@@ -1,0 +1,80 @@
+{
+  "date": "2026-03-24T12:32:54.615139",
+  "scraperapi_proxy_rate": 0.375,
+  "scraperapi_render_rate": 0.5,
+  "brightdata_rate": 0.0,
+  "results": [
+    {
+      "barrio": "Centro/Embajadores",
+      "sp_ok": false,
+      "sr_ok": false,
+      "bd_ok": false,
+      "sp_listings": null,
+      "sr_listings": null,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Salamanca/Recoletos",
+      "sp_ok": false,
+      "sr_ok": false,
+      "bd_ok": false,
+      "sp_listings": null,
+      "sr_listings": null,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Latina/Lucero",
+      "sp_ok": false,
+      "sr_ok": false,
+      "bd_ok": false,
+      "sp_listings": null,
+      "sr_listings": null,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Carabanchel/Vista Alegre",
+      "sp_ok": false,
+      "sr_ok": false,
+      "bd_ok": false,
+      "sp_listings": null,
+      "sr_listings": null,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Vallecas/Numancia",
+      "sp_ok": false,
+      "sr_ok": true,
+      "bd_ok": false,
+      "sp_listings": null,
+      "sr_listings": 30,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Tetu\u00e1n/Bellas Vistas",
+      "sp_ok": true,
+      "sr_ok": true,
+      "bd_ok": false,
+      "sp_listings": 30,
+      "sr_listings": 30,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Chamber\u00ed/Trafalgar",
+      "sp_ok": true,
+      "sr_ok": true,
+      "bd_ok": false,
+      "sp_listings": 30,
+      "sr_listings": 30,
+      "bd_listings": null
+    },
+    {
+      "barrio": "Hortaleza/Pinar del Rey",
+      "sp_ok": true,
+      "sr_ok": true,
+      "bd_ok": false,
+      "sp_listings": 30,
+      "sr_listings": 30,
+      "bd_listings": null
+    }
+  ]
+}
