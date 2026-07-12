@@ -138,13 +138,13 @@ def _apply_criteria(df: pd.DataFrame, c: dict) -> pd.DataFrame:
     if c.get("ascensor"):
         # There's no dedicated lift column; the signal lives in the free-text
         # ``floor`` field ("3ª planta exterior con ascensor" / "sin ascensor").
-        # Keep only rows whose floor explicitly says "con ascensor" — being
-        # strict here is deliberate: "sin ascensor" also contains the word
-        # "ascensor", and an unknown floor shouldn't sneak past a hard filter.
+        # Lenient stance: exclude only listings that *explicitly* say "sin
+        # ascensor". Rows that say "con ascensor" and rows with an unknown /
+        # blank floor are both kept — a missing mention shouldn't drop an
+        # otherwise-matching flat that may well have a lift.
         floor = out.get("floor")
-        if floor is None:
-            return out.iloc[0:0]
-        out = out[floor.fillna("").str.contains("con ascensor", case=False)]
+        if floor is not None:
+            out = out[~floor.fillna("").str.contains("sin ascensor", case=False)]
     return out
 
 
@@ -305,7 +305,8 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
             ascensor = st.checkbox(
                 "Solo con ascensor",
                 value=bool(criteria.get("ascensor", False)),
-                help="Filtra por la mención «con ascensor» en la planta del anuncio.",
+                help="Excluye solo los anuncios que dicen «sin ascensor»; "
+                     "conserva los que lo mencionan y los que no indican planta.",
             )
 
             submitted = st.form_submit_button("💾 Guardar criterios", type="primary")

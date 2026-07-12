@@ -163,13 +163,14 @@ class TestApplyCriteria:
         out = _apply_criteria(_sample_df(), c)
         assert set(out["listing_id"]) == {"A", "B", "C", "D", "E"}
 
-    def test_ascensor_only(self):
+    def test_ascensor_lenient_excludes_only_explicit_sin(self):
         from tabs.mi_zona_tab import _apply_criteria, DEFAULT_CRITERIA
         c = {**DEFAULT_CRITERIA, "barrios": [], "max_price": 10_000_000,
              "min_size": 0, "min_rooms": 0, "max_rooms": 99, "ascensor": True}
         out = _apply_criteria(_sample_df(), c)
-        # A/C/E say "con ascensor"; B says "sin ascensor"; D floor is unknown.
-        assert set(out["listing_id"]) == {"A", "C", "E"}
+        # A/C/E say "con ascensor" → kept. D floor is unknown → kept (lenient).
+        # Only B says "sin ascensor" → dropped.
+        assert set(out["listing_id"]) == {"A", "C", "D", "E"}
 
     def test_rooms_range(self):
         from tabs.mi_zona_tab import _apply_criteria, DEFAULT_CRITERIA
