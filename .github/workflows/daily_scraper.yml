@@ -77,6 +77,10 @@ jobs:
           BRIGHTDATA_RESIDENTIAL_PASS: ${{ secrets.BRIGHTDATA_RESIDENTIAL_PASS }}
           # Billing API token: enables real month-to-date cost in the email.
           BRIGHTDATA_API_TOKEN: ${{ secrets.BRIGHTDATA_API_TOKEN }}
+          # Safety cap: max paid proxy requests per run (0 = no limit).
+          # ~4.7x the largest observed full sweep (531 req); halts runaways
+          # at ~$3.75/run under per-request pricing.
+          BRIGHTDATA_REQUEST_BUDGET: "2500"
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python scraper.py
         continue-on-error: true    # Partial scrapes still provide valuable data
