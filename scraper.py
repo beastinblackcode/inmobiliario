@@ -76,7 +76,7 @@ BRIGHTDATA_API_TOKEN = os.getenv('BRIGHTDATA_API_TOKEN', '')
 BRIGHTDATA_ZONE = os.getenv('BRIGHTDATA_ZONE', 'web_unlocker2')
 
 # Residential proxy (cheaper, $8/GB) — tried first as primary proxy tier
-# Falls back to Web Unlocker (BRIGHTDATA_HOST, $15/GB) on failure
+# Falls back to Web Unlocker (BRIGHTDATA_HOST, $0.0015/req) on failure
 BRIGHTDATA_RESIDENTIAL_USER = os.getenv('BRIGHTDATA_RESIDENTIAL_USER', BRIGHTDATA_USER)
 BRIGHTDATA_RESIDENTIAL_PASS = os.getenv('BRIGHTDATA_RESIDENTIAL_PASS', BRIGHTDATA_PASS)
 BRIGHTDATA_RESIDENTIAL_HOST = os.getenv('BRIGHTDATA_RESIDENTIAL_HOST', '')
@@ -548,7 +548,7 @@ def _build_proxy_dict(user: str, password: str, host: str) -> Optional[Dict]:
 
 def get_proxy_config() -> Optional[Dict]:
     """
-    Configure Bright Data Web Unlocker proxy (expensive fallback tier, $15/GB).
+    Configure Bright Data Web Unlocker proxy (per-request tier, $0.0015/req).
 
     Returns:
         Proxy configuration dict or None if credentials missing
@@ -622,6 +622,12 @@ def _budget_exceeded() -> bool:
 # diverges meaningfully from this estimate.
 OXYLABS_COST_PER_REQ = 0.00135
 
+# Per-request flat rate for the BrightData Web Unlocker zone. The zone was
+# migrated off the legacy $15/GB plan to per-request pricing on 2026-07-17
+# ($1.50 per 1K requests, pay-as-you-go, no monthly minimum). Under this
+# model the page *size* no longer affects cost — only the request count.
+UNLOCKER_COST_PER_REQ = 0.0015
+
 
 def get_brightdata_cost_estimate():
     """
@@ -631,24 +637,23 @@ def get_brightdata_cost_estimate():
     - Direct (curl_cffi):  free
     - Oxylabs Web Scraper: $0.00135 per request (flat, primary tier)
     - Residential proxy:   $8/GB  (legacy, disabled in practice)
-    - Web Unlocker:        $15/GB (BrightData fallback)
+    - Web Unlocker:        $0.0015 per request (per-request plan since 2026-07-17)
 
-    Bandwidth-based tiers estimate ~1.4 MB per Web Unlocker request.
+    The Web Unlocker zone was migrated off the legacy $15/GB plan to
+    per-request pricing on 2026-07-17, so its cost is now a flat
+    ``UNLOCKER_COST_PER_REQ`` per call and page *size* no longer matters —
+    only the request count. The residential tier (disabled in practice)
+    still bills by bandwidth and keeps the ~1.4 MB/req estimate.
 
-    NOTE on calibration: the Web Unlocker bills *all* unblocking traffic
-    (rendered page, internal retries, sub-resources), not just the final
-    HTML. The real figure measured against the BrightData billing API on
-    2026-06-09 was 4.11 GB across the 30-day window — roughly 1.4 MB per
-    request, ~7x the old 200 KB HTML-only assumption that made this
-    estimate read ~6x too low. The true cost is reported separately via
-    ``fetch_brightdata_real_cost`` when an API token is configured; this
-    estimate is only the fallback when it is not.
+    The true cost is reported separately via ``fetch_brightdata_real_cost``
+    when an API token is configured; this estimate is only the fallback
+    when it is not.
 
     Name kept as ``get_brightdata_cost_estimate`` for backwards
     compatibility with callers that store it under that key in
     scraping_log; the returned dict carries Oxylabs fields as well.
     """
-    AVG_PAGE_SIZE_KB = 1400  # Calibrated to real Web Unlocker billing (≈1.4 MB/req)
+    AVG_PAGE_SIZE_KB = 1400  # residential-tier bandwidth estimate (≈1.4 MB/req)
 
     residential_requests = residential_counter['total']
     unlocker_requests = request_counter['total']
@@ -657,21 +662,19 @@ def get_brightdata_cost_estimate():
     total_all = (residential_requests + unlocker_requests
                  + direct_requests + oxylabs_requests)
 
-    # Bandwidth-based tier costs.
+    # Residential tier still bills by bandwidth (legacy, disabled in practice).
     residential_gb = (residential_requests * AVG_PAGE_SIZE_KB) / (1024 * 1024)
-    unlocker_gb    = (unlocker_requests    * AVG_PAGE_SIZE_KB) / (1024 * 1024)
-
     residential_cost = residential_gb * 8.0    # $8/GB
-    unlocker_cost    = unlocker_gb    * 15.0   # $15/GB
 
-    # Per-request tier (Oxylabs charges per call regardless of payload size).
-    oxylabs_cost = oxylabs_requests * OXYLABS_COST_PER_REQ
+    # Per-request tiers: Web Unlocker (since 2026-07-17) and Oxylabs both
+    # charge per call regardless of payload size.
+    unlocker_cost = unlocker_requests * UNLOCKER_COST_PER_REQ
+    oxylabs_cost  = oxylabs_requests  * OXYLABS_COST_PER_REQ
 
     actual_cost = residential_cost + unlocker_cost + oxylabs_cost
 
-    # Counterfactual: what would BrightData Web Unlocker alone have cost?
-    all_unlocker_gb = (total_all * AVG_PAGE_SIZE_KB) / (1024 * 1024)
-    would_have_cost = all_unlocker_gb * 15.0
+    # Counterfactual: what would routing everything through Web Unlocker cost?
+    would_have_cost = total_all * UNLOCKER_COST_PER_REQ
     savings = would_have_cost - actual_cost
 
     return {
@@ -973,7 +976,7 @@ def fetch_page(
     """
     Fetch HTML content with tiered strategy:
 
-        direct (free) → BrightData Web Unlocker ($15/GB) → Oxylabs (disabled)
+        direct (free) → BrightData Web Unlocker ($0.0015/req) → Oxylabs (disabled)
 
     Strategy depends on FETCH_MODE:
     - 'hybrid':  try direct first (free), then Web Unlocker, then Oxylabs
@@ -1024,7 +1027,7 @@ def fetch_page(
         # hybrid mode: direct failed, try proxies
         print(f"  ↻ Direct blocked (HTTP {status}) — falling back to proxy")
 
-    # ----- TIER 1: BRIGHTDATA WEB UNLOCKER ($15/GB) — primary paid tier -----
+    # ----- TIER 1: BRIGHTDATA WEB UNLOCKER ($0.0015/req) — primary paid tier -----
     # Primary as of 2026-06-03: the Oxylabs subscription was cancelled to
     # drop its ~€50/mo floor (real usage was ~$10/mo). Web Unlocker is
     # pay-as-you-go with no monthly minimum and already proven on
@@ -1868,7 +1871,7 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
             print(f"║  {'  ✓ Exitosas:':<30} {residential_ok:>8,}  ({r_rate:4.1f}%)         ║")
         if unlocker_req > 0:
             u_rate = unlocker_ok / unlocker_req * 100
-            print(f"║  {'Tier 3 — unlocker ($15/GB):':<30} {unlocker_req:>8,}                   ║")
+            print(f"║  {'Tier 3 — unlocker ($0.0015/r):':<30} {unlocker_req:>8,}                   ║")
             print(f"║  {'  ✓ Exitosas:':<30} {unlocker_ok:>8,}  ({u_rate:4.1f}%)         ║")
         print(f"║  {'Requests totales:':<30} {total_req:>8,}                   ║")
         print(f"║  {'  ✗ Fallidas (total):':<30} {fail_req:>8,}                   ║")

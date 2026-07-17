@@ -63,7 +63,7 @@ DEFAULT_URL = "https://www.idealista.com/venta-viviendas/madrid/moratalaz/"
 # ──────────────────────────────────────────────────────────────────────────
 COST_PER_REQ = {
     'curl_cffi':         0.0,
-    'brightdata':        0.003,    # $15/GB · ~200 KB/page
+    'brightdata':        0.0015,   # Web Unlocker per-request plan ($1.50/1K)
     'zenrows':           0.003,    # premium plan ~$3/1k
     'oxylabs':           0.00135,  # web scraper API entry tier
     'scrapingbee':       0.005,    # stealth proxies

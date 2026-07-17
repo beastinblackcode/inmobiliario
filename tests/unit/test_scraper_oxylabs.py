@@ -159,3 +159,20 @@ def test_cost_estimate_includes_oxylabs_tier():
     expected_cost = 12 * scraper.OXYLABS_COST_PER_REQ
     assert abs(est['oxylabs_cost_usd'] - expected_cost) < 1e-6
     assert abs(est['estimated_cost_usd'] - expected_cost) < 1e-6
+
+
+def test_unlocker_cost_is_per_request():
+    """Web Unlocker bills per request ($0.0015/req) since 2026-07-17, not $/GB."""
+    scraper.request_counter.update(successful=90, failed=10, total=100)
+    scraper.oxylabs_counter.update(successful=0, failed=0, total=0)
+    scraper.residential_counter.update(successful=0, failed=0, total=0)
+    scraper.direct_counter.update(successful=0, failed=0, total=0)
+
+    est = scraper.get_brightdata_cost_estimate()
+
+    assert est['unlocker_requests'] == 100
+    expected_cost = 100 * scraper.UNLOCKER_COST_PER_REQ
+    assert abs(est['unlocker_cost_usd'] - expected_cost) < 1e-6
+    assert abs(est['estimated_cost_usd'] - expected_cost) < 1e-6
+    # All-unlocker counterfactual == actual, so no savings vs itself.
+    assert abs(est['savings_usd']) < 1e-6
