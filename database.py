@@ -5,7 +5,7 @@ Manages SQLite database operations for property listings.
 
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional, Set
 from contextlib import contextmanager
 from pathlib import Path
@@ -265,6 +265,20 @@ def init_database():
             ON market_snapshots(scope_type, scope_value, metric_name, date_computed)
         """)
 
+        # Depth-coverage tracking consumed by mark_stale_as_sold Tier 1.
+        # Created here (not only in the migration) so every SQLite entry
+        # point has it — Tier 1 silently marks nothing when it is absent.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS barrio_coverage (
+                distrito                TEXT NOT NULL,
+                barrio                  TEXT NOT NULL,
+                last_deep_scrape_date   TEXT NOT NULL,
+                pages_scraped           INTEGER,
+                updated_at              TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (distrito, barrio)
+            )
+        """)
+
         print("✓ Database initialized successfully")
 
     # Import notarial CSV if table is empty
@@ -331,6 +345,107 @@ def migrate_create_scraping_log_table():
             )
         """)
         print("✓ Scraping log table initialized")
+
+
+def migrate_create_barrio_coverage_table():
+    """
+    Migration: Create barrio_coverage table (depth-aware scrape tracking).
+
+    No-op on Postgres — Alembic owns the schema (see
+    ``alembic/versions/0009_barrio_coverage.py``).
+    """
+    from db.dialect import is_postgres
+    if is_postgres():
+        return
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS barrio_coverage (
+                distrito TEXT NOT NULL,
+                barrio TEXT NOT NULL,
+                last_deep_scrape_date TEXT NOT NULL,
+                pages_scraped INTEGER,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (distrito, barrio)
+            )
+        """)
+        print("✓ Barrio coverage table initialized")
+
+
+def record_barrio_coverage(distrito: str, barrio: str, pages_scraped: int,
+                           scrape_date: Optional[str] = None) -> None:
+    """
+    Record that a barrio was swept to the end of its pagination today.
+
+    Only call this after a *complete* full-mode sweep.  A barrio cut
+    short by a 404/502, a failed fetch, or the MAX_PAGES cap has not
+    been fully covered, and recording it would recreate the false-sold
+    bug this table exists to prevent (see migration 0009).
+
+    ``mark_stale_as_sold`` Tier 1 reads this table to decide whether a
+    missing listing is genuinely gone or merely unvisited.
+    """
+    if not distrito or not barrio:
+        return
+
+    scrape_date = scrape_date or datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            # UPSERT: same syntax works on SQLite 3.24+ and Postgres.
+            cursor.execute("""
+                INSERT INTO barrio_coverage
+                    (distrito, barrio, last_deep_scrape_date, pages_scraped)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (distrito, barrio) DO UPDATE
+                    SET last_deep_scrape_date = excluded.last_deep_scrape_date,
+                        pages_scraped         = excluded.pages_scraped
+            """, (distrito, barrio, scrape_date, pages_scraped))
+    except Exception:
+        # Coverage tracking is best-effort: a failure here must not abort
+        # the scrape.  Worst case the barrio looks uncovered and Tier 1
+        # conservatively skips it.
+        logger.exception("Error recording barrio coverage for %s/%s", distrito, barrio)
+
+
+def get_last_full_sweep_date() -> Optional[date]:
+    """
+    Return the most recent date any barrio was swept to full depth, or
+    None if no depth coverage exists yet (fresh DB, or table missing).
+
+    This is ``max(last_deep_scrape_date)`` over ``barrio_coverage``, which
+    only receives rows from complete full-mode sweeps.  It is the signal
+    ``resolve_scrape_mode`` uses to decide when the next full sweep is due,
+    replacing the old fixed-weekday trigger that drifted against the
+    every-2-day cron and left 14–42 day gaps between sweeps.
+
+    None (no coverage) is treated by the caller as "a full sweep is due".
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(last_deep_scrape_date) FROM barrio_coverage")
+            row = cursor.fetchone()
+    except Exception:
+        # Missing/unreadable table → behave as "never swept" so the caller
+        # falls back to a full sweep rather than silently going lite.
+        logger.exception("Could not read barrio_coverage for sweep scheduling")
+        return None
+
+    val = row[0] if row else None
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    # SQLite stores the date as TEXT (YYYY-MM-DD).
+    try:
+        return date.fromisoformat(str(val)[:10])
+    except ValueError:
+        return None
 
 
 def log_scraping_execution(
@@ -807,9 +922,18 @@ def mark_stale_as_sold(days_threshold: int = 14) -> int:
     Mark listings as sold/removed using a two-tier approach:
 
     Tier 1 (days_threshold, default 14 days):
-        Mark as sold if not seen in N days AND their barrio has been
-        successfully scraped during that window (proves the scraper
-        covered that zone and the listing is genuinely gone).
+        Mark as sold if not seen in N days AND their barrio was swept
+        to full depth during that window (proves the scraper actually
+        looked at every page of that zone and the listing is gone).
+
+        Depth matters: before 2026-07-19 this checked only whether *any*
+        listing in the barrio had a recent last_seen_date.  In lite mode
+        the scraper reads page 1 only, so a barrio whose pages 2..N had
+        gone unread for 42 days still counted as "covered" and every
+        deep-page listing was marked sold on schedule (~5.6k false
+        positives, all resurrected by the next full sweep).  Coverage is
+        now read from ``barrio_coverage``, written only on *complete*
+        full-mode sweeps — see ``record_barrio_coverage``.
 
         Why 14 days (raised from 7 in April 2026): the scraper runs
         every 3 days (Mon/Thu).  With a 7-day threshold, a listing
@@ -821,10 +945,18 @@ def mark_stale_as_sold(days_threshold: int = 14) -> int:
         downstream consumers (compute_snapshots.py, market_indicators)
         already assumed a 14-day lag when computing weekly windows.
 
-    Tier 2 (hard_cutoff = 21 days):
-        Mark as sold if not seen in 21+ days regardless of barrio
+    Tier 2 (hard_cutoff = 60 days, ``STALE_HARD_CUTOFF_DAYS``):
+        Mark as sold if not seen in N+ days regardless of barrio
         coverage. This prevents "ghost listings" from accumulating
         when a barrio has persistent scraping gaps.
+
+        Raised 21 → 60 on 2026-07-19.  Tier 2 ignores coverage by
+        design, so at 21 days it re-created the exact false-sold
+        problem the Tier 1 fix removes: observed gaps between complete
+        sweeps reached 42 days (2026-06-07 → 2026-07-19), which a
+        21-day cutoff turns into mass false positives. 60 days clears
+        the worst observed gap with margin while still capping ghosts.
+        It is a backstop, not the primary mechanism — Tier 1 is.
 
     Circuit breaker: max 1000 marks per batch to prevent runaway
     false positives from a single bad run.
@@ -837,7 +969,9 @@ def mark_stale_as_sold(days_threshold: int = 14) -> int:
         Number of listings marked as sold
     """
     MAX_BATCH_SIZE = 1000
-    HARD_CUTOFF_DAYS = 21  # Absolute max regardless of barrio coverage
+    # Absolute max regardless of barrio coverage. Env-overridable so a
+    # prolonged sweep outage can be ridden out without a code change.
+    HARD_CUTOFF_DAYS = int(os.getenv('STALE_HARD_CUTOFF_DAYS', '60'))
 
     try:
         with get_connection() as conn:
@@ -845,38 +979,52 @@ def mark_stale_as_sold(days_threshold: int = 14) -> int:
             cutoff_date = (datetime.now() - timedelta(days=days_threshold)).strftime("%Y-%m-%d")
             hard_cutoff_date = (datetime.now() - timedelta(days=HARD_CUTOFF_DAYS)).strftime("%Y-%m-%d")
 
-            # Tier 1: Not seen in N days + barrio was scraped recently
-            cursor.execute("""
-                SELECT listing_id FROM listings
-                WHERE status = 'active'
-                AND last_seen_date < ?
-                AND barrio IN (
-                    SELECT DISTINCT barrio FROM listings
-                    WHERE last_seen_date >= ?
-                    AND barrio IS NOT NULL
-                )
-                LIMIT ?
-            """, (cutoff_date, cutoff_date, MAX_BATCH_SIZE))
-            tier1_ids = [row[0] for row in cursor.fetchall()]
+            # Tier 1: not seen in N days + barrio swept to full depth in
+            # that same window.  EXISTS against barrio_coverage rather
+            # than "some listing here looks fresh" — see docstring.
+            # An empty/missing coverage table yields zero rows, which is
+            # the safe direction: nothing gets marked.
+            try:
+                cursor.execute("""
+                    SELECT l.listing_id FROM listings l
+                    WHERE l.status = 'active'
+                    AND l.last_seen_date < ?
+                    AND EXISTS (
+                        SELECT 1 FROM barrio_coverage bc
+                        WHERE bc.barrio   = l.barrio
+                        AND bc.distrito = l.distrito
+                        AND bc.last_deep_scrape_date >= ?
+                    )
+                    LIMIT ?
+                """, (cutoff_date, cutoff_date, MAX_BATCH_SIZE))
+                tier1_ids = [row[0] for row in cursor.fetchall()]
+            except Exception:
+                # Missing/unreadable barrio_coverage must not take Tier 2
+                # down with it: the hard cutoff is the safety net for
+                # ghost listings and has no coverage dependency.
+                logger.exception("Tier 1 coverage lookup failed — falling back to Tier 2 only")
+                tier1_ids = []
 
-            # Tier 2: Not seen in 21+ days (regardless of barrio coverage)
+            # Tier 2: not seen in HARD_CUTOFF_DAYS+ days, no coverage
+            # requirement.  Only needs to exclude what Tier 1 already
+            # picked up; the old query re-derived that set with the same
+            # buggy coverage subquery, so it is gone.
             remaining = MAX_BATCH_SIZE - len(tier1_ids)
             tier2_ids = []
             if remaining > 0:
-                cursor.execute("""
+                exclude = ''
+                params = [hard_cutoff_date]
+                if tier1_ids:
+                    exclude = f"AND listing_id NOT IN ({','.join('?' * len(tier1_ids))})"
+                    params.extend(tier1_ids)
+                params.append(remaining)
+                cursor.execute(f"""
                     SELECT listing_id FROM listings
                     WHERE status = 'active'
                     AND last_seen_date < ?
-                    AND listing_id NOT IN (
-                        SELECT listing_id FROM listings
-                        WHERE status = 'active' AND last_seen_date < ?
-                        AND barrio IN (
-                            SELECT DISTINCT barrio FROM listings
-                            WHERE last_seen_date >= ? AND barrio IS NOT NULL
-                        )
-                    )
+                    {exclude}
                     LIMIT ?
-                """, (hard_cutoff_date, cutoff_date, cutoff_date, remaining))
+                """, tuple(params))
                 tier2_ids = [row[0] for row in cursor.fetchall()]
 
             ids_to_mark = tier1_ids + tier2_ids

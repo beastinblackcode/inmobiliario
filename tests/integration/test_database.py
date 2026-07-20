@@ -140,10 +140,16 @@ class TestMarkStaleAsSold:
         assert status == "active"
         assert isinstance(marked, int) and marked >= 0
 
-    def test_21_day_fallback_marks_old_listings(self, tmp_db: Path):
-        # Insert a 25-day-old listing — must always be caught by the
-        # 21-day fallback even if its barrio has no recent activity.
-        old_date = (datetime.now().date() - timedelta(days=25)).isoformat()
+    def test_hard_cutoff_marks_old_listings(self, tmp_db: Path):
+        # Insert a 70-day-old listing — must always be caught by the
+        # hard-cutoff fallback even if its barrio has no recent activity.
+        #
+        # Cutoff raised 21 → 60 days on 2026-07-19: Tier 2 ignores barrio
+        # coverage by design, and at 21 days it re-created the false-sold
+        # bug that the coverage-aware Tier 1 exists to prevent (observed
+        # gaps between complete sweeps reached 42 days). See
+        # database.mark_stale_as_sold and tests/regression/test_stale_coverage.py.
+        old_date = (datetime.now().date() - timedelta(days=70)).isoformat()
         conn = get_db()
         conn.execute("""
             INSERT INTO listings

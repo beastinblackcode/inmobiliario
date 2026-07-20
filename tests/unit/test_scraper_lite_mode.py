@@ -30,21 +30,33 @@ def test_resolve_scrape_mode_explicit_full_returns_full():
     assert scraper.resolve_scrape_mode('full') == 'full'
 
 
-def test_resolve_scrape_mode_auto_sunday_returns_full():
-    # Sunday = 6 in Python's weekday().
-    fake_sunday = datetime(2026, 5, 24)  # this is a Sunday
-    assert fake_sunday.weekday() == 6
-    with patch.object(scraper, 'datetime') as mock_dt:
-        mock_dt.now.return_value = fake_sunday
+def test_resolve_scrape_mode_auto_stale_coverage_returns_full():
+    # Last full sweep older than the interval → a fresh sweep is due.
+    from datetime import date, timedelta
+    stale = date.today() - timedelta(days=scraper.FULL_SWEEP_INTERVAL_DAYS + 1)
+    with patch.object(scraper, 'get_last_full_sweep_date', return_value=stale):
         assert scraper.resolve_scrape_mode('auto') == 'full'
 
 
-def test_resolve_scrape_mode_auto_weekday_returns_lite():
-    fake_wednesday = datetime(2026, 5, 20)  # Wednesday
-    assert fake_wednesday.weekday() == 2
-    with patch.object(scraper, 'datetime') as mock_dt:
-        mock_dt.now.return_value = fake_wednesday
+def test_resolve_scrape_mode_auto_fresh_coverage_returns_lite():
+    from datetime import date, timedelta
+    fresh = date.today() - timedelta(days=1)
+    with patch.object(scraper, 'get_last_full_sweep_date', return_value=fresh):
         assert scraper.resolve_scrape_mode('auto') == 'lite'
+
+
+def test_resolve_scrape_mode_auto_boundary_returns_full():
+    # Exactly at the interval counts as due (>= comparison).
+    from datetime import date, timedelta
+    edge = date.today() - timedelta(days=scraper.FULL_SWEEP_INTERVAL_DAYS)
+    with patch.object(scraper, 'get_last_full_sweep_date', return_value=edge):
+        assert scraper.resolve_scrape_mode('auto') == 'full'
+
+
+def test_resolve_scrape_mode_auto_no_coverage_returns_full():
+    # Empty barrio_coverage (fresh DB) → sweep to establish coverage.
+    with patch.object(scraper, 'get_last_full_sweep_date', return_value=None):
+        assert scraper.resolve_scrape_mode('auto') == 'full'
 
 
 # ──────────────────────────────────────────────────────────────────────────

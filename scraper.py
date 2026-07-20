@@ -55,6 +55,9 @@ from database import (
     mark_stale_as_sold,
     migrate_create_scraping_log_table,
     migrate_create_rental_prices_table,
+    migrate_create_barrio_coverage_table,
+    record_barrio_coverage,
+    get_last_full_sweep_date,
     log_scraping_execution,
     upsert_rental_snapshot,
 )
@@ -195,9 +198,15 @@ SCRAPE_MODE = os.getenv('SCRAPE_MODE', 'auto').lower()
 # most recently published one. Confirmed via Idealista docs / scrapfly write-up.
 LITE_SORT_PARAM = "?ordenado-por=fecha-publicacion-desc"
 
-# Weekday index that triggers the full sweep when SCRAPE_MODE='auto'.
-# Python: Monday=0 … Sunday=6.
-FULL_SWEEP_WEEKDAY = int(os.getenv('FULL_SWEEP_WEEKDAY', '6'))
+# Days allowed between full sweeps when SCRAPE_MODE='auto'.  A full sweep
+# fires once this many days have passed since the last complete depth
+# sweep (max(barrio_coverage.last_deep_scrape_date)); every other run is
+# lite.  Replaces the old fixed-weekday trigger (FULL_SWEEP_WEEKDAY),
+# which only lined up with the every-2-day cron every 14–21 days and, on
+# truncated Sundays, not at all — leaving one observed 42-day gap that
+# mass-marked deep-page listings as sold.  7 days + the 2-day cron gives
+# an effective sweep cadence of ≤8 days, well inside the staleness window.
+FULL_SWEEP_INTERVAL_DAYS = int(os.getenv('FULL_SWEEP_INTERVAL_DAYS', '7'))
 
 
 def load_page_history() -> Dict:
@@ -1241,14 +1250,28 @@ def parse_listing(article: BeautifulSoup, distrito: str, barrio: str) -> Optiona
 
 def resolve_scrape_mode(mode: str = SCRAPE_MODE) -> str:
     """
-    Resolve SCRAPE_MODE='auto' against today's weekday.
+    Resolve SCRAPE_MODE='auto' against how long it's been since the last
+    full-depth sweep.
 
-    Returns 'lite' or 'full'. 'auto' picks 'full' on FULL_SWEEP_WEEKDAY
-    (Sunday by default) and 'lite' the rest of the week.
+    Returns 'lite' or 'full'.  Explicit 'lite'/'full' pass through.  For
+    'auto', a full sweep is due when the most recent depth coverage
+    (``database.get_last_full_sweep_date``) is missing or older than
+    FULL_SWEEP_INTERVAL_DAYS; otherwise lite.
+
+    Why not weekday-based any more: the cron runs every 2 days, so a fixed
+    Sunday trigger only fired every 14–21 days and skipped truncated runs
+    entirely.  Anchoring to actual coverage age makes the cadence
+    self-correcting — a missed or cut-short sweep just means the next run
+    still sees stale coverage and goes full.
     """
     if mode in ('lite', 'full'):
         return mode
-    return 'full' if datetime.now().weekday() == FULL_SWEEP_WEEKDAY else 'lite'
+
+    last_sweep = get_last_full_sweep_date()
+    if last_sweep is None:
+        return 'full'  # No coverage recorded yet — sweep to establish it.
+    age_days = (datetime.now().date() - last_sweep).days
+    return 'full' if age_days >= FULL_SWEEP_INTERVAL_DAYS else 'lite'
 
 
 def _scrape_barrio_lite(
@@ -1375,6 +1398,11 @@ def scrape_barrio(
         max_pages = MAX_PAGES_PER_BARRIO
 
     actual_pages = 0
+    # True only when pagination is walked to its natural end. Any early
+    # bail-out (404/502, failed fetch, MAX_PAGES cap) leaves this False,
+    # so the barrio is NOT recorded as covered and mark_stale_as_sold
+    # Tier 1 will not touch its listings. See database.record_barrio_coverage.
+    swept_to_end = False
 
     while page <= max_pages:
         # Build URL with pagination
@@ -1426,6 +1454,8 @@ def scrape_barrio(
                 print(f"✓ No listings found for this area")
             else:
                 print(f"✓ No more listings (end of pagination)")
+            # Ran out of results rather than out of budget: full coverage.
+            swept_to_end = True
             break
 
         actual_pages = page
@@ -1471,12 +1501,16 @@ def scrape_barrio(
         if page == 1 and len(articles) > 0:
             if idealista_total > 0 and idealista_total <= len(articles):
                 print(f"  ⚡ Early exit: Idealista reports {idealista_total} total ≤ {len(articles)} on page 1 — single page barrio")
+                # Every listing the barrio has fits on page 1: fully covered.
+                swept_to_end = True
                 break
 
         # Check for next page
         next_button = soup.find('a', class_='icon-arrow-right-after')
         if not next_button:
             print(f"  ✓ Reached last page (Total pages: {page})")
+            # No "next" link: this was the last page of the barrio.
+            swept_to_end = True
             break
 
         if page == max_pages:
@@ -1488,6 +1522,13 @@ def scrape_barrio(
     # Update page history with actual pages found
     if page_history is not None and actual_pages > 0:
         update_page_history(page_history, barrio_key, actual_pages)
+
+    # Record depth coverage so mark_stale_as_sold Tier 1 can tell
+    # "gone from the market" apart from "we never looked past page 1".
+    # Deliberately NOT written in lite mode (only page 1 is read) nor
+    # when the sweep bailed out early.
+    if swept_to_end:
+        record_barrio_coverage(distrito, barrio, actual_pages)
 
     if idealista_total > 0:
         print(f"  🏁 Finished {distrito} - {barrio}: {listings_count}/{idealista_total} listings ({total_new} new, {total_updated} updated)")
@@ -1642,8 +1683,13 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     print("=" * 60)
     print(f"Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     if scrape_mode == 'auto' and not retry_only:
-        wd = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][datetime.now().weekday()]
-        print(f"SCRAPE_MODE=auto → resolved to '{resolved_mode}' ({wd})")
+        last_sweep = get_last_full_sweep_date()
+        if last_sweep is None:
+            reason = "no coverage recorded yet"
+        else:
+            age = (datetime.now().date() - last_sweep).days
+            reason = f"last full sweep {last_sweep} ({age}d ago), interval {FULL_SWEEP_INTERVAL_DAYS}d"
+        print(f"SCRAPE_MODE=auto → resolved to '{resolved_mode}' ({reason})")
     if FETCH_DESCRIPTIONS:
         print("⚠ Description fetching ENABLED (extra API cost)")
     print()
@@ -1651,6 +1697,7 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     # Initialize database
     init_database()
     migrate_create_scraping_log_table()
+    migrate_create_barrio_coverage_table()
 
     # Configure proxy
     proxies = get_proxy_config()
@@ -1754,28 +1801,28 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     total_new += retry_new
     total_updated += retry_updated
 
-    # Mark stale listings as sold using two-tier approach:
-    # Tier 1: N days + barrio coverage confirmed → sold
-    # Tier 2: 21 days hard cutoff (no barrio coverage needed) → sold
+    # Mark stale listings as sold using the two-tier approach:
+    # Tier 1: not seen in N days AND barrio swept to full depth in that
+    #         window (barrio_coverage) → sold.
+    # Tier 2: not seen in STALE_HARD_CUTOFF_DAYS (60) → sold, no coverage.
     #
-    # Threshold widens to 21d when lite-mode is in play: the weekly full
-    # sweep is the only time deep-page listings get last_seen_date
-    # refreshed, so a single skipped Sunday (CI failure, Idealista outage)
-    # would otherwise mark every back-page listing as sold on day 14.
-    # Setting Tier 1 = Tier 2 = 21d here gives one missed sweep of slack
-    # without changing behaviour on full-only configurations.
+    # Threshold widens to 21d under lite/auto: in lite mode only page 1
+    # gets last_seen_date refreshed, so deep-page listings rely on the
+    # depth sweep.  Tier 1's coverage check (added 2026-07-19) is what
+    # actually makes this safe now — a listing is only marked when its
+    # barrio was genuinely swept to the end, not merely "touched".
     if not retry_only:
         stale_threshold = 21 if resolved_mode == 'lite' or SCRAPE_MODE == 'auto' else 14
         print(f"\n🔍 Checking for sold/removed properties...")
-        print(f"  Tier 1: properties not seen in {stale_threshold}+ days (barrio scraped recently)")
-        print(f"  Tier 2: properties not seen in 21+ days (hard cutoff)")
+        print(f"  Tier 1: not seen in {stale_threshold}+ days AND barrio swept to full depth")
+        print(f"  Tier 2: not seen in 60+ days (hard cutoff, no coverage needed)")
 
         sold_count = mark_stale_as_sold(days_threshold=stale_threshold)
         print(f"  ✓ Marked {sold_count} listings as sold/removed")
 
         if active_ids:
             print(f"  ℹ️  {len(active_ids)} properties not seen in this scrape")
-            print(f"  ℹ️  These will be marked as sold if not seen within {stale_threshold}-21 days")
+            print(f"  ℹ️  These will be marked as sold once their barrio is swept and they cross {stale_threshold}d")
 
     # Bright Data usage report
     cost_data = get_brightdata_cost_estimate()
