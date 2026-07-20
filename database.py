@@ -5,7 +5,7 @@ Manages SQLite database operations for property listings.
 
 import sqlite3
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import List, Dict, Optional, Set
 from contextlib import contextmanager
 from pathlib import Path
@@ -408,6 +408,44 @@ def record_barrio_coverage(distrito: str, barrio: str, pages_scraped: int,
         # the scrape.  Worst case the barrio looks uncovered and Tier 1
         # conservatively skips it.
         logger.exception("Error recording barrio coverage for %s/%s", distrito, barrio)
+
+
+def get_last_full_sweep_date() -> Optional[date]:
+    """
+    Return the most recent date any barrio was swept to full depth, or
+    None if no depth coverage exists yet (fresh DB, or table missing).
+
+    This is ``max(last_deep_scrape_date)`` over ``barrio_coverage``, which
+    only receives rows from complete full-mode sweeps.  It is the signal
+    ``resolve_scrape_mode`` uses to decide when the next full sweep is due,
+    replacing the old fixed-weekday trigger that drifted against the
+    every-2-day cron and left 14–42 day gaps between sweeps.
+
+    None (no coverage) is treated by the caller as "a full sweep is due".
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(last_deep_scrape_date) FROM barrio_coverage")
+            row = cursor.fetchone()
+    except Exception:
+        # Missing/unreadable table → behave as "never swept" so the caller
+        # falls back to a full sweep rather than silently going lite.
+        logger.exception("Could not read barrio_coverage for sweep scheduling")
+        return None
+
+    val = row[0] if row else None
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    # SQLite stores the date as TEXT (YYYY-MM-DD).
+    try:
+        return date.fromisoformat(str(val)[:10])
+    except ValueError:
+        return None
 
 
 def log_scraping_execution(

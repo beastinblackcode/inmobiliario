@@ -14,11 +14,16 @@ full-mode sweep walks a barrio to the end of its pagination.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
-from database import mark_stale_as_sold, record_barrio_coverage, get_connection
+from database import (
+    mark_stale_as_sold,
+    record_barrio_coverage,
+    get_last_full_sweep_date,
+    get_connection,
+)
 
 
 def _d(days_ago: int) -> str:
@@ -122,3 +127,26 @@ def test_hard_cutoff_still_catches_ghosts(tmp_db):
         assert _status(cursor, "GHOST01") == "sold_removed"
         # 45 days is inside the 60-day backstop and has no coverage proof.
         assert _status(cursor, "RECENT01") == "active"
+
+
+def test_get_last_full_sweep_date_reflects_max_coverage(tmp_db):
+    """Sweep scheduler reads the newest depth-coverage date."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS barrio_coverage (
+                distrito TEXT NOT NULL, barrio TEXT NOT NULL,
+                last_deep_scrape_date TEXT NOT NULL, pages_scraped INTEGER,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (distrito, barrio)
+            )
+        """)
+
+    # Empty table → None (caller treats as "full sweep due").
+    assert get_last_full_sweep_date() is None
+
+    record_barrio_coverage("Centro", "Sol", pages_scraped=3, scrape_date=_d(10))
+    record_barrio_coverage("Latina", "Cármenes", pages_scraped=2, scrape_date=_d(3))
+
+    got = get_last_full_sweep_date()
+    assert got == date.fromisoformat(_d(3)), "must return the most recent coverage date"
