@@ -55,6 +55,8 @@ from database import (
     mark_stale_as_sold,
     migrate_create_scraping_log_table,
     migrate_create_rental_prices_table,
+    migrate_create_barrio_coverage_table,
+    record_barrio_coverage,
     log_scraping_execution,
     upsert_rental_snapshot,
 )
@@ -1375,6 +1377,11 @@ def scrape_barrio(
         max_pages = MAX_PAGES_PER_BARRIO
 
     actual_pages = 0
+    # True only when pagination is walked to its natural end. Any early
+    # bail-out (404/502, failed fetch, MAX_PAGES cap) leaves this False,
+    # so the barrio is NOT recorded as covered and mark_stale_as_sold
+    # Tier 1 will not touch its listings. See database.record_barrio_coverage.
+    swept_to_end = False
 
     while page <= max_pages:
         # Build URL with pagination
@@ -1426,6 +1433,8 @@ def scrape_barrio(
                 print(f"✓ No listings found for this area")
             else:
                 print(f"✓ No more listings (end of pagination)")
+            # Ran out of results rather than out of budget: full coverage.
+            swept_to_end = True
             break
 
         actual_pages = page
@@ -1471,12 +1480,16 @@ def scrape_barrio(
         if page == 1 and len(articles) > 0:
             if idealista_total > 0 and idealista_total <= len(articles):
                 print(f"  ⚡ Early exit: Idealista reports {idealista_total} total ≤ {len(articles)} on page 1 — single page barrio")
+                # Every listing the barrio has fits on page 1: fully covered.
+                swept_to_end = True
                 break
 
         # Check for next page
         next_button = soup.find('a', class_='icon-arrow-right-after')
         if not next_button:
             print(f"  ✓ Reached last page (Total pages: {page})")
+            # No "next" link: this was the last page of the barrio.
+            swept_to_end = True
             break
 
         if page == max_pages:
@@ -1488,6 +1501,13 @@ def scrape_barrio(
     # Update page history with actual pages found
     if page_history is not None and actual_pages > 0:
         update_page_history(page_history, barrio_key, actual_pages)
+
+    # Record depth coverage so mark_stale_as_sold Tier 1 can tell
+    # "gone from the market" apart from "we never looked past page 1".
+    # Deliberately NOT written in lite mode (only page 1 is read) nor
+    # when the sweep bailed out early.
+    if swept_to_end:
+        record_barrio_coverage(distrito, barrio, actual_pages)
 
     if idealista_total > 0:
         print(f"  🏁 Finished {distrito} - {barrio}: {listings_count}/{idealista_total} listings ({total_new} new, {total_updated} updated)")
@@ -1651,6 +1671,7 @@ def run_scraper(retry_only: bool = False, mode_override: Optional[str] = None):
     # Initialize database
     init_database()
     migrate_create_scraping_log_table()
+    migrate_create_barrio_coverage_table()
 
     # Configure proxy
     proxies = get_proxy_config()

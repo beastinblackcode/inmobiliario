@@ -39,6 +39,7 @@ _EXPECTED_TABLES = {
     "user_preferences",           # added in 0003
     "provider_config",            # added in 0006
     "scraping_log_provider",      # added in 0007
+    "barrio_coverage",            # added in 0009
 }
 
 
