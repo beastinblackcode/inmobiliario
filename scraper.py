@@ -502,39 +502,27 @@ BARRIO_URLS = [
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Distrito exclusion — cost control
+# Distrito exclusion — full Madrid capital coverage (2026-07-21)
 # ──────────────────────────────────────────────────────────────────────
 #
-# Distritos we deliberately skip on each scrape run.  ``BARRIO_URLS``
-# above stays intact (the full Madrid universe is documented) so we
-# can toggle a distrito back in by simply removing it from this set.
+# Distritos to skip on each scrape run.  ``BARRIO_URLS`` above is the
+# canonical universe (all 21 Madrid-capital distritos); this set is the
+# only knob that narrows it — add a name here to pause a distrito.
 #
-# Each excluded distrito takes roughly its share of total listings out
-# of the Bright Data request budget.  As of May 2026 the five below
-# cover ~3,400 active listings (≈ 16 % of stock) → ≈ 17 % monthly cost
-# reduction at the new daily cadence.  Cost saving is modest in
-# absolute terms (~$0.25/mo) but free if the buyer isn't interested
-# in those zones.
+# Now EMPTY: coverage was widened from 13 distritos to all 21 on
+# 2026-07-21.  The original exclusion (8 distritos: periphery + Centro)
+# existed to save Bright Data quota, but per-request pricing (PR #72)
+# made that moot — the extra ~180 req/full-sweep and ~48 req/lite-run
+# cost ~$2/mo total.
 #
-# Rationale per distrito (all low buyer-priority for the current user):
-#   * Villaverde         — €3.0k/m², outer southern zone.
-#   * Puente de Vallecas — €3.3k/m², blue-collar southeast.
-#   * Villa de Vallecas  — €4.3k/m², far southeast.
-#   * Usera              — €3.0k/m², south.
-#   * Barajas            — airport zone, very low volume.
-#   * Vicálvaro          — far southeast, low buyer interest.
-#   * Carabanchel        — €2.5k/m², south.
-#   * Centro             — tourist core, low buyer interest for residence.
-EXCLUDED_DISTRITOS: set[str] = {
-    "Villaverde",
-    "Puente de Vallecas",
-    "Villa de Vallecas",
-    "Usera",
-    "Barajas",
-    "Vicálvaro",
-    "Carabanchel",
-    "Centro",
-}
+# ⚠ Watch the next full sweep's duration.  The 91-barrio sweep already
+# ran 261 min against GitHub's 360-min ceiling; +48 barrios can push a
+# slow-latency day over the limit.  A truncated full self-heals (see
+# resolve_scrape_mode / barrio_coverage — the next run still sees stale
+# coverage and goes full), and lite mode covers all 21 distritos daily,
+# but persistently truncated sweeps would starve the tail distritos of
+# depth coverage.  If that happens, split the full sweep across cycles.
+EXCLUDED_DISTRITOS: set[str] = set()
 
 # Pre-filtered list used by every iteration site below.  ``BARRIO_URLS``
 # is preserved as the canonical universe; ``BARRIOS_TO_SCRAPE`` is what
