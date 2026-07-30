@@ -61,14 +61,16 @@ jobs:
       - name: Run scraper
         env:
           PYTHONUNBUFFERED: "1"
-          # Primary paid tier as of PR #61.  When set, scraper.py routes
-          # every fetch through Oxylabs Web Scraper API first and only
-          # falls back to BrightData when all retries are exhausted.
+          # Provider routing (corrected 2026-07-30): BrightData Web Unlocker
+          # is the PRIMARY tier; scraper.py routes every fetch through it and
+          # only falls back to Oxylabs when its retries are exhausted. Oxylabs
+          # was demoted to a dormant fallback on 2026-06-03 (~60% success).
+          # NOTE: the Oxylabs credentials returned 401 (invalid) as of
+          # 2026-07-30 — the fallback is effectively dead. Renew the secret or
+          # remove OXYLABS_USER/PASS to keep the fallback truly inert.
           OXYLABS_USER: ${{ secrets.OXYLABS_USER }}
           OXYLABS_PASS: ${{ secrets.OXYLABS_PASS }}
-          # BrightData kept wired as fallback. Recharge the account if
-          # the Oxylabs tier ever struggles in production — the fallback
-          # path only activates when both credentials AND balance are good.
+          # BrightData Web Unlocker — PRIMARY paid tier (per-request plan).
           BRIGHTDATA_USER: ${{ secrets.BRIGHTDATA_USER }}
           BRIGHTDATA_PASS: ${{ secrets.BRIGHTDATA_PASS }}
           BRIGHTDATA_HOST: ${{ secrets.BRIGHTDATA_HOST }}
