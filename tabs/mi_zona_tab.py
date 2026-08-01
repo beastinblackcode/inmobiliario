@@ -59,6 +59,18 @@ DEFAULT_CRITERIA: dict[str, Any] = {
 }
 
 
+def _clamp(value: int, lo: int, hi: int) -> int:
+    """Clamp *value* into ``[lo, hi]``.
+
+    Guards ``st.number_input(value=…)`` against a stored criterion that
+    falls outside the widget's ``[min_value, max_value]`` range — Streamlit
+    raises ``StreamlitValueAboveMaxError`` / ``…BelowMinError`` otherwise and
+    the whole page crashes.  Seen in the wild with a persisted ``max_rooms``
+    of 99 (an old "no upper bound" sentinel) against a widget capped at 10.
+    """
+    return max(lo, min(int(value), hi))
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Persistence
 # ──────────────────────────────────────────────────────────────────────
@@ -260,14 +272,14 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                 max_price = st.number_input(
                     "Precio máximo (€)",
                     min_value=50_000, max_value=5_000_000,
-                    value=int(criteria.get("max_price", 450_000)),
+                    value=_clamp(criteria.get("max_price", 450_000), 50_000, 5_000_000),
                     step=10_000,
                 )
             with c2:
                 min_size = st.number_input(
                     "Tamaño mínimo (m²)",
                     min_value=20, max_value=500,
-                    value=int(criteria.get("min_size", 60)),
+                    value=_clamp(criteria.get("min_size", 60), 20, 500),
                     step=5,
                 )
             with c3:
@@ -275,7 +287,7 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                 max_size = st.number_input(
                     "Tamaño máximo (m²)",
                     min_value=0, max_value=500,
-                    value=int(criteria.get("max_size") or 0),
+                    value=_clamp(criteria.get("max_size") or 0, 0, 500),
                     step=5,
                     help="0 = sin tope.",
                 )
@@ -285,14 +297,14 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                 min_rooms = st.number_input(
                     "Habitaciones mín.",
                     min_value=0, max_value=10,
-                    value=int(criteria.get("min_rooms", 2)),
+                    value=_clamp(criteria.get("min_rooms", 2), 0, 10),
                     step=1,
                 )
             with c5:
                 max_rooms = st.number_input(
                     "Habitaciones máx.",
                     min_value=0, max_value=10,
-                    value=int(criteria.get("max_rooms", 4)),
+                    value=_clamp(criteria.get("max_rooms", 4), 0, 10),
                     step=1,
                 )
             with c6:
