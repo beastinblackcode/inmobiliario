@@ -50,6 +50,9 @@ credentials.json
 token.json
 drive_file_id.txt
 
+# Generated per-distrito dashboards (output of export_distrito_dashboard.py)
+public/dashboards/
+
 # Scraper runtime state (generated automatically, not part of source)
 barrios_scrapeados_hoy.txt
 barrio_page_history.json
