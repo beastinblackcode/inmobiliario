@@ -152,6 +152,7 @@ def main():
             st.Page("pages/busqueda.py",      title="🔍 Búsqueda"),
             st.Page("pages/comparador.py",    title="⚖️ Comparador"),
             st.Page("pages/barrio.py",        title="🏘️ Perfil de Barrio"),
+            st.Page("pages/precios_distrito.py", title="📈 Precios por Distrito"),
             st.Page("pages/seguimientos.py",  title="🔔 Mis Seguimientos"),
             st.Page("pages/detalle.py",       title="🔎 Detalle de Anuncio"),
         ],
