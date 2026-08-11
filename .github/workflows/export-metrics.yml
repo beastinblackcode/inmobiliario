@@ -57,13 +57,25 @@ jobs:
       # exporter can read the in-tree district_opendata.json (the
       # canonical Open Data Madrid mirror lives under public/ on the
       # front, not in this repo).
+      #
+      # Auth: an SSH *deploy key* registered on market-thermometer
+      # (private half stored as THERMOMETER_DEPLOY_KEY). Deploy keys are
+      # per-repo and never expire, unlike the old cross-account PAT that
+      # silently lapsed and stalled the public site. GIT_SSH_COMMAND is
+      # exported to $GITHUB_ENV so the later push step reuses the key.
       - name: Clone market-thermometer (read + write)
         env:
-          THERMOMETER_PAT: ${{ secrets.THERMOMETER_PAT }}
+          THERMOMETER_DEPLOY_KEY: ${{ secrets.THERMOMETER_DEPLOY_KEY }}
         run: |
-          git clone --depth 1 \
-            https://x-access-token:${THERMOMETER_PAT}@github.com/softniric-cyber/market-thermometer.git \
-            _thermometer
+          mkdir -p ~/.ssh
+          printf '%s\n' "$THERMOMETER_DEPLOY_KEY" > ~/.ssh/thermo_key
+          chmod 600 ~/.ssh/thermo_key
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          echo "GIT_SSH_COMMAND=ssh -i ~/.ssh/thermo_key -o IdentitiesOnly=yes" >> "$GITHUB_ENV"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/thermo_key -o IdentitiesOnly=yes" \
+            git clone --depth 1 \
+              git@github.com:softniric-cyber/market-thermometer.git \
+              _thermometer
 
       # Phase 2.2: build the populated barrios_profiles.json from clean
       # sources (Notarial CIEN distrito €/m² + Open Data Madrid renta

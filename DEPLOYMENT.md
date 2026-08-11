@@ -260,7 +260,7 @@ reads from.  There is no DB file to ship anywhere.
 | `DATABASE_URL` | both workflows | Same Supabase URL as Streamlit, port `6543` (transaction pooler) — pgbouncer fronts both readers and writers fine |
 | `BRIGHTDATA_*` | `daily_scraper.yml` | Existing — proxy creds |
 | `GMAIL_APP_PASSWORD` | `daily_scraper.yml` | Existing — for `email_report.py` |
-| `THERMOMETER_PAT` | `export-metrics.yml` | Existing — for the cross-repo push to `market-thermometer` |
+| `THERMOMETER_DEPLOY_KEY` | `export-metrics.yml` | SSH **deploy key** (private half) for the cross-repo push to `softniric-cyber/market-thermometer`. Register the public half on that repo (Settings → Deploy keys, *Allow write access*). Replaces the old `THERMOMETER_PAT`, which expired and stalled the public site (Aug 2026); deploy keys never expire and work across accounts. |
 
 The `GOOGLE_DRIVE_FILE_ID` and `GOOGLE_SA_CREDENTIALS` secrets are
 **no longer used by either workflow** post-cutover; delete them when
