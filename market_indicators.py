@@ -100,12 +100,316 @@ def _remove_outliers(values: list, iqr_factor: float = 1.5) -> list:
 # Weekly Price Evolution
 # ============================================================================
 
+# A district-week needs at least this many listings before its median is
+# trusted; thinner slices swing wildly and poison the weighted aggregate.
+_MIN_DISTRICT_SAMPLE = 20
+
+# A week must cover districts accounting for at least this share of the
+# window's total weight, otherwise the fixed-weight aggregate is comparing
+# a different city and the week is dropped.
+_MIN_WEIGHT_COVERAGE = 0.80
+
+# How many of the most recent weeks define the fixed district mix. Short
+# enough to reflect current scraper coverage, long enough that one odd sweep
+# does not set the weights on its own.
+_WEIGHT_REFERENCE_WEEKS = 4
+
+# Sanity fence for €/m² before the IQR trim — guards against broken
+# ``size_sqm`` (a 3 m² "loft", a plot listed as a flat).
+_SQM_PRICE_FLOOR, _SQM_PRICE_CEILING = 800, 25000
+
+
+def _weighted_median(samples: List[Tuple[float, float]]) -> Optional[float]:
+    """Median of ``(value, weight)`` pairs.
+
+    A *weighted* median, not a mean of per-group medians: averaging district
+    medians would report €676k for a city whose median flat is €425k, because
+    a mean is pulled by the expensive tail that the median exists to ignore.
+    Weighting the observations instead keeps the statistic a median while
+    still letting us hold the district mix constant.
+    """
+    if not samples:
+        return None
+    ordered = sorted(samples)
+    total = sum(w for _, w in ordered)
+    if total <= 0:
+        return None
+
+    # Tolerance for "the running weight landed exactly on half". Without it,
+    # a group whose weights sum to precisely 0.5 is decided by float
+    # accumulation error — 240 copies of 0.5/240 sum to 0.49999999999999994,
+    # so the median jumped to the *next* group and the index flipped between
+    # two far-apart values on weeks that were identical.
+    epsilon = total * 1e-9
+    half, cumulative = total / 2, 0.0
+    for i, (value, weight) in enumerate(ordered):
+        cumulative += weight
+        if cumulative >= half - epsilon:
+            # Exactly on the boundary: the median is anywhere between this
+            # value and the next, so take the midpoint — the conventional
+            # even-sample median, and stable across ties.
+            if abs(cumulative - half) <= epsilon and i + 1 < len(ordered):
+                return (value + ordered[i + 1][0]) / 2
+            return value
+    return ordered[-1][0]
+
+
+def _week_anchors(end: date, weeks: int) -> List[date]:
+    """The Monday of each of the last *weeks* ISO weeks, oldest first.
+
+    Anchored on the last day with data rather than on ``today`` so a stale
+    DB yields a short series instead of a run of empty trailing weeks.
+    """
+    last_monday = end - timedelta(days=end.weekday())
+    return [last_monday - timedelta(days=7 * i) for i in range(weeks - 1, -1, -1)]
+
+
+def _load_stock_prices(since: date) -> Tuple[List[Dict], Dict[str, List[Tuple[date, int]]]]:
+    """Fetch the listings that were on the market at any point since *since*,
+    plus each one's price timeline.
+
+    Returns ``(listings, timelines)`` where *timelines* maps listing_id to a
+    chronologically sorted ``[(date_recorded, price), ...]``.  ``price_history``
+    carries a baseline row per listing (written at first_seen, with a NULL
+    ``change_amount``) followed by one row per change, so the last entry at or
+    before a given week *is* the price in force that week.
+
+    Sold/removed listings are included: they were part of the stock in the
+    weeks before they went, and dropping them would bias older weeks towards
+    whatever failed to sell.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT listing_id, distrito, price, size_sqm,
+                   first_seen_date, last_seen_date
+            FROM listings
+            WHERE price > 0
+              AND size_sqm > 0
+              AND distrito IS NOT NULL
+              AND last_seen_date >= ?
+        """, (since.isoformat(),))
+
+        listings = [
+            {
+                "listing_id":  row[0],
+                "distrito":    row[1],
+                "price":       row[2],
+                "size_sqm":    row[3],
+                "first_seen":  _as_datetime(row[4]),
+                "last_seen":   _as_datetime(row[5]),
+            }
+            for row in cursor.fetchall()
+        ]
+        listings = [l for l in listings if l["first_seen"] and l["last_seen"]]
+
+        if not listings:
+            return [], {}
+
+        # One pass over the history of the listings we kept.  Filtering by the
+        # same ``last_seen_date`` window (rather than by listing_id, which
+        # would need a 30k-placeholder IN clause) keeps this to a single scan.
+        cursor.execute("""
+            SELECT ph.listing_id, ph.date_recorded, ph.price
+            FROM price_history ph
+            JOIN listings l ON l.listing_id = ph.listing_id
+            WHERE l.last_seen_date >= ?
+            ORDER BY ph.listing_id, ph.date_recorded
+        """, (since.isoformat(),))
+
+        timelines: Dict[str, List[Tuple[date, int]]] = {}
+        for listing_id, recorded, price in cursor.fetchall():
+            recorded_dt = _as_datetime(recorded)
+            if recorded_dt and price and price > 0:
+                timelines.setdefault(listing_id, []).append((recorded_dt.date(), price))
+
+    return listings, timelines
+
+
+def _price_at(listing: Dict, timeline: List[Tuple[date, int]], when: date) -> Optional[int]:
+    """The asking price in force for *listing* on *when*.
+
+    Walks back to the last history entry at or before *when*.  Listings with
+    no history row that early fall back to their current price — that only
+    happens for the handful of rows predating the price_history backfill.
+    """
+    if timeline:
+        price = None
+        for recorded, value in timeline:
+            if recorded > when:
+                break
+            price = value
+        if price is not None:
+            return price
+    return listing["price"]
+
+
+def _weekly_stock_index(weeks: int) -> List[Dict]:
+    """Median asking price of the *active stock*, week by week, holding the
+    district mix constant.
+
+    This is the composition-controlled replacement for bucketing listings by
+    ``first_seen_date``.  That older approach measured only the listings that
+    entered the market each week, so the figure tracked which districts the
+    scraper happened to sweep — swinging the "median price" between €298k and
+    €492k on a market that had not moved.
+
+    Method, per week:
+      1. take every listing on the market that week, priced as it was priced
+         *then* (reconstructed from ``price_history``),
+      2. trim outliers within each district,
+      3. take the *weighted* median across the city, each district carrying a
+         weight fixed across the whole window (its share of the stock in the
+         most recent weeks) and renormalised over the districts actually
+         present.
+
+    Step 3 is what makes consecutive weeks comparable: a sweep that goes deep
+    on Carabanchel one week no longer drags the city median down with it.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(last_seen_date) FROM listings")
+        row = cursor.fetchone()
+    data_end = _as_datetime(row[0]) if row and row[0] else None
+    if not data_end:
+        return []
+
+    anchors = _week_anchors(data_end.date(), weeks)
+    listings, timelines = _load_stock_prices(anchors[0])
+    if not listings:
+        return []
+
+    # ── Pass 1: the week's stock, split by district and outlier-trimmed ──
+    # per_week[anchor][distrito] = {"prices": [...], "sqm": [...]}
+    per_week: Dict[date, Dict[str, Dict]] = {}
+    for anchor in anchors:
+        week_end = anchor + timedelta(days=6)
+        by_district: Dict[str, List[Tuple[int, float]]] = {}
+
+        for listing in listings:
+            # On the market during this week (overlap, not containment).
+            if listing["first_seen"].date() > week_end:
+                continue
+            if listing["last_seen"].date() < anchor:
+                continue
+            price = _price_at(listing, timelines.get(listing["listing_id"], []), week_end)
+            if not price or price <= 0:
+                continue
+            sqm_price = price / listing["size_sqm"]
+            if not (_SQM_PRICE_FLOOR <= sqm_price <= _SQM_PRICE_CEILING):
+                continue
+            by_district.setdefault(listing["distrito"], []).append((price, sqm_price))
+
+        trimmed = {}
+        for distrito, rows in by_district.items():
+            if len(rows) < _MIN_DISTRICT_SAMPLE:
+                continue
+            trimmed[distrito] = {
+                "prices": _remove_outliers([r[0] for r in rows]),
+                "sqm":    _remove_outliers([r[1] for r in rows]),
+            }
+        if trimmed:
+            per_week[anchor] = trimmed
+
+    if not per_week:
+        return []
+
+    # ── Fixed weights: each district's share of the stock, held constant ─
+    # Taken from the last _WEIGHT_REFERENCE_WEEKS weeks only, not from the
+    # whole window. The scraper's district coverage has widened over time
+    # (late July 2026 went deeper into the cheap periphery), so a share
+    # averaged over 12 weeks encodes the *old* coverage: it handed Salamanca
+    # 14.3 % against 12.6 % on a 4-week window and moved the reported city
+    # median by €40k purely as a function of the lookback. Anchoring on the
+    # recent weeks makes the level a property of the market rather than of
+    # the `weeks` argument.
+    #
+    # The median (not the mean) over those weeks absorbs a single
+    # partially-swept week without letting it re-weight the history.
+    ordered_weeks = sorted(per_week)
+    reference = ordered_weeks[-_WEIGHT_REFERENCE_WEEKS:]
+    every_district = {d for trimmed in per_week.values() for d in trimmed}
+    shares: Dict[str, List[float]] = {d: [] for d in every_district}
+    for anchor in reference:
+        trimmed = per_week[anchor]
+        total = sum(len(d["prices"]) for d in trimmed.values())
+        if not total:
+            continue
+        for distrito in every_district:
+            present = trimmed.get(distrito)
+            # Absent counts as a 0 share: a district the recent sweeps do not
+            # reach should not carry the weight of one they do.
+            shares[distrito].append(len(present["prices"]) / total if present else 0.0)
+    weights = {
+        distrito: statistics.median(vals)
+        for distrito, vals in shares.items() if vals
+    }
+    weights = {d: w for d, w in weights.items() if w > 0}
+    total_weight = sum(weights.values())
+    if not total_weight:
+        return []
+
+    # ── Pass 2: weighted median per week ────────────────────────────────
+    # Every listing carries weight ``w_district / n_district``, so each
+    # district contributes its fixed share of the city no matter how many of
+    # its listings the week's sweep happened to touch.
+    series = []
+    for anchor in anchors:
+        trimmed = per_week.get(anchor)
+        if not trimmed:
+            continue
+        covered = sum(weights.get(d, 0) for d in trimmed)
+        if covered < total_weight * _MIN_WEIGHT_COVERAGE:
+            continue  # too much of the city missing to compare this week
+
+        price_samples: List[Tuple[float, float]] = []
+        sqm_samples: List[Tuple[float, float]] = []
+        for distrito, d in trimmed.items():
+            if d["prices"]:
+                unit = weights[distrito] / len(d["prices"])
+                price_samples.extend((p, unit) for p in d["prices"])
+            if d["sqm"]:
+                unit = weights[distrito] / len(d["sqm"])
+                sqm_samples.extend((v, unit) for v in d["sqm"])
+
+        median_price = _weighted_median(price_samples)
+        median_sqm   = _weighted_median(sqm_samples)
+        if median_price is None:
+            continue
+
+        series.append({
+            "week":             "%d-%02d" % anchor.isocalendar()[:2],
+            "week_start":       anchor,
+            "median_price":     round(median_price),
+            "median_price_sqm": round(median_sqm) if median_sqm else 0,
+            "count":            sum(len(d["prices"]) for d in trimmed.values()),
+            "districts":        len(trimmed),
+        })
+
+    return series
+
+
 def get_weekly_price_evolution(weeks: int = 8) -> Dict:
     """
-    Calculate median price evolution of active properties week by week.
-    
+    Median asking price of the active stock, week by week, at a constant
+    district mix.
+
+    Until 2026-09 this bucketed listings by ``first_seen_date``, i.e. it
+    measured the listings that *entered* the market each week.  Because each
+    sweep covers a different set of districts, the result tracked scraper
+    coverage rather than the market: the weekly figure swung between €298k and
+    €492k — a reported +15.0 % — over a stretch where a repeat-listing index
+    showed roughly 0 %.  That number feeds 20 % of ``calculate_market_score``,
+    so the public thermometer inherited the error.
+
+    See ``_weekly_stock_index`` for the replacement method.
+
     Returns:
-        Dict with 'series' (weekly data), 'current', 'change_pct', 'trend'
+        Dict with 'series' (weekly data), 'current' (€ level of the latest
+        complete week), 'current_sqm', 'change_pct' (% move of the €/m²
+        index — the headline), 'change_pct_eur' (% move of the € median)
+        and 'trend'.
     """
     result = {
         "name": "Precio Mediano",
@@ -117,155 +421,116 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
         "change_pct": None,
         "trend": "stable"
     }
-    
-    from db.dialect import iso_week
 
-    with get_connection() as conn:
-        cursor = conn.cursor()
+    result["series"] = _weekly_stock_index(weeks)
 
-        cursor.execute(f"""
-            SELECT DISTINCT {iso_week('first_seen_date')} as week_num,
-                   MIN(first_seen_date) as week_start
-            FROM listings
-            WHERE first_seen_date IS NOT NULL
-            GROUP BY {iso_week('first_seen_date')}
-            ORDER BY week_start DESC
-            LIMIT ?
-        """, (weeks,))
-
-        week_info = cursor.fetchall()
-        week_info.reverse()  # Chronological order
-
-        for week_num, week_start in week_info:
-            if not week_num:
-                continue
-
-            cursor.execute(f"""
-                SELECT price FROM listings
-                WHERE price > 0
-                AND {iso_week('first_seen_date')} = ?
-            """, (week_num,))
-
-            prices = [row[0] for row in cursor.fetchall()]
-
-            if len(prices) >= 10:
-                # Remove outliers using IQR fence before computing median
-                prices = _remove_outliers(prices)
-                median_price = statistics.median(prices)
-
-                # Also get €/m²
-                cursor.execute(f"""
-                    SELECT price / size_sqm FROM listings
-                    WHERE price > 0 AND size_sqm > 0
-                    AND {iso_week('first_seen_date')} = ?
-                """, (week_num,))
-                prices_sqm = [row[0] for row in cursor.fetchall()]
-                prices_sqm = _remove_outliers(prices_sqm) if prices_sqm else prices_sqm
-                median_sqm = statistics.median(prices_sqm) if prices_sqm else 0
-                
-                result["series"].append({
-                    "week": week_num,
-                    "week_start": week_start,
-                    "median_price": round(median_price),
-                    "median_price_sqm": round(median_sqm),
-                    "count": len(prices)
-                })
-
-        # ── Guard: drop bulk-import weeks (>3× the median count) ────────
-        # A bulk import has radically different composition and poisons
-        # week-over-week comparisons.
-        if len(result["series"]) >= 3:
-            counts = sorted(pt["count"] for pt in result["series"])
-            median_count = counts[len(counts) // 2]
-            result["series"] = [
-                pt for pt in result["series"]
-                if pt["count"] <= median_count * 3
-            ]
-
-        # ── Guard: keep only the trailing run of CONTIGUOUS weeks ───────
-        # The Feb→May scraping outage (Postgres migration) leaves a hole in
-        # the series. Averaging a pre-gap week into the baseline produced a
-        # bogus trend (current Jun week vs a baseline that mixed a Feb week
-        # with May weeks → fake +11.7%). Restrict trend math (and the chart
-        # line, which would otherwise jump across the gap) to consecutive
-        # weeks — each within ~10 days of the next — ending at the latest.
-        if len(result["series"]) >= 2:
-            contiguous = [result["series"][-1]]
-            for pt in reversed(result["series"][:-1]):
-                kept_start = _as_datetime(contiguous[-1]["week_start"])
-                this_start = _as_datetime(pt["week_start"])
-                if kept_start and this_start and (kept_start - this_start).days <= 10:
-                    contiguous.append(pt)
-                else:
-                    break  # gap detected — stop; drop everything before it
-            contiguous.reverse()
-            result["series"] = contiguous
-
-        if len(result["series"]) >= 2:
-            # Guard: if the most recent week has < 40% of the average count
-            # of the previous weeks, treat it as an incomplete scrape and
-            # exclude it from the change calculation (but keep in series for
-            # the chart so the user can see the drop-off).
-            avg_prev_count = statistics.mean(
-                pt["count"] for pt in result["series"][:-1]
-            ) if len(result["series"]) > 1 else 0
-
-            latest = result["series"][-1]
-
-            # Guard 1: count-based — fewer than 60% of average means the scrape
-            # is clearly partial (raised from 40% to catch near-complete but biased weeks)
-            count_incomplete = (
-                avg_prev_count > 0
-                and latest["count"] < avg_prev_count * 0.60
-            )
-
-            # Guard 2: time-based — if the most recent week started less than 7
-            # days ago it is still open (scraping may still add listings), so
-            # treat it as incomplete regardless of the count.
-            latest_start = _as_datetime(latest["week_start"])
-            open_week = bool(latest_start) and (datetime.utcnow() - latest_start).days < 7
-
-            incomplete_week = count_incomplete or open_week
-
-            if incomplete_week and len(result["series"]) >= 3:
-                # Use second-to-last as current; rolling avg of older weeks as baseline
-                current    = result["series"][-2]
-                prior_weeks = result["series"][:-2]
+    # ── Guard: keep only the trailing run of CONTIGUOUS weeks ───────
+    # Weeks go missing two ways: the Feb→May scraping outage (Postgres
+    # migration) left a hole in the data, and _weekly_stock_index drops any
+    # week whose district coverage fell below _MIN_WEIGHT_COVERAGE. Either
+    # way, averaging across the hole produced a bogus trend (a Jun week vs a
+    # baseline mixing a Feb week with May weeks → fake +11.7%). Restrict
+    # trend math (and the chart line, which would otherwise jump the gap) to
+    # consecutive weeks — each within ~10 days of the next — ending at the
+    # latest.
+    if len(result["series"]) >= 2:
+        contiguous = [result["series"][-1]]
+        for pt in reversed(result["series"][:-1]):
+            kept_start = _as_datetime(contiguous[-1]["week_start"])
+            this_start = _as_datetime(pt["week_start"])
+            if kept_start and this_start and (kept_start - this_start).days <= 10:
+                contiguous.append(pt)
             else:
-                current    = result["series"][-1]
-                prior_weeks = result["series"][:-1]
+                break  # gap detected — stop; drop everything before it
+        contiguous.reverse()
+        result["series"] = contiguous
 
-            # Use rolling average of up to 3 prior complete weeks as baseline.
-            # This smooths out week-to-week composition noise (different mix of
-            # property types scrapped) while still catching genuine trends.
-            baseline_weeks = prior_weeks[-3:] if len(prior_weeks) >= 3 else prior_weeks
-            baseline_price = round(
-                statistics.mean(w["median_price"] for w in baseline_weeks)
-            ) if baseline_weeks else None
+    if len(result["series"]) >= 2:
+        # Guard: if the most recent week has < 40% of the average count
+        # of the previous weeks, treat it as an incomplete scrape and
+        # exclude it from the change calculation (but keep in series for
+        # the chart so the user can see the drop-off).
+        avg_prev_count = statistics.mean(
+            pt["count"] for pt in result["series"][:-1]
+        ) if len(result["series"]) > 1 else 0
 
-            result["current"]     = current["median_price"]
-            result["current_sqm"] = current["median_price_sqm"]
-            result["previous"]    = baseline_price
-            result["change"]      = (result["current"] - baseline_price) if baseline_price else None
-            raw_pct = round(
-                (result["change"] / baseline_price * 100) if baseline_price else 0, 2
-            )
-            # Clamp: any weekly change beyond ±15% is almost certainly a data
-            # artefact (composition shift), not a real market movement.
-            result["change_pct"]  = max(-15.0, min(15.0, raw_pct))
-            result["incomplete_latest_week"] = incomplete_week
+        latest = result["series"][-1]
 
-            if result["change_pct"] < -1:
-                result["trend"] = "down"
-            elif result["change_pct"] > 1:
-                result["trend"] = "up"
-            else:
-                result["trend"] = "stable"
+        # Guard 1: count-based — fewer than 60% of average means the scrape
+        # is clearly partial (raised from 40% to catch near-complete but biased weeks)
+        count_incomplete = (
+            avg_prev_count > 0
+            and latest["count"] < avg_prev_count * 0.60
+        )
 
-            # Breakpoint detection over the full window
-            result["breakpoint"] = _detect_trend_breakpoint(
-                result["series"], value_key="median_price"
-            )
+        # Guard 2: time-based — if the most recent week started less than 7
+        # days ago it is still open (scraping may still add listings), so
+        # treat it as incomplete regardless of the count.
+        latest_start = _as_datetime(latest["week_start"])
+        open_week = bool(latest_start) and (datetime.utcnow() - latest_start).days < 7
+
+        incomplete_week = count_incomplete or open_week
+
+        if incomplete_week and len(result["series"]) >= 3:
+            # Use second-to-last as current; rolling avg of older weeks as baseline
+            current    = result["series"][-2]
+            prior_weeks = result["series"][:-2]
+        else:
+            current    = result["series"][-1]
+            prior_weeks = result["series"][:-1]
+
+        # Use rolling average of up to 3 prior complete weeks as baseline.
+        # This smooths out residual week-to-week noise while still catching
+        # genuine trends.
+        baseline_weeks = prior_weeks[-3:] if len(prior_weeks) >= 3 else prior_weeks
+        baseline_price = round(
+            statistics.mean(w["median_price"] for w in baseline_weeks)
+        ) if baseline_weeks else None
+        baseline_sqm = round(
+            statistics.mean(w["median_price_sqm"] for w in baseline_weeks)
+        ) if baseline_weeks else None
+
+        result["current"]     = current["median_price"]
+        result["current_sqm"] = current["median_price_sqm"]
+        result["previous"]    = baseline_price
+        result["change"]      = (result["current"] - baseline_price) if baseline_price else None
+
+        # ── Headline % comes from €/m², not from the € median ───────────
+        # Asking prices cluster on round numbers (€495k, €500k, €520k …), so
+        # the € median moves in visible steps: a one-notch hop reads as
+        # ±1 % and flipped the trend to "up" — and tripped a breakpoint — on
+        # a week that had barely moved. €/m² is continuous, and it also
+        # controls for dwelling-size mix, the one composition axis the
+        # district weighting does not cover. So change_pct/trend describe
+        # €/m²; change_pct_eur keeps the € version, which is the one
+        # consistent with current/previous/change.
+        result["change_pct_eur"] = round(
+            (result["change"] / baseline_price * 100) if baseline_price else 0, 2
+        )
+        raw_pct = round(
+            ((current["median_price_sqm"] - baseline_sqm) / baseline_sqm * 100)
+            if baseline_sqm else 0, 2
+        )
+        # Clamp: a backstop, not a correction. The composition shifts that
+        # used to push this past ±15% are handled at source by the
+        # fixed-weight aggregation; if the clamp ever fires now, the input
+        # data is wrong and the series is worth looking at by hand.
+        result["change_pct"]  = max(-15.0, min(15.0, raw_pct))
+        result["incomplete_latest_week"] = incomplete_week
+
+        if result["change_pct"] < -1:
+            result["trend"] = "down"
+        elif result["change_pct"] > 1:
+            result["trend"] = "up"
+        else:
+            result["trend"] = "stable"
+
+        # Breakpoint detection over the full window — on €/m² for the same
+        # reason the headline % is: the € median's round-number steps read
+        # as direction changes that never happened.
+        result["breakpoint"] = _detect_trend_breakpoint(
+            result["series"], value_key="median_price_sqm"
+        )
 
     return result
 

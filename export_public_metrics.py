@@ -649,7 +649,7 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         # morosidad (annual static)
         "national_avg", "data_year", "source", "source_url",
         # price trend extras (aligned with "current" week, not last series entry)
-        "current_sqm",
+        "current_sqm", "change_pct_eur",
         # series (already aggregated weekly)
         "series", "breakpoint",
     }
@@ -802,7 +802,12 @@ def build_public_metrics() -> Dict[str, Any]:
         "valuation_model": valuation_model,
     }
 
-    print(f"✅ Public metrics generated — {len(json.dumps(metrics)) / 1024:.1f} KB")
+    # default=str: the weekly series carries date objects (Postgres returns
+    # DATE columns as datetime.date), which plain json.dumps refuses — the
+    # size line below used to abort the whole export with "Object of type
+    # date is not JSON serializable". Matches the writer in export_metrics().
+    print(f"✅ Public metrics generated — "
+          f"{len(json.dumps(metrics, default=str)) / 1024:.1f} KB")
     return metrics
 
 
