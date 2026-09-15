@@ -17,7 +17,9 @@ Locks down:
   - the reported level does not depend on the ``weeks`` lookback,
   - price_history is what dates a price, not the listing's current price,
   - districts too thin for a stable median stay out of the aggregate,
-  - an empty DB degrades to an empty series rather than raising.
+  - an empty DB degrades to an empty series rather than raising,
+  - change_pct_horizon (what the market score reads) ignores an in-progress
+    final week and does not move with the lookback.
 
 Fixtures use three districts with a clear middle, because a weighted median
 over two equally weighted groups is genuinely undefined — any value between
@@ -217,3 +219,76 @@ def test_empty_db_returns_empty_series(tmp_db: Path):
     assert result["series"] == []
     assert result["current"] is None
     assert result["trend"] == "stable"
+
+
+def test_horizon_change_ignores_the_in_progress_week(tmp_db: Path):
+    """change_pct_horizon must exclude a half-scraped final week.
+
+    The latest week is normally still being swept, so it holds a partial and
+    unrepresentative slice: the sweep reaches different listings *within* each
+    district, which district weighting cannot correct for. On live data,
+    including such a week put the horizon change at +0.9 % where the complete
+    weeks said 0.0 % — two buckets of the score's price component.
+    """
+    # Nine flat weeks of stable stock …
+    _seed(_three_districts(_monday(10), _sunday(2)))
+    # … then a thin final week that happened to catch the expensive end of
+    # every district (half the usual count, 1.5x the usual price).
+    partial = (
+        _block("PSAL", "Salamanca", 1_350_000, 25, _monday(1), _sunday(1))
+        + _block("PCEN", "Centro", 900_000, 25, _monday(1), _sunday(1))
+        + _block("PVIL", "Villaverde", 450_000, 25, _monday(1), _sunday(1))
+    )
+    _seed(partial)
+
+    result = mi.get_weekly_price_evolution(weeks=10)
+
+    assert result["incomplete_latest_week"] is True, "partial week not detected"
+    assert result["series"][-1]["median_price"] > 800_000, "fixture not biased"
+    assert result["change_pct_horizon"] == pytest.approx(0.0, abs=0.01), (
+        "the partial week leaked into the horizon change"
+    )
+
+
+def _stepped_market(cut_at_week: int, factor: float) -> None:
+    """Stable stock over 16 weeks that reprices by *factor* at *cut_at_week*."""
+    rows = _three_districts(_monday(16), _sunday(1))
+    _seed(rows)
+    _reprice(rows, factor, _monday(cut_at_week))
+
+
+def test_horizon_change_is_stable_across_lookbacks(tmp_db: Path):
+    """The score's input must be a property of the market, not of `weeks`.
+
+    Blocks are capped at 4 weeks and anchored at the recent end, so every
+    lookback long enough to fill them must agree. This is why the default
+    widened from 8 to 12: at 8 the blocks shrank to 3 weeks and the score
+    moved with the lookback (38.4 at 8 weeks, 36.4 at 12).
+    """
+    _stepped_market(cut_at_week=4, factor=0.98)
+
+    values = {
+        weeks: mi.get_weekly_price_evolution(weeks=weeks)["change_pct_horizon"]
+        for weeks in (10, 12, 14, 16)
+    }
+
+    assert len(set(values.values())) == 1, f"horizon moved with lookback: {values}"
+    assert next(iter(values.values())) != 0, "fixture did not move"
+
+
+def test_horizon_change_reports_a_real_move(tmp_db: Path):
+    """A sustained 2 % cut must reach change_pct_horizon.
+
+    change_pct alone would show it for one week and then forget it; the
+    horizon measure is what the score reads precisely so a move that plays
+    out over a month is not mistaken for noise.
+    """
+    _stepped_market(cut_at_week=4, factor=0.98)
+
+    result = mi.get_weekly_price_evolution(weeks=12)
+
+    assert result["horizon_weeks"] == 4
+    assert result["change_pct_horizon"] < -1, (
+        f"a 2 % cut across the recent block read as "
+        f"{result['change_pct_horizon']} %"
+    )

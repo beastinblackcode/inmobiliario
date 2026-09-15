@@ -390,10 +390,15 @@ def _weekly_stock_index(weeks: int) -> List[Dict]:
     return series
 
 
-def get_weekly_price_evolution(weeks: int = 8) -> Dict:
+def get_weekly_price_evolution(weeks: int = 12) -> Dict:
     """
     Median asking price of the active stock, week by week, at a constant
     district mix.
+
+    Defaults to 12 weeks because change_pct_horizon compares two 4-week
+    blocks and the latest week is usually still being scraped: at the old
+    default of 8 the blocks shrank to 3 weeks and the score moved with the
+    lookback (38.4 at 8 weeks, 36.4 at 12) rather than with the market.
 
     Until 2026-09 this bucketed listings by ``first_seen_date``, i.e. it
     measured the listings that *entered* the market each week.  Because each
@@ -407,8 +412,10 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
 
     Returns:
         Dict with 'series' (weekly data), 'current' (€ level of the latest
-        complete week), 'current_sqm', 'change_pct' (% move of the €/m²
-        index — the headline), 'change_pct_eur' (% move of the € median)
+        complete week), 'current_sqm', 'change_pct' (one-week move of the
+        €/m² index — the headline), 'change_pct_eur' (one-week move of the €
+        median), 'change_pct_horizon' + 'horizon_weeks' (a block-to-block
+        move over several weeks, which is what calculate_market_score reads)
         and 'trend'.
     """
     result = {
@@ -524,6 +531,38 @@ def get_weekly_price_evolution(weeks: int = 8) -> Dict:
             result["trend"] = "up"
         else:
             result["trend"] = "stable"
+
+        # ── Horizon change: the input the market score should read ──────
+        # change_pct above is a one-week move. On an index this stable that
+        # lives inside ±1 %, which is noise, not a market signal — scoring it
+        # pinned the price component to its two middle buckets forever. So
+        # also publish a block-to-block change: the mean of the last N weeks
+        # against the mean of the N before them, N up to 4.
+        #
+        # Blocks rather than an annualised slope: annualising a short window
+        # multiplies its noise by 52/n, which read +22 %/yr off six weeks of
+        # a series that had moved 2.7 %. The block measure came out at 0.9 %
+        # on every lookback from 8 to 20 weeks.
+        #
+        # Built from `complete` (prior_weeks + current), so an in-progress
+        # final week is excluded here exactly as it is from change_pct —
+        # including a half-swept week put this at +0.9 % where the complete
+        # weeks said 0.0 %.
+        complete = prior_weeks + [current]
+        block = min(4, len(complete) // 2)
+        # Below 3 weeks a block is too short to average out: normalising a
+        # 2-week move to a month doubles whatever noise it carries, so
+        # publish nothing and let the score sit at neutral instead.
+        if block >= 3:
+            recent = statistics.mean(w["median_price_sqm"] for w in complete[-block:])
+            prior  = statistics.mean(
+                w["median_price_sqm"] for w in complete[-2 * block:-block]
+            )
+            if prior:
+                result["change_pct_horizon"] = round((recent - prior) / prior * 100, 2)
+                # Distance between the two blocks' centroids, i.e. what the
+                # change is a change *over*. The score normalises by it.
+                result["horizon_weeks"] = block
 
         # Breakpoint detection over the full window — on €/m² for the same
         # reason the headline % is: the € median's round-number steps read
@@ -2256,34 +2295,63 @@ def calculate_market_score(
     - 40-74:  🟡 Neutral  (mercado en transición — señales mixtas)
     - 0-39:   🔴 Bearish  (mercado bajista — demanda débil, vendedores bajo presión)
 
-    Weights:
+    Weights (see the `weights` dict below, which is authoritative):
     - Price trend       : 20 %
     - Sales speed       : 20 %
     - Supply/demand     : 15 %
     - Affordability     : 15 %
     - Euríbor + trend   : 10 %
     - Price drop ratio  : 10 %
-    - Notarial gap      :  5 %   ← NUEVO (tensión precio oferta vs precio real)
-    - Employment        :  5 %
+    - Notarial gap      :  4 %   (tensión precio oferta vs precio real)
+    - Employment        :  3 %
+    - Afiliados SS      :  3 %
+
+    Note: `speed` and `supply_demand` both count listings that left the
+    market, and mark_stale_as_sold only marks one 21 days after it was last
+    seen (scraper.py). The most recent three weeks are therefore always
+    under-counted, which drags both components down for reasons that have
+    nothing to do with the market. Treat the score as provisional until that
+    is addressed.
     """
     scores: Dict = {}
 
     # ------------------------------------------------------------------
-    # 1. Price trend (25 %) — rising prices → bullish
+    # 1. Price trend (20 %) — rising prices → bullish
+    #
+    # Reads change_pct_horizon (a block-to-block move over several weeks),
+    # normalised to a 4-week rate — NOT change_pct, which is a single week.
+    #
+    # The old buckets (>5 %, >2 %, >0, >-2, >-5) were weekly, and were sized
+    # for a series that swung ±15 % a week because it re-sampled a different
+    # set of districts every week. On the composition-controlled index a
+    # week moves ~0.2 %, so every one of those buckets except the two
+    # straddling zero was unreachable: the component was pinned to 45/60 and
+    # contributed nothing. The thresholds below are monthly and sized to the
+    # market — ±0.75 %/month is roughly ±9 %/year, ±1.5 % is ±20 %.
     # ------------------------------------------------------------------
-    price_pct = price_trend.get("change_pct", 0) or 0
-    if price_pct > 5:
-        scores["prices"] = 90
-    elif price_pct > 2:
-        scores["prices"] = 75
-    elif price_pct > 0:
-        scores["prices"] = 60
-    elif price_pct > -2:
-        scores["prices"] = 45
-    elif price_pct > -5:
-        scores["prices"] = 30
+    horizon_pct = price_trend.get("change_pct_horizon")
+    horizon_weeks = price_trend.get("horizon_weeks") or 4
+    if horizon_pct is None:
+        # Too short a series, or a payload from before this field existed.
+        # Neutral rather than falling back to change_pct, which is the same
+        # quantity on a ~4x smaller scale and would read as a flat market.
+        scores["prices"] = 50
     else:
-        scores["prices"] = 15
+        monthly_pct = horizon_pct * 4 / horizon_weeks
+        if monthly_pct > 1.5:
+            scores["prices"] = 90    # ≈ +20 %/yr — overheating
+        elif monthly_pct > 0.75:
+            scores["prices"] = 75    # ≈ +9 %/yr — solid appreciation
+        elif monthly_pct > 0.25:
+            scores["prices"] = 60    # drifting up
+        elif monthly_pct >= -0.25:
+            scores["prices"] = 50    # flat
+        elif monthly_pct > -0.75:
+            scores["prices"] = 40    # drifting down
+        elif monthly_pct > -1.5:
+            scores["prices"] = 25    # ≈ -9 %/yr — clear correction
+        else:
+            scores["prices"] = 15    # sharp correction
 
     # ------------------------------------------------------------------
     # 2. Sales speed (20 %) — fewer days to sell → bullish

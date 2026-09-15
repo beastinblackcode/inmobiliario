@@ -649,7 +649,10 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         # morosidad (annual static)
         "national_avg", "data_year", "source", "source_url",
         # price trend extras (aligned with "current" week, not last series entry)
-        "current_sqm", "change_pct_eur",
+        # change_pct_horizon/horizon_weeks are what drives the score's price
+        # component, so they travel with it rather than leaving the published
+        # score unexplainable from the published numbers.
+        "current_sqm", "change_pct_eur", "change_pct_horizon", "horizon_weeks",
         # series (already aggregated weekly)
         "series", "breakpoint",
     }
