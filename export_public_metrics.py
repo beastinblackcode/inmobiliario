@@ -641,6 +641,10 @@ def _sanitise_indicator(ind: Dict) -> Dict:
         "drop_ratio", "total_active", "with_drops",
         # rotation / absorption / months of supply
         "rate", "active", "sold_window", "window_days", "lookback_months",
+        # Flow indicators necessarily trail the last scrape — see
+        # market_indicators._sold_horizon. Publishing the date they describe
+        # keeps a lagged number from reading as a current one.
+        "as_of", "lag_days",
         # rent burden
         "monthly_income_ref", "median_rent", "severity", "by_district",
         # lanzamientos CGPJ

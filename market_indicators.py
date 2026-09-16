@@ -597,19 +597,30 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
     with get_connection() as conn:
         cursor = conn.cursor()
 
+        # Only weeks whose departures are fully classified. The newest week
+        # with any sold_removed rows is typically still filling up — its
+        # listings cross the stale threshold over the following six days — so
+        # taking it at face value understates how many sold and skews the
+        # median towards whichever ones were marked first.
+        horizon = _sold_horizon(cursor)
         cursor.execute(f"""
             SELECT DISTINCT {iso_week('last_seen_date')} as week_num,
-                   MIN(last_seen_date) as week_start
+                   MIN(last_seen_date) as week_start,
+                   MAX(last_seen_date) as week_last
             FROM listings
             WHERE status = 'sold_removed'
             AND last_seen_date IS NOT NULL
             GROUP BY {iso_week('last_seen_date')}
             ORDER BY week_start DESC
-            LIMIT ?
-        """, (weeks,))
+        """)
 
-        week_info = cursor.fetchall()
+        week_info = [
+            (row[0], row[1]) for row in cursor.fetchall()
+            if horizon is None
+            or ((_as_datetime(row[2]) or datetime.max).date() <= horizon)
+        ][:weeks]
         week_info.reverse()
+        _stamp_horizon(result, horizon)
 
         for week_num, week_start in week_info:
             if not week_num:
@@ -644,17 +655,14 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
                     "sold_count": len(days)
                 })
 
-        # Drop bulk-import weeks (>3× median sold count)
-        if len(result["series"]) >= 3:
-            sold_counts = sorted(pt["sold_count"] for pt in result["series"])
-            med_sold = sold_counts[len(sold_counts) // 2]
-            result["series"] = [
-                pt for pt in result["series"]
-                if pt["sold_count"] <= med_sold * 3
-            ]
-
         # Keep only the trailing run of CONTIGUOUS weeks so the Feb→May
         # scraping gap doesn't poison the current-vs-previous comparison.
+        #
+        # Runs BEFORE the bulk-week filter, not after. The other way round,
+        # a week dropped just below looked identical to a hole in the data,
+        # and the contiguity check truncated everything before it: with the
+        # 2026-07-27 sweep filtered out, an 8-week series collapsed to the 2
+        # weeks after it, and `current` was a median over those two.
         if len(result["series"]) >= 2:
             contiguous = [result["series"][-1]]
             for pt in reversed(result["series"][:-1]):
@@ -666,6 +674,19 @@ def get_weekly_sales_speed(weeks: int = 8) -> Dict:
                     break
             contiguous.reverse()
             result["series"] = contiguous
+
+        # Drop bulk-marking weeks (>3× median sold count). These are sweeps
+        # that widened coverage and caught up on listings that had in truth
+        # been gone for a while, so their days-on-market runs long: the
+        # 2026-07-27 week marked 1 988 removals at a median of 44 days
+        # against 25 either side of it.
+        if len(result["series"]) >= 3:
+            sold_counts = sorted(pt["sold_count"] for pt in result["series"])
+            med_sold = sold_counts[len(sold_counts) // 2]
+            result["series"] = [
+                pt for pt in result["series"]
+                if pt["sold_count"] <= med_sold * 3
+            ]
 
         if len(result["series"]) >= 2:
             avg_prev_count = statistics.mean(
@@ -722,24 +743,32 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
         "trend": "stable"
     }
     
-    from db.dialect import iso_week, date_plus_days
+    from db.dialect import iso_week
 
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # Get all weeks with data
+        # Weeks with data, no closer to today than the maturity horizon:
+        # a week's removals are only fully known once its last day has had
+        # _STALE_LAG_DAYS to be marked.
+        horizon = _sold_horizon(cursor)
         cursor.execute(f"""
             SELECT DISTINCT {iso_week('first_seen_date')} as week_num,
-                   MIN(first_seen_date) as week_start
+                   MIN(first_seen_date) as week_start,
+                   MAX(first_seen_date) as week_last
             FROM listings
             WHERE first_seen_date IS NOT NULL
             GROUP BY {iso_week('first_seen_date')}
             ORDER BY week_start DESC
-            LIMIT ?
-        """, (weeks,))
+        """)
 
-        week_info = cursor.fetchall()
+        week_info = [
+            (row[0], row[1]) for row in cursor.fetchall()
+            if horizon is None
+            or ((_as_datetime(row[2]) or datetime.max).date() <= horizon)
+        ][:weeks]
         week_info.reverse()
+        _stamp_horizon(result, horizon)
 
         # Skip first week (baseline)
         for week_num, week_start in week_info[1:]:
@@ -753,18 +782,17 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
             """, (week_num,))
             new_count = cursor.fetchone()[0]
 
-            # Sold/removed this week.
-            # mark_stale_as_sold() marks a property sold once its last_seen_date
-            # is older than the stale threshold, and does NOT update
-            # last_seen_date — it stays as the last day the scraper found the
-            # listing active. We compensate by shifting the detection window
-            # forward by that threshold: "absorbed in week W" ≡ last_seen_date
-            # falls _STALE_LAG_DAYS earlier. (21 d — see note on the constant.)
-            shifted_last_seen = date_plus_days('last_seen_date', f"'+{_STALE_LAG_DAYS}'")
+            # Removed this week — the SAME calendar week the new listings
+            # are counted in. This used to shift last_seen_date forward by
+            # _STALE_LAG_DAYS to compensate for late marking, which made the
+            # ratio compare new listings in week W against departures from
+            # week W-3: not a supply/demand ratio for any one period. Capping
+            # the weeks at the maturity horizon removes the need for the
+            # shift, so both sides now describe the same seven days.
             cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
-                AND {iso_week(shifted_last_seen)} = ?
+                AND {iso_week('last_seen_date')} = ?
             """, (week_num,))
             sold_count = cursor.fetchone()[0]
             
@@ -809,30 +837,94 @@ def get_supply_demand_ratio(weeks: int = 8) -> Dict:
 # Absorption Rate (sold last 30d / active inventory)
 # ============================================================================
 
-# mark_stale_as_sold() lag: a property's last_seen_date stays as the day
-# the scraper last saw it active.  We only learn it has gone ~21 days later.
-# Any window over sold_removed listings must therefore be shifted back by the
-# stale threshold to reflect "what was sold during this calendar window".
-#
-# 21, not 14: the scraper runs lite/auto most days and passes
-# days_threshold=21 (scraper.py), and Tier-2 of mark_stale_as_sold is a hard
-# 21-day cutoff regardless of mode. A 14-day lag left the most recent ~7 days
-# of every sold-window in the "not yet eligible to be marked" zone, so recent
-# sold/absorption counts read structurally low (and sold_count over a 7-day
-# window read 0). Kept in sync with compute_snapshots.py's LAG.
+# mark_stale_as_sold() lag: a property's last_seen_date stays as the day the
+# scraper last saw it active. We only learn it has gone once it crosses the
+# scraper's stale threshold — scraper.py passes days_threshold=21 in
+# lite/auto, and Tier-2 is a hard 21-day cutoff regardless of mode.
 _STALE_LAG_DAYS = 21
+
+# A *week bucket* matures later than a single date: listings last seen on its
+# final day cross the threshold six days after those last seen on its first.
+# Measured against live data on 2026-09-16, classification is a step, not a
+# ramp — and it falls between 22 and 29 days, not at 21:
+#
+#   week of last_seen    age    classified    still 'active'
+#   2026-08-24           22 d        0.0 %          1 522
+#   2026-08-17           29 d       99.8 %              2
+#   2026-08-10           36 d       98.6 %              7
+#
+# Shifting a window back by _STALE_LAG_DAYS alone therefore still lands in
+# the unclassified zone. That is how supply/demand came to report 9.36: its
+# newest week mapped onto the 0 % cohort, so sold_count was 0 and the ratio
+# hit its cap of 10.
+_MATURITY_LAG_DAYS = _STALE_LAG_DAYS + 7
+
+
+def _sold_horizon(cursor) -> Optional[date]:
+    """The most recent date at which departures from the market are fully known.
+
+    Every flow indicator — speed, supply/demand, absorption, months of supply,
+    rotation — counts listings that left, so none of them can see closer to
+    today than this. Reporting up to today instead reads the unclassified zone
+    as "nothing is selling": it is what put absorption at 17.7 % against a
+    previous 22.7 %, and rotation at 1 %, on a market that had not changed.
+
+    Moving the anchor back also fixes the denominators, though not for the
+    reason it first appears. A listing that has gone but is not yet marked
+    still carries status 'active' — roughly 4 000 of them, ~18 % of the
+    stock — and counting the stock as of today therefore counts listings that
+    have already left. As of the horizon those same listings had genuinely
+    not left yet, so including them is correct rather than merely tolerable.
+    """
+    cursor.execute("SELECT MAX(last_seen_date) FROM listings")
+    row = cursor.fetchone()
+    latest = _as_datetime(row[0]) if row and row[0] else None
+    if latest is None:
+        return None
+    return latest.date() - timedelta(days=_MATURITY_LAG_DAYS)
+
+
+def _stamp_horizon(result: Dict, horizon: Optional[date]) -> Dict:
+    """Record which date a flow indicator actually describes.
+
+    These indicators necessarily trail the last scrape by _MATURITY_LAG_DAYS,
+    and every surface that renders them (Streamlit metrics, the email KPI
+    rows, the daily tweet) labels them as though they were current. Publishing
+    the date they refer to is the difference between a lagged number and a
+    wrong one.
+    """
+    result["as_of"] = horizon.isoformat() if horizon else None
+    result["lag_days"] = _MATURITY_LAG_DAYS
+    return result
+
+
+def _within_horizon(dates: list, horizon: Optional[date]) -> list:
+    """Filter DB date values down to those at or before *horizon*."""
+    if horizon is None:
+        return dates
+    kept = []
+    for value in dates:
+        parsed = _as_datetime(value)
+        if parsed and parsed.date() <= horizon:
+            kept.append(value)
+    return kept
 
 
 def _weekly_anchors(cursor, weeks: int) -> list:
     """Return up to *weeks* Monday dates (chronological) that we have data
     for, plus the most recent observation if it isn't already a Monday.
-    Reused by absorption rate, months of supply, etc."""
+    Reused by absorption rate, months of supply, etc.
+
+    Capped at _sold_horizon(): every caller counts listings that left the
+    market, which is not yet knowable for anchors closer to today than that.
+    """
+    horizon = _sold_horizon(cursor)
     cursor.execute("""
         SELECT DISTINCT last_seen_date FROM listings
         WHERE last_seen_date IS NOT NULL
         ORDER BY last_seen_date
     """)
-    all_dates = [r[0] for r in cursor.fetchall()]
+    all_dates = _within_horizon([r[0] for r in cursor.fetchall()], horizon)
     sampled: list = []
     for d in all_dates:
         dt = _as_datetime(d)
@@ -856,8 +948,14 @@ def get_absorption_rate(window_days: int = 30, weeks: int = 8) -> Dict:
         active_at_W   = listings whose first_seen_date <= W and which were
                         either still active or last seen on/after W
         sold_at_W     = sold_removed whose last_seen_date falls inside
-                        [W - LAG - window_days, W - LAG]   (LAG = 14 days)
+                        [W - window_days, W)
         absorption    = sold_at_W / active_at_W × 100
+
+    W runs no closer to today than _sold_horizon(), so no lag shift is needed
+    on the window itself: at the horizon every departure inside it has already
+    been classified. (This used to shift the window back by _STALE_LAG_DAYS
+    while still anchoring W at today, which both cut the window short of its
+    own anchor and left the active count full of not-yet-marked listings.)
 
     Args:
         window_days: size of the absorption window (default 30 — monthly).
@@ -878,26 +976,32 @@ def get_absorption_rate(window_days: int = 30, weeks: int = 8) -> Dict:
 
     with get_connection() as conn:
         cursor = conn.cursor()
+        _stamp_horizon(result, _sold_horizon(cursor))
         for week_end in _weekly_anchors(cursor, weeks):
             # Active at week_end
+            # No `OR status = 'active'` here. It was there so that a
+            # genuinely live listing still counted when the sweep had not
+            # touched it on the anchor day itself — but the anchor is now at
+            # least _MATURITY_LAG_DAYS old, by which point every live listing
+            # has been seen again. All the clause can still admit is a
+            # listing that left before the anchor and has not been marked
+            # (its barrio never swept to full depth), which is precisely what
+            # must not be in the denominator.
             cursor.execute("""
                 SELECT COUNT(*) FROM listings
                 WHERE first_seen_date <= ?
-                  AND (last_seen_date >= ? OR status = 'active')
+                  AND last_seen_date >= ?
             """, (week_end, week_end))
             active = cursor.fetchone()[0]
 
-            # Sold during window [week_end - LAG - N, week_end - LAG]
+            # Sold during window [week_end - N, week_end)
             from db.dialect import date_plus_days
             cursor.execute(f"""
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
                   AND last_seen_date >= {date_plus_days('?', '?')}
-                  AND last_seen_date <  {date_plus_days('?', '?')}
-            """, (
-                week_end, f"-{_STALE_LAG_DAYS + window_days}",
-                week_end, f"-{_STALE_LAG_DAYS}",
-            ))
+                  AND last_seen_date <  ?
+            """, (week_end, f"-{window_days}", week_end))
             sold = cursor.fetchone()[0]
 
             if active > 0:
@@ -944,9 +1048,12 @@ def get_months_of_supply(lookback_months: int = 3, weeks: int = 8) -> Dict:
     Per-week, computed at week-end W as:
         active_at_W   = listings active at W (same definition as absorption)
         sold_window   = sold_removed with last_seen_date in
-                        [W - LAG - 30·K, W - LAG]
+                        [W - 30·K, W)
         monthly_rate  = sold_window / lookback_months
         months_supply = active_at_W / monthly_rate     (∞ if no sales)
+
+    As with absorption, W is capped at _sold_horizon() so the window needs no
+    lag shift of its own.
 
     Args:
         lookback_months: window for the sales-rate denominator.
@@ -971,11 +1078,20 @@ def get_months_of_supply(lookback_months: int = 3, weeks: int = 8) -> Dict:
 
     with get_connection() as conn:
         cursor = conn.cursor()
+        _stamp_horizon(result, _sold_horizon(cursor))
         for week_end in _weekly_anchors(cursor, weeks):
+            # No `OR status = 'active'` here. It was there so that a
+            # genuinely live listing still counted when the sweep had not
+            # touched it on the anchor day itself — but the anchor is now at
+            # least _MATURITY_LAG_DAYS old, by which point every live listing
+            # has been seen again. All the clause can still admit is a
+            # listing that left before the anchor and has not been marked
+            # (its barrio never swept to full depth), which is precisely what
+            # must not be in the denominator.
             cursor.execute("""
                 SELECT COUNT(*) FROM listings
                 WHERE first_seen_date <= ?
-                  AND (last_seen_date >= ? OR status = 'active')
+                  AND last_seen_date >= ?
             """, (week_end, week_end))
             active = cursor.fetchone()[0]
 
@@ -984,11 +1100,8 @@ def get_months_of_supply(lookback_months: int = 3, weeks: int = 8) -> Dict:
                 SELECT COUNT(*) FROM listings
                 WHERE status = 'sold_removed'
                   AND last_seen_date >= {date_plus_days('?', '?')}
-                  AND last_seen_date <  {date_plus_days('?', '?')}
-            """, (
-                week_end, f"-{_STALE_LAG_DAYS + window_days}",
-                week_end, f"-{_STALE_LAG_DAYS}",
-            ))
+                  AND last_seen_date <  ?
+            """, (week_end, f"-{window_days}", week_end))
             sold = cursor.fetchone()[0]
 
             if active > 0:
@@ -1130,23 +1243,27 @@ def get_rotation_rate(weeks: int = 4) -> Dict:
     with get_connection() as conn:
         cursor = conn.cursor()
 
-        # Current active inventory (snapshot)
-        cursor.execute("SELECT COUNT(*) FROM listings WHERE status = 'active'")
+        # Anchor on the maturity horizon, not on the last scrape. Anchoring
+        # on the last scrape put every bucket inside the window where nothing
+        # has been marked sold yet, so the numerator was near zero and the
+        # rate sat at ~1 % regardless of the market.
+        horizon = _sold_horizon(cursor)
+        if horizon is None:
+            return result
+        _stamp_horizon(result, horizon)
+        anchor = datetime.combine(horizon, datetime.min.time())
+
+        # Active inventory as of the anchor. Counting status='active' as of
+        # today would mix a present-day denominator with a four-week-old
+        # numerator, and would include the listings that have gone but are
+        # not yet marked.
+        cursor.execute("""
+            SELECT COUNT(*) FROM listings
+            WHERE first_seen_date <= ?
+              AND last_seen_date >= ?
+        """, (horizon.isoformat(), horizon.isoformat()))
         active = cursor.fetchone()[0]
         result["active"] = active
-
-        # Last scraping date as anchor
-        cursor.execute("""
-            SELECT MAX(last_seen_date) FROM listings
-            WHERE last_seen_date IS NOT NULL
-        """)
-        row = cursor.fetchone()
-        if not row or not row[0]:
-            return result
-
-        anchor = _as_datetime(row[0])
-        if anchor is None:
-            return result
 
         # Build rolling 1-week buckets going back `weeks` weeks
         buckets = []
@@ -1168,11 +1285,12 @@ def get_rotation_rate(weeks: int = 4) -> Dict:
             """, (start, end))
             sold_week = cursor.fetchone()[0]
 
-            # Active inventory at the end of the window
+            # Active inventory at the end of the window (see the note on
+            # the anchor query above for why status is not consulted).
             cursor.execute("""
                 SELECT COUNT(*) FROM listings
                 WHERE first_seen_date <= ?
-                AND (last_seen_date >= ? OR status = 'active')
+                AND last_seen_date >= ?
             """, (end, end))
             active_week = cursor.fetchone()[0]
 

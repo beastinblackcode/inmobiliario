@@ -93,10 +93,14 @@ class TestComputeSnapshots:
     def test_absorption_rate_formula(self, tmp_db: Path):
         """
         absorption_rate = sold_30d / active_count × 100
-        sold_30d window is lag-shifted by 21 d.
-        So a listing sold 25 d ago counts in the window
-        [today - 21 - 30, today - 21) = [51d ago, 21d ago).
+
+        The sold window is lag-shifted by _MATURITY_LAG_DAYS, so it runs
+        [today - LAG - 30, today - LAG). Offsets are expressed against the
+        constant rather than written out: they were hard-coded for a 21-day
+        lag, and silently stopped exercising the window when it moved.
         """
+        from market_indicators import _MATURITY_LAG_DAYS as LAG
+
         conn = get_db()
         today_d = datetime.now().date()
         today = today_d.isoformat()
@@ -105,10 +109,9 @@ class TestComputeSnapshots:
         for i in range(10):
             _insert(conn, f"A{i}", "Centro", "Sol", 300_000, 80, today)
 
-        # 4 sold listings whose last_seen falls inside the 30-d window
-        # (lag-shifted by 21 d) → between 21d and 51d ago
+        # 4 sold listings sitting inside the lag-shifted 30-day window
         for i in range(4):
-            d = (today_d - timedelta(days=25 + i)).isoformat()
+            d = (today_d - timedelta(days=LAG + 2 + i)).isoformat()
             _insert(conn, f"S{i}", "Centro", "Sol", 300_000, 80, d, status="sold_removed")
         conn.commit()
 
@@ -121,9 +124,12 @@ class TestComputeSnapshots:
     def test_months_of_supply_formula(self, tmp_db: Path):
         """
         months_of_supply = active / (sold_90d / 3)
-        Lag-shifted by 21 d, so window is [today-21-90, today-21) = [111d, 21d) ago.
+
+        Window is [today - LAG - 90, today - LAG).
         With active=18 and sold_90d=6 → 18 / (6/3) = 18 / 2 = 9 months.
         """
+        from market_indicators import _MATURITY_LAG_DAYS as LAG
+
         conn = get_db()
         today_d = datetime.now().date()
         today = today_d.isoformat()
@@ -132,7 +138,7 @@ class TestComputeSnapshots:
             _insert(conn, f"A{i}", "Centro", "Sol", 300_000, 80, today)
 
         for i in range(6):
-            d = (today_d - timedelta(days=25 + i * 5)).isoformat()
+            d = (today_d - timedelta(days=LAG + 2 + i * 5)).isoformat()
             _insert(conn, f"S{i}", "Centro", "Sol", 300_000, 80, d, status="sold_removed")
         conn.commit()
 
@@ -159,27 +165,36 @@ class TestComputeSnapshots:
         mos = _get_metric(conn, "city", None, "months_of_supply")
         assert mos == pytest.approx(36.0, abs=0.01)
 
-    def test_sold_count_7d_uses_21d_lag(self, tmp_db: Path):
+    def test_sold_count_7d_excludes_the_unclassified_zone(self, tmp_db: Path):
         """
-        Regression guard for the sold_count (7-day) bug: with LAG=21 the 7-day
-        window is [today-28, today-21). A listing last seen 24 d ago must count;
-        one last seen 18 d ago (younger than the 21-day stale threshold, so not
-        yet eligible to be marked) must NOT — that gap is exactly what made the
-        old LAG=14 metric read a structural 0.
+        Regression guard for the sold_count (7-day) bug: the window is
+        [today - LAG - 7, today - LAG), so it must sit entirely on the far
+        side of the maturity cliff.
+
+        A listing too recent to have been classified must not count. With
+        LAG=21 the window straddled that cliff — measured on live data,
+        cohorts 22 days old were 0 % classified and cohorts 29 days old were
+        99.8 % — so the metric read structurally low, the same way it read a
+        structural 0 back when the lag was 14.
         """
+        from market_indicators import _MATURITY_LAG_DAYS as LAG
+
         conn = get_db()
         today_d = datetime.now().date()
         today = today_d.isoformat()
 
         for i in range(10):
             _insert(conn, f"A{i}", "Centro", "Sol", 300_000, 80, today)
-        # In the 7-day window [today-28, today-21):
+        # Inside the 7-day window [today - LAG - 7, today - LAG):
         for i in range(3):
-            d = (today_d - timedelta(days=23 + i)).isoformat()   # 23,24,25 d ago
+            d = (today_d - timedelta(days=LAG + 2 + i)).isoformat()
             _insert(conn, f"IN{i}", "Centro", "Sol", 300_000, 80, d, status="sold_removed")
-        # Too recent (18 d ago, < 21-day threshold) → must be excluded:
+        # Younger than the lag: not yet reliably classified, must be excluded.
         _insert(conn, "TOO_NEW", "Centro", "Sol", 300_000, 80,
-                (today_d - timedelta(days=18)).isoformat(), status="sold_removed")
+                (today_d - timedelta(days=LAG - 3)).isoformat(), status="sold_removed")
+        # Older than the window: belongs to an earlier bucket.
+        _insert(conn, "TOO_OLD", "Centro", "Sol", 300_000, 80,
+                (today_d - timedelta(days=LAG + 10)).isoformat(), status="sold_removed")
         conn.commit()
 
         cs.compute_all_snapshots(today)

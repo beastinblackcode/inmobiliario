@@ -150,15 +150,21 @@ def _compute_scope_metrics(
     # We shift each window back by that threshold to count listings detected
     # as sold within the window.
     #
-    # The threshold is 21 d, not 14: the scraper runs lite/auto most days and
-    # passes days_threshold=21 (scraper.py), and Tier-2 of mark_stale_as_sold
-    # is a hard 21-day cutoff regardless of mode. With LAG=14 the 7-day window
-    # [base-21, base-14) landed entirely in the "not yet eligible to be
-    # marked" zone, so sold_count (7 d) was structurally 0 while sold_count_30d
-    # (which reaches back past base-21) stayed non-zero. LAG=21 aligns the
-    # windows with when listings actually become sold.
+    # The lag is _MATURITY_LAG_DAYS (28), not the scraper's bare 21-day
+    # threshold. A listing last seen on day 0 is eligible on day 21, but a
+    # *window* also spans days, so its most recent members are still
+    # unclassified for another week. Measured against live data on
+    # 2026-09-16, cohorts 22 days old were 0 % classified and cohorts 29 days
+    # old were 99.8 %. With LAG=21 the 7-day window [base-28, base-21)
+    # straddled exactly that cliff, so sold_count stayed structurally low —
+    # the same defect LAG=14 had against the 30-day window.
+    #
+    # Imported rather than redeclared: these two must not drift, and a
+    # comment saying so was not enough to stop it.
+    from market_indicators import _MATURITY_LAG_DAYS
+
     base = datetime.strptime(date_str, "%Y-%m-%d")
-    LAG = 21
+    LAG = _MATURITY_LAG_DAYS
 
     def _sold_in_window(window_days: int) -> int | None:
         win_end   = (base - timedelta(days=LAG)).strftime("%Y-%m-%d")
