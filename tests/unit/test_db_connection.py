@@ -142,3 +142,80 @@ class TestHybridRow:
         assert dict(empty) == {}
         assert list(empty) == []
         assert empty.keys() == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Pool liveness check
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestPoolLivenessCheck:
+    """The pool must validate a connection before handing it out.
+
+    Neon terminates every open connection when it auto-suspends the
+    compute. The pool does not learn about it: the socket is dead but
+    ``conn.closed`` is still ``False``, so the connection is handed out
+    as healthy and the *caller's* first query dies with
+    ``AdminShutdown`` / ``OperationalError: the connection is lost`` —
+    which surfaced as a full-page Streamlit crash.
+
+    Passing ``check=ConnectionPool.check_connection`` makes the pool
+    round-trip the connection before checkout and transparently swap in
+    a fresh one when that fails. These tests pin the wiring; the
+    behaviour itself is psycopg_pool's.
+    """
+
+    @staticmethod
+    def _captured_pool_kwargs(monkeypatch, env_value: str | None) -> dict:
+        """Reload connection_pg under ``env_value`` and capture pool kwargs."""
+        import importlib
+
+        import db.connection_pg as pg
+
+        if env_value is None:
+            monkeypatch.delenv("PG_POOL_CHECK", raising=False)
+        else:
+            monkeypatch.setenv("PG_POOL_CHECK", env_value)
+
+        pg = importlib.reload(pg)
+        captured: dict = {}
+
+        # Subclass the real pool so ``ConnectionPool.check_connection``
+        # keeps its identity — get_pool() reads it off this same name.
+        class _FakePool(pg.ConnectionPool):
+            def __init__(self, **kwargs):  # noqa: WPS612 — deliberately no super()
+                captured.update(kwargs)
+
+            def open(self, wait=False):
+                pass
+
+        monkeypatch.setattr(pg, "ConnectionPool", _FakePool)
+        monkeypatch.setattr(pg, "_resolve_url", lambda: "postgresql://u:p@h/db")
+        monkeypatch.setattr(pg, "_pool", None)
+        pg.get_pool()
+
+        # Leave a clean module for the rest of the suite.
+        importlib.reload(pg)
+        return captured
+
+    def test_check_is_enabled_by_default(self, monkeypatch):
+        from psycopg_pool import ConnectionPool
+
+        kwargs = self._captured_pool_kwargs(monkeypatch, None)
+        assert kwargs["check"] is ConnectionPool.check_connection
+
+    def test_check_can_be_disabled_via_env(self, monkeypatch):
+        kwargs = self._captured_pool_kwargs(monkeypatch, "0")
+        assert kwargs["check"] is None
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "anything-else"])
+    def test_truthy_env_values_keep_the_check(self, monkeypatch, value):
+        from psycopg_pool import ConnectionPool
+
+        kwargs = self._captured_pool_kwargs(monkeypatch, value)
+        assert kwargs["check"] is ConnectionPool.check_connection
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "FALSE", "No"])
+    def test_falsy_env_values_disable_the_check(self, monkeypatch, value):
+        kwargs = self._captured_pool_kwargs(monkeypatch, value)
+        assert kwargs["check"] is None

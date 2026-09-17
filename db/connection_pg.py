@@ -139,6 +139,24 @@ _DEFAULT_TIMEOUT  = float(os.environ.get("PG_POOL_TIMEOUT", "60"))
 _DEFAULT_MAX_IDLE     = float(os.environ.get("PG_POOL_MAX_IDLE", "300"))
 _DEFAULT_MAX_LIFETIME = float(os.environ.get("PG_POOL_MAX_LIFETIME", "1800"))
 
+# Liveness check on checkout.  Neon terminates every open connection when
+# it auto-suspends the compute (and on any control-plane maintenance),
+# which reaches us as ``psycopg.errors.AdminShutdown`` (SQLSTATE 57P01)
+# on the *next* query — not at suspend time.  ``max_idle`` alone does not
+# prevent this: the pool's pruning worker runs on a timer, so a
+# connection the server killed seconds ago is still handed out as
+# healthy, and the app crashes on the first ``execute``.
+#
+# ``ConnectionPool.check_connection`` runs a no-op round-trip before the
+# connection leaves the pool; if it fails, the pool discards that
+# connection and opens a fresh one, transparently to the caller.  Cost is
+# one extra round-trip per checkout (~1 ms same-region, tens of ms
+# cloud-to-cloud), which is the right trade against a crashed page.
+#
+# Set ``PG_POOL_CHECK=0`` to disable (e.g. to measure the check's own
+# latency cost against a warm, non-suspending Postgres).
+_DEFAULT_CHECK = os.environ.get("PG_POOL_CHECK", "1").lower() not in ("0", "false", "no")
+
 _pool_lock = threading.Lock()
 _pool: Optional[ConnectionPool] = None
 
@@ -264,6 +282,7 @@ def get_pool() -> ConnectionPool:
             timeout=_DEFAULT_TIMEOUT,
             max_idle=_DEFAULT_MAX_IDLE,
             max_lifetime=_DEFAULT_MAX_LIFETIME,
+            check=ConnectionPool.check_connection if _DEFAULT_CHECK else None,
             kwargs={"row_factory": dict_row, "autocommit": False},
             open=False,
         )
