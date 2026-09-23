@@ -56,7 +56,36 @@ DEFAULT_CRITERIA: dict[str, Any] = {
     "max_rooms":  4,
     "seller_any": True,                   # False → only Particular
     "ascensor":   False,                  # True → only listings with a lift
+    "exclude_bajos":       False,         # True → drop Bajo / Entreplanta
+    "exclude_no_disponible": False,       # True → drop nuda propiedad, ocupados…
 }
+
+
+# Floor values that mean "ground level" on Idealista.  The field is free
+# text but the prefix vocabulary is closed — a sweep of the whole table
+# yields only ``Bajo…``, ``Entreplanta…``, ``Planta Nª…`` and ``Nª
+# planta…`` (no ``Sótano``).  Entreplanta is grouped with Bajo: it sits
+# between the ground floor and the first, so it shares the drawbacks
+# (street noise, security, no views) the exclusion is meant to avoid.
+_BAJO_RE = r"^\s*(?:bajo|entreplanta)\b"
+
+# Listings that are not a normal, vacant purchase.  Three families:
+#   * split ownership — you buy the title, someone else keeps the use
+#     (nuda propiedad / usufructo / vitalicio);
+#   * no possession — occupied, squatted, or sold expressly without
+#     access, typical of bank and judicial-auction stock;
+#   * tenant in place — sold as an investment with a running lease.
+# Matched over title + description because Idealista puts the warning in
+# either one.  Deliberately conservative: it will also drop the rare
+# "tenant leaving this month" listing, which is the right trade when the
+# goal is a flat to move into.
+_NO_DISPONIBLE_RE = (
+    r"nuda\s+propiedad|usufructo|vitalici[oa]"
+    r"|ocupad[oa]|okupa"
+    r"|sin\s+posesi[oó]n|sin\s+acceso\s+al\s+interior|no\s+se\s+puede\s+visitar"
+    r"|alquilad[oa]|con\s+inquilino|inquilinos"
+    r"|subasta|proindiviso|ejecuci[oó]n\s+judicial"
+)
 
 
 def _clamp(value: int, lo: int, hi: int) -> int:
@@ -157,6 +186,21 @@ def _apply_criteria(df: pd.DataFrame, c: dict) -> pd.DataFrame:
         floor = out.get("floor")
         if floor is not None:
             out = out[~floor.fillna("").str.contains("sin ascensor", case=False)]
+    if c.get("exclude_bajos"):
+        # Strict stance, unlike ``ascensor``: an unknown floor is *kept*
+        # (we can't prove it's a bajo) but anything that says Bajo or
+        # Entreplanta goes.  Anchored at the start so "bajo" inside prose
+        # — "bajo demanda", "planta 3ª bajo cubierta" — doesn't match.
+        floor = out.get("floor")
+        if floor is not None:
+            out = out[~floor.fillna("").str.contains(_BAJO_RE, case=False, regex=True)]
+    if c.get("exclude_no_disponible"):
+        text = (
+            out.get("title", pd.Series("", index=out.index)).fillna("")
+            + " "
+            + out.get("description", pd.Series("", index=out.index)).fillna("")
+        )
+        out = out[~text.str.contains(_NO_DISPONIBLE_RE, case=False, regex=True)]
     return out
 
 
@@ -320,6 +364,18 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                 help="Excluye solo los anuncios que dicen «sin ascensor»; "
                      "conserva los que lo mencionan y los que no indican planta.",
             )
+            exclude_bajos = st.checkbox(
+                "Excluir bajos y entreplantas",
+                value=bool(criteria.get("exclude_bajos", False)),
+                help="Descarta los anuncios cuya planta empieza por «Bajo» o "
+                     "«Entreplanta». Los que no indican planta se conservan.",
+            )
+            exclude_no_disponible = st.checkbox(
+                "Solo viviendas disponibles",
+                value=bool(criteria.get("exclude_no_disponible", False)),
+                help="Descarta nuda propiedad, usufructo vitalicio, inmuebles "
+                     "ocupados o sin posesión, y pisos vendidos con inquilino.",
+            )
 
             submitted = st.form_submit_button("💾 Guardar criterios", type="primary")
             if submitted:
@@ -332,6 +388,8 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                     "max_rooms":  int(max_rooms),
                     "seller_any": seller_any == "Cualquiera",
                     "ascensor":   bool(ascensor),
+                    "exclude_bajos":         bool(exclude_bajos),
+                    "exclude_no_disponible": bool(exclude_no_disponible),
                 }
                 _save_criteria(new_criteria)
                 # Clear the per-criteria ranking cache so the new
@@ -353,6 +411,10 @@ def _render_summary_chip(criteria: dict, n_matches: int) -> None:
         else f"≥ {criteria['min_size']} m²"
     )
     lift_s = " · con ascensor" if criteria.get("ascensor") else ""
+    if criteria.get("exclude_bajos"):
+        lift_s += " · sin bajos"
+    if criteria.get("exclude_no_disponible"):
+        lift_s += " · solo disponibles"
     st.caption(
         f"📍 **{len(criteria['barrios'])} barrios** · "
         f"≤ €{criteria['max_price']:,} · "

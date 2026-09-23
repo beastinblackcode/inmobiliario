@@ -110,6 +110,13 @@ def _load_active_listings_since(watermark: date) -> pd.DataFrame:
     """Active listings whose ``first_seen_date`` is strictly *after* watermark.
 
     Strict ``>`` so we don't replay the boundary day on each run.
+
+    ``description`` is in the projection because the criteria filter's
+    ``exclude_no_disponible`` reads it.  Without the column the filter
+    silently matches nothing and the email would carry the nuda-propiedad
+    and occupied listings the dashboard hides — the two paths share
+    ``_apply_criteria`` precisely so they can't diverge, and that only
+    holds if they're fed the same columns.
     """
     from db.dialect import current_date, julianday_diff
     days_expr = julianday_diff(
@@ -122,6 +129,7 @@ def _load_active_listings_since(watermark: date) -> pd.DataFrame:
             f"""
             SELECT listing_id, title, url, price, distrito, barrio,
                    size_sqm, rooms, floor, seller_type, status,
+                   description,
                    first_seen_date, last_seen_date,
                    {days_expr} AS days_on_market,
                    CASE WHEN size_sqm > 0
@@ -264,6 +272,24 @@ def _build_email_html(
     n_barrios    = len(criteria.get("barrios") or [])
     barrios_chip = ", ".join(criteria.get("barrios") or [])
 
+    # Surface the exclusions in the header: a shorter list than expected
+    # should be explainable from the email itself, without opening the
+    # dashboard to check which criteria were active.
+    extra_chips = []
+    if criteria.get("ascensor"):
+        extra_chips.append("con ascensor")
+    if criteria.get("exclude_bajos"):
+        extra_chips.append("sin bajos")
+    if criteria.get("exclude_no_disponible"):
+        extra_chips.append("solo disponibles")
+    extra_label = (" · " + " · ".join(extra_chips)) if extra_chips else ""
+
+    size_label = (
+        f"{criteria.get('min_size', 0)}-{criteria['max_size']} m²"
+        if criteria.get("max_size")
+        else f"≥ {criteria.get('min_size', 0)} m²"
+    )
+
     rows = "".join(_format_match_row(m) for m in matches)
 
     return (
@@ -279,8 +305,9 @@ def _build_email_html(
         "</div>"
         f"<div style='font-size:13px;color:#cbd5e1;margin-top:8px;'>"
         f"Desde {since.isoformat()} · {n_barrios} barrios · ≤ €{criteria.get('max_price', 0):,} · "
-        f"≥ {criteria.get('min_size', 0)} m² · "
-        f"{criteria.get('min_rooms', 0)}-{criteria.get('max_rooms', 99)} habitaciones · {seller_label}"
+        f"{size_label} · "
+        f"{criteria.get('min_rooms', 0)}-{criteria.get('max_rooms', 99)} habitaciones · "
+        f"{seller_label}{extra_label}"
         "</div>"
         f"<div style='font-size:12px;color:#94a3b8;margin-top:6px;'>{barrios_chip}</div>"
         "</td></tr>"
