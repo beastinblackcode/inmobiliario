@@ -58,6 +58,7 @@ DEFAULT_CRITERIA: dict[str, Any] = {
     "ascensor":   False,                  # True → only listings with a lift
     "exclude_bajos":       False,         # True → drop Bajo / Entreplanta
     "exclude_no_disponible": False,       # True → drop nuda propiedad, ocupados…
+    "stretch_from": None,                 # price above which a seller signal is required
 }
 
 
@@ -86,6 +87,15 @@ _NO_DISPONIBLE_RE = (
     r"|alquilad[oa]|con\s+inquilino|inquilinos"
     r"|subasta|proindiviso|ejecuci[oó]n\s+judicial"
 )
+
+
+# Stretch band: listings priced between ``stretch_from`` and ``max_price``
+# are only worth showing when the seller has a reason to negotiate.  Live
+# data (Moratalaz, sep-2026) shows the asking price barely moves before a
+# listing exits (−0.6 % on average), so a fresh listing at 370k will not
+# close at 300k; one that has sat for two months or already cut its price
+# might.  Either signal qualifies.
+STRETCH_MIN_DAYS = 60
 
 
 def _clamp(value: int, lo: int, hi: int) -> int:
@@ -164,6 +174,15 @@ def _apply_criteria(df: pd.DataFrame, c: dict) -> pd.DataFrame:
         out = out[out["barrio"].isin(c["barrios"])]
     if c.get("max_price"):
         out = out[out["price"] <= c["max_price"]]
+    if c.get("stretch_from"):
+        # Missing ``days_on_market`` / ``num_drops`` count as "no signal",
+        # so a caller without them drops the band rather than letting
+        # unqualified listings through.
+        zeros = pd.Series(0, index=out.index)
+        days  = out.get("days_on_market", zeros).fillna(0)
+        drops = out.get("num_drops", zeros).fillna(0)
+        in_band = out["price"] > c["stretch_from"]
+        out = out[~in_band | (days >= STRETCH_MIN_DAYS) | (drops >= 1)]
     if c.get("min_size"):
         out = out[out["size_sqm"].fillna(0) >= c["min_size"]]
     if c.get("max_size"):
@@ -377,6 +396,16 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                      "ocupados o sin posesión, y pisos vendidos con inquilino.",
             )
 
+            stretch_from = st.number_input(
+                "Tramo con margen desde (€)",
+                min_value=0, max_value=5_000_000,
+                value=_clamp(criteria.get("stretch_from") or 0, 0, 5_000_000),
+                step=5_000,
+                help=f"Por encima de este precio (y hasta el máximo) solo se muestran "
+                     f"pisos con al menos {STRETCH_MIN_DAYS} días anunciados o alguna "
+                     f"bajada de precio. 0 = desactivado.",
+            )
+
             submitted = st.form_submit_button("💾 Guardar criterios", type="primary")
             if submitted:
                 new_criteria = {
@@ -390,6 +419,7 @@ def _render_criteria_form(criteria: dict, barrios_universe: list[str]) -> None:
                     "ascensor":   bool(ascensor),
                     "exclude_bajos":         bool(exclude_bajos),
                     "exclude_no_disponible": bool(exclude_no_disponible),
+                    "stretch_from": int(stretch_from) or None,
                 }
                 _save_criteria(new_criteria)
                 # Clear the per-criteria ranking cache so the new
@@ -415,6 +445,8 @@ def _render_summary_chip(criteria: dict, n_matches: int) -> None:
         lift_s += " · sin bajos"
     if criteria.get("exclude_no_disponible"):
         lift_s += " · solo disponibles"
+    if criteria.get("stretch_from"):
+        lift_s += f" · > €{criteria['stretch_from']:,} solo con margen"
     st.caption(
         f"📍 **{len(criteria['barrios'])} barrios** · "
         f"≤ €{criteria['max_price']:,} · "
@@ -509,6 +541,14 @@ def render_mi_zona_tab(df: pd.DataFrame) -> None:
         notarial_by_distrito = {d: v[1] for d, v in notarial_by_distrito.items()}
     except Exception:
         notarial_by_distrito = {}
+
+    # The stretch band needs ``num_drops``, which ``load_data`` doesn't
+    # carry.  Fetch it for the (small) band only.
+    if criteria.get("stretch_from"):
+        from database import get_drop_counts_for_listings
+        band = active_df["price"] > criteria["stretch_from"]
+        counts = get_drop_counts_for_listings(active_df.loc[band, "listing_id"].tolist())
+        active_df["num_drops"] = active_df["listing_id"].map(counts).fillna(0).astype(int)
 
     # Filter to matching universe so the summary chip is accurate.
     matching = _apply_criteria(active_df, criteria)

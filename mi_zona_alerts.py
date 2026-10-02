@@ -20,6 +20,10 @@ Two rows in ``user_preferences`` per user:
   * ``mi_zona_criteria``       — the dict the dashboard reads/writes.
   * ``mi_zona_alerts_watermark`` — ``{"date": "YYYY-MM-DD"}`` of the
     newest ``first_seen_date`` already considered.
+  * ``mi_zona_stretch_watermark`` — date of the last run, only when the
+    criteria set ``stretch_from``.  Listings in the stretch band are not
+    alerted when they appear but when they gain a seller signal (price
+    cut or ``STRETCH_MIN_DAYS`` on market) after this date.
 
 Bootstrap: on the very first run for a user, the watermark is set to
 *today* without sending email.  Otherwise the first run would dump
@@ -70,6 +74,10 @@ from user_preferences import get_user_pref, set_user_pref
 
 PREF_CRITERIA_KEY  = "mi_zona_criteria"
 PREF_WATERMARK_KEY = "mi_zona_alerts_watermark"
+# Separate from the first-seen watermark: stretch events (price cut, 60th
+# day) happen on listings that are not new, so they are windowed by the
+# date of the last run instead.
+PREF_STRETCH_WATERMARK_KEY = "mi_zona_stretch_watermark"
 
 DEFAULT_MIN_MARGIN_PCT = 5.0
 DEFAULT_MAX_ALERTS     = 10
@@ -101,15 +109,23 @@ def _write_watermark(username: str, d: date) -> None:
     set_user_pref(username, PREF_WATERMARK_KEY, {"date": d.isoformat()})
 
 
+def _read_stretch_watermark(username: str) -> Optional[date]:
+    data = get_user_pref(username, PREF_STRETCH_WATERMARK_KEY) or {}
+    return _to_date(data.get("date"))
+
+
+def _write_stretch_watermark(username: str, d: date) -> None:
+    set_user_pref(username, PREF_STRETCH_WATERMARK_KEY, {"date": d.isoformat()})
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Data loading
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _load_active_listings_since(watermark: date) -> pd.DataFrame:
-    """Active listings whose ``first_seen_date`` is strictly *after* watermark.
-
-    Strict ``>`` so we don't replay the boundary day on each run.
+def _load_active_listings(where: str, params: tuple) -> pd.DataFrame:
+    """Active listings matching ``where``, with the columns the criteria
+    filter and the offer engine read.
 
     ``description`` is in the projection because the criteria filter's
     ``exclude_no_disponible`` reads it.  Without the column the filter
@@ -140,14 +156,51 @@ def _load_active_listings_since(watermark: date) -> pd.DataFrame:
                    ) AS num_drops,
                    COALESCE((SELECT ABS(SUM(change_percent)) FROM price_history ph
                              WHERE ph.listing_id = listings.listing_id AND ph.change_percent < 0
-                            ), 0) AS total_drop_pct
+                            ), 0) AS total_drop_pct,
+                   (SELECT MAX(date_recorded) FROM price_history ph
+                    WHERE ph.listing_id = listings.listing_id AND ph.change_amount < 0
+                   ) AS last_drop_date
             FROM listings
-            WHERE status = 'active' AND first_seen_date > ?
+            WHERE status = 'active' AND {where}
             """,
-            (watermark.isoformat(),),
+            params,
         )
         rows = [dict(r) for r in cur.fetchall()]
     return pd.DataFrame(rows)
+
+
+def _load_active_listings_since(watermark: date) -> pd.DataFrame:
+    """Active listings whose ``first_seen_date`` is strictly *after* watermark.
+
+    Strict ``>`` so we don't replay the boundary day on each run.
+    """
+    return _load_active_listings("first_seen_date > ?", (watermark.isoformat(),))
+
+
+def _load_stretch_became_eligible(criteria: dict, since: date) -> pd.DataFrame:
+    """Stretch-band listings that gained a seller signal after ``since``.
+
+    The new-listings query can never surface the stretch band: a listing
+    published yesterday has neither 60 days on market nor a price cut, so
+    ``_apply_criteria`` drops it, and by the time it qualifies it is no
+    longer "new".  This catches it on the day it crosses — a price cut
+    recorded after ``since``, or its ``STRETCH_MIN_DAYS``-th day falling
+    after ``since`` — so each listing is alerted once per event.
+    """
+    from tabs.mi_zona_tab import STRETCH_MIN_DAYS
+    df = _load_active_listings(
+        "price > ? AND price <= ?",
+        (criteria["stretch_from"], criteria["max_price"]),
+    )
+    if df.empty:
+        return df
+    first_seen = df["first_seen_date"].map(_to_date)
+    last_drop  = df["last_drop_date"].map(_to_date)
+    dropped    = last_drop.map(lambda d: d is not None and d > since)
+    aged       = (df["days_on_market"].fillna(0) >= STRETCH_MIN_DAYS) & first_seen.map(
+        lambda d: d is not None and d + timedelta(days=STRETCH_MIN_DAYS) > since
+    )
+    return df[dropped | aged].reset_index(drop=True)
 
 
 def _load_all_active_for_comparables() -> pd.DataFrame:
@@ -282,6 +335,8 @@ def _build_email_html(
         extra_chips.append("sin bajos")
     if criteria.get("exclude_no_disponible"):
         extra_chips.append("solo disponibles")
+    if criteria.get("stretch_from"):
+        extra_chips.append(f"> €{criteria['stretch_from']:,} solo con margen")
     extra_label = (" · " + " · ".join(extra_chips)) if extra_chips else ""
 
     size_label = (
@@ -394,16 +449,41 @@ def run_alerts_for_user(
         return 0
 
     candidates = _load_active_listings_since(wm)
-    if candidates.empty:
+
+    # Stretch band: same bootstrap rule as the main watermark — the first
+    # run only starts the clock, otherwise every stale listing in the band
+    # would be alerted at once.
+    today = date.today()
+    stretch = pd.DataFrame()
+    if criteria.get("stretch_from") and criteria.get("max_price"):
+        swm = _read_stretch_watermark(username)
+        if swm is None:
+            if not dry_run:
+                _write_stretch_watermark(username, today)
+        else:
+            stretch = _load_stretch_became_eligible(criteria, swm)
+            if not candidates.empty and not stretch.empty:
+                stretch = stretch[~stretch["listing_id"].isin(candidates["listing_id"])]
+
+    def _advance(new_wm: date) -> None:
+        _write_watermark(username, new_wm)
+        if criteria.get("stretch_from"):
+            _write_stretch_watermark(username, today)
+
+    if candidates.empty and stretch.empty:
         print(f"  · [{username}] no new listings since {wm}")
+        if not dry_run and criteria.get("stretch_from"):
+            _write_stretch_watermark(username, today)
         return 0
 
     # Always advance the watermark *before* filtering, so an empty
     # criteria match doesn't make us re-query the same window forever.
+    # ``max`` with the old value: a run with only stretch events must not
+    # move the first-seen watermark backwards.
     new_wm = max(
-        _to_date(d) for d in candidates["first_seen_date"]
-        if _to_date(d) is not None
+        [wm] + [d for d in map(_to_date, candidates.get("first_seen_date", [])) if d is not None]
     )
+    candidates = pd.concat([candidates, stretch], ignore_index=True)
 
     all_active = _load_all_active_for_comparables()
     notarial   = _load_notarial_by_distrito()
@@ -419,7 +499,7 @@ def run_alerts_for_user(
             f"0 with margin ≥ {min_margin}% — silent, watermark → {new_wm}"
         )
         if not dry_run:
-            _write_watermark(username, new_wm)
+            _advance(new_wm)
         return 0
 
     html    = _build_email_html(matches, criteria, username, since=wm)
@@ -435,7 +515,7 @@ def run_alerts_for_user(
 
     ok = _send(html, subject, recipient_override)
     if ok:
-        _write_watermark(username, new_wm)
+        _advance(new_wm)
         print(f"  · [{username}] ✅ {len(matches)} matches enviados · watermark → {new_wm}")
     else:
         print(f"  · [{username}] ❌ envío falló · watermark NO avanzado (reintentará)")
