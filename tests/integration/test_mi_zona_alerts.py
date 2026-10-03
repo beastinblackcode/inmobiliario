@@ -224,3 +224,96 @@ def test_max_alerts_caps_output(sqlite_db: Path, monkeypatch):
     assert sent == 1
     # ``1 oportunidad nueva`` (singular) when only one is sent.
     assert "1 oportunidad" in captured["subject"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Stretch band — alerted on the day a listing gains a seller signal
+# ──────────────────────────────────────────────────────────────────────
+
+
+_STRETCH_CRITERIA = {
+    "barrios": ["Acacias"], "max_price": 400_000, "stretch_from": 330_000,
+    "min_size": 50, "min_rooms": 1, "max_rooms": 4, "seller_any": True,
+}
+
+
+def _record_drop(db: Path, listing_id: str, when: date) -> None:
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO price_history (listing_id, price, date_recorded, change_amount, change_percent) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (listing_id, 360_000, when.isoformat(), -10_000, -2.7),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def captured_send(monkeypatch) -> dict:
+    import mi_zona_alerts
+    captured: dict = {}
+
+    def fake_send(html, subject, recipient_override):
+        captured["html"] = html
+        return True
+
+    monkeypatch.setattr(mi_zona_alerts, "_send", fake_send)
+    return captured
+
+
+def test_stretch_alerts_listing_on_price_cut(sqlite_db: Path, captured_send: dict):
+    """C3 (360k, old) cut its price today → alerted.  C2/C5 sit in the band
+    too, but crossed 60 days long ago and have no new cut → not alerted."""
+    from user_preferences import set_user_pref, get_user_pref
+    from mi_zona_alerts import (run_alerts_for_user, PREF_CRITERIA_KEY,
+                                PREF_WATERMARK_KEY, PREF_STRETCH_WATERMARK_KEY)
+
+    set_user_pref("luis", PREF_CRITERIA_KEY, _STRETCH_CRITERIA)
+    set_user_pref("luis", PREF_WATERMARK_KEY, {"date": (date.today() - timedelta(days=30)).isoformat()})
+    yesterday = date.today() - timedelta(days=1)
+    set_user_pref("luis", PREF_STRETCH_WATERMARK_KEY, {"date": yesterday.isoformat()})
+    _record_drop(sqlite_db, "C3", date.today())
+
+    run_alerts_for_user("luis", min_margin=-100.0, max_alerts=10,
+                        dry_run=False, recipient_override=None)
+
+    html = captured_send["html"]
+    assert "Comp 3" in html and "Fresh match" in html
+    assert "Comp 2" not in html and "Comp 5" not in html
+    assert get_user_pref("luis", PREF_STRETCH_WATERMARK_KEY)["date"] == date.today().isoformat()
+
+
+def test_stretch_first_run_only_starts_the_clock(sqlite_db: Path, captured_send: dict):
+    from user_preferences import set_user_pref, get_user_pref
+    from mi_zona_alerts import (run_alerts_for_user, PREF_CRITERIA_KEY,
+                                PREF_WATERMARK_KEY, PREF_STRETCH_WATERMARK_KEY)
+
+    set_user_pref("luis", PREF_CRITERIA_KEY, _STRETCH_CRITERIA)
+    set_user_pref("luis", PREF_WATERMARK_KEY, {"date": (date.today() - timedelta(days=30)).isoformat()})
+    _record_drop(sqlite_db, "C3", date.today())
+
+    run_alerts_for_user("luis", min_margin=-100.0, max_alerts=10,
+                        dry_run=False, recipient_override=None)
+
+    assert "Comp 3" not in captured_send["html"]
+    assert get_user_pref("luis", PREF_STRETCH_WATERMARK_KEY)["date"] == date.today().isoformat()
+
+
+def test_stretch_only_run_keeps_first_seen_watermark(sqlite_db: Path, captured_send: dict):
+    """No new listings, one stretch event: alert it, and don't move the
+    first-seen watermark backwards to the old listing's date."""
+    from user_preferences import set_user_pref, get_user_pref
+    from mi_zona_alerts import (run_alerts_for_user, PREF_CRITERIA_KEY,
+                                PREF_WATERMARK_KEY, PREF_STRETCH_WATERMARK_KEY)
+
+    today = date.today()
+    set_user_pref("luis", PREF_CRITERIA_KEY, _STRETCH_CRITERIA)
+    set_user_pref("luis", PREF_WATERMARK_KEY, {"date": today.isoformat()})
+    set_user_pref("luis", PREF_STRETCH_WATERMARK_KEY, {"date": (today - timedelta(days=1)).isoformat()})
+    _record_drop(sqlite_db, "C3", today)
+
+    sent = run_alerts_for_user("luis", min_margin=-100.0, max_alerts=10,
+                               dry_run=False, recipient_override=None)
+
+    assert sent == 1 and "Comp 3" in captured_send["html"]
+    assert get_user_pref("luis", PREF_WATERMARK_KEY)["date"] == today.isoformat()
